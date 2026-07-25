@@ -22,7 +22,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { toast } from "sonner";
-import { Loader2, Plus, Trash2, Pencil, Filter } from "lucide-react";
+import { Loader2, Plus, Trash2, Pencil, Filter, Star } from "lucide-react";
 import { ExcludePatternPreset } from "@prisma/client";
 import {
   getExcludePatternPresets,
@@ -51,6 +51,7 @@ export function ExcludePatternPresetList() {
   const [editTarget, setEditTarget] = useState<ExcludePatternPreset | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ExcludePatternPreset | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isSettingDefault, setIsSettingDefault] = useState<string | null>(null);
 
   const fetchPresets = useCallback(async () => {
     setLoading(true);
@@ -82,11 +83,36 @@ export function ExcludePatternPresetList() {
     }
   };
 
+  const handleToggleDefault = async (preset: ExcludePatternPreset) => {
+    setIsSettingDefault(preset.id);
+    const res = await updateExcludePatternPreset(preset.id, { isDefault: !preset.isDefault });
+    if (res.success) {
+      toast.success(
+        preset.isDefault
+          ? `"${preset.name}" is no longer pre-selected on new sources`
+          : `"${preset.name}" will be pre-selected on new directory sources`
+      );
+      fetchPresets();
+    } else {
+      toast.error(res.error || "Failed to update preset");
+    }
+    setIsSettingDefault(null);
+  };
+
   const columns: ColumnDef<ExcludePatternPreset>[] = [
     {
       accessorKey: "name",
       header: "Name",
-      cell: ({ row }) => <span className="font-medium">{row.original.name}</span>,
+      cell: ({ row }) => (
+        <div className="flex items-center gap-2">
+          <span className="font-medium">{row.original.name}</span>
+          {row.original.isDefault && (
+            <Badge variant="outline" className="text-xs border-yellow-500 text-yellow-600">
+              Default
+            </Badge>
+          )}
+        </div>
+      ),
     },
     {
       accessorKey: "patterns",
@@ -118,14 +144,29 @@ export function ExcludePatternPresetList() {
           <Button
             variant="ghost"
             size="icon"
+            title={row.original.isDefault ? "Stop pre-selecting on new sources" : "Pre-select on new directory sources"}
+            onClick={() => handleToggleDefault(row.original)}
+            disabled={isSettingDefault === row.original.id}
+          >
+            {isSettingDefault === row.original.id ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Star className={`h-4 w-4 ${row.original.isDefault ? "fill-yellow-500 text-yellow-500" : "text-muted-foreground"}`} />
+            )}
+          </Button>
+          {/* A built-in preset stays editable - its patterns are a starting point, not a rule -
+              but it cannot be deleted, so unstarring is how you opt out of it. */}
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={() => setEditTarget(row.original)}
-            disabled={row.original.isSystem}
           >
             <Pencil className="h-4 w-4" />
           </Button>
           <Button
             variant="ghost"
             size="icon"
+            title={row.original.isSystem ? "Built-in presets cannot be deleted" : undefined}
             onClick={() => setDeleteTarget(row.original)}
             disabled={row.original.isSystem}
           >

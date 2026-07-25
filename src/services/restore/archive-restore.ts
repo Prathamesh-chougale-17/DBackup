@@ -29,6 +29,7 @@ import { openArchiveEntry } from "@/lib/archive/reader";
 import { forEachSnapshotFile, hashingStream } from "@/lib/archive/chain-source";
 import { getMaxConcurrentFiles } from "@/lib/settings/file-concurrency";
 import { resolveSelection } from "@/lib/archive/browse";
+import { matchesAnyExcludePattern } from "@/lib/adapters/storage/common/download-directory";
 import { entryKey, IndexFileLine } from "@/lib/archive/types";
 import { getTempDir } from "@/lib/temp-dir";
 import { openArchiveForRestore } from "./file-restore";
@@ -144,6 +145,7 @@ export async function restoreArchiveSnapshot(
             // Resolve every target up front, so a misconfigured source is reported before
             // any bytes move rather than midway through.
             const targets = new Map<string, DirectoryTarget>();
+            const excludePatterns = (input.excludePatterns ?? []).filter((p) => p.trim().length > 0);
             const workItems: { src: string; file: IndexFileLine }[] = [];
             const perSourceTotals = new Map<string, number>();
             const labels = new Map(index.directories.map((d) => [d.src, d.label]));
@@ -181,15 +183,23 @@ export async function restoreArchiveSnapshot(
                 }
 
                 // A subset of paths when the user picked one, the whole source otherwise.
-                const files = mappingEntry.paths && mappingEntry.paths.length > 0
+                const selectedFiles = mappingEntry.paths && mappingEntry.paths.length > 0
                     ? resolveSelection(index, dir.src, mappingEntry.paths)
                     : index.files.filter((f) => f.src === dir.src);
+
+                // Excluded files are dropped here rather than counted as failures: they were
+                // never meant to be written, so they must not colour the run's status.
+                const files = excludePatterns.length > 0
+                    ? selectedFiles.filter((f) => !matchesAnyExcludePattern(f.p, excludePatterns))
+                    : selectedFiles;
+                const excludedHere = selectedFiles.length - files.length;
 
                 perSourceTotals.set(dir.src, files.length);
                 for (const file of files) workItems.push({ src: dir.src, file });
 
                 log(
-                    `Directory '${dir.label}': restoring ${files.length} of ${dir.fileCount} file(s) to ${targets.get(dir.src)!.label}`,
+                    `Directory '${dir.label}': restoring ${files.length} of ${dir.fileCount} file(s) to ${targets.get(dir.src)!.label}`
+                    + (excludedHere > 0 ? ` (${excludedHere} skipped by exclude patterns)` : ''),
                     'info', 'storage'
                 );
             }

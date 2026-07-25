@@ -25,6 +25,7 @@ import { readArchiveManifest, readArchiveIndex } from "@/lib/archive/reader";
 import { forEachSnapshotFile, hashingStream, ChainReaderOptions } from "@/lib/archive/chain-source";
 import { checkChainCompleteness } from "@/lib/archive/chain";
 import { resolveSelection, totalSize } from "@/lib/archive/browse";
+import { matchesAnyExcludePattern } from "@/lib/adapters/storage/common/download-directory";
 import { getProfileMasterKey } from "@/services/backup/encryption-service";
 import { getMaxConcurrentFiles } from "@/lib/settings/file-concurrency";
 import { archiveIndexService } from "@/services/backup/archive-index-service";
@@ -66,6 +67,11 @@ export interface FileRestoreInput {
      * means every file it describes, wherever in the chain the bytes live.
      */
     selections?: FileRestoreSelection[];
+    /**
+     * Glob patterns whose matching files are left out, same syntax as a backup's exclude
+     * patterns so a preset works on both sides.
+     */
+    excludePatterns?: string[];
     target: FileRestoreTarget;
 }
 
@@ -184,11 +190,18 @@ export async function openArchiveForRestore(storageConfigId: string, file: strin
 }
 
 /** Expands the caller's selection into concrete index lines, keyed by directory source. */
-function resolveFiles(index: ArchiveIndex, selections?: FileRestoreSelection[]): { src: string; file: IndexFileLine }[] {
+function resolveFiles(
+    index: ArchiveIndex,
+    selections?: FileRestoreSelection[],
+    excludePatterns?: string[]
+): { src: string; file: IndexFileLine }[] {
+    const patterns = (excludePatterns ?? []).filter((p) => p.trim().length > 0);
+    const keep = (file: IndexFileLine) => patterns.length === 0 || !matchesAnyExcludePattern(file.p, patterns);
+
     // No selection means the whole snapshot. This is what the Storage Explorer's download
     // uses, so a user gets the complete contents rather than an incremental's delta.
     if (!selections || selections.length === 0) {
-        return index.files.map((file) => ({ src: file.src, file }));
+        return index.files.filter(keep).map((file) => ({ src: file.src, file }));
     }
 
     const resolved: { src: string; file: IndexFileLine }[] = [];
@@ -199,6 +212,7 @@ function resolveFiles(index: ArchiveIndex, selections?: FileRestoreSelection[]):
             ? resolveSelection(index, selection.src, selection.paths)
             : index.files.filter((f) => f.src === selection.src);
         for (const file of files) {
+            if (!keep(file)) continue;
             const key = `${file.src}::${file.p}`;
             if (seen.has(key)) continue;
             seen.add(key);
@@ -220,7 +234,7 @@ export interface FileRestorePlan {
 export async function planFileRestore(input: FileRestoreInput): Promise<FileRestorePlan> {
     const archive = await openArchiveForRestore(input.storageConfigId, input.file);
     try {
-        const files = resolveFiles(archive.index, input.selections);
+        const files = resolveFiles(archive.index, input.selections, input.excludePatterns);
         return {
             fileCount: files.length,
             totalBytes: totalSize(files.map((f) => f.file)),
@@ -240,7 +254,7 @@ export async function planFileRestore(input: FileRestoreInput): Promise<FileRest
  */
 export async function streamFileRestore(input: FileRestoreInput): Promise<NodeJS.ReadableStream> {
     const archive = await openArchiveForRestore(input.storageConfigId, input.file);
-    const files = resolveFiles(archive.index, input.selections);
+    const files = resolveFiles(archive.index, input.selections, input.excludePatterns);
 
     if (files.length === 0) {
         await archive.dispose();
@@ -361,7 +375,7 @@ export async function restoreFilesToStorage(
     }
 
     const archive = await openArchiveForRestore(input.storageConfigId, input.file);
-    const files = resolveFiles(archive.index, input.selections);
+    const files = resolveFiles(archive.index, input.selections, input.excludePatterns);
     const targets = await resolveTargets(input, [...new Set(files.map((f) => f.src))]);
 
     if (files.length === 0) {

@@ -18,7 +18,7 @@ import { RetentionPolicyPicker, DEFAULT_RETENTION_SENTINEL } from "@/components/
 import { NamingTemplatePicker } from "@/components/templates/naming-template-picker";
 import { NotificationTemplatePicker } from "@/components/templates/notification-template-picker";
 import { ExcludePatternPresetPicker } from "@/components/templates/exclude-pattern-preset-picker";
-import { getSchedulePresets, getNotificationTemplates } from "@/app/actions/templates";
+import { getSchedulePresets, getNotificationTemplates, getExcludePatternPresets } from "@/app/actions/templates";
 import type { SchedulePreset } from "@prisma/client";
 import { SchedulePresetDialog } from "@/components/settings/templates/schedule-preset-list";
 import { AdapterIcon } from "@/components/adapter/adapter-icon";
@@ -517,6 +517,18 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
         });
     }, []);
 
+    // Presets starred as default, applied to directory sources added from here on. Loaded once
+    // and only used when a new row is created, so editing a job never rewrites what it already
+    // had - an existing job's exclusions must not change behind the user's back.
+    const [defaultExcludePresetIds, setDefaultExcludePresetIds] = useState<string[]>([]);
+    useEffect(() => {
+        getExcludePatternPresets().then((res) => {
+            if (res.success && res.data) {
+                setDefaultExcludePresetIds(res.data.filter((p) => p.isDefault).map((p) => p.id));
+            }
+        });
+    }, []);
+
     // Pre-select the default notification template for new jobs only.
     // Does not override an existing selection (e.g. when editing).
     useEffect(() => {
@@ -978,7 +990,7 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
                                             type="button"
                                             variant="outline"
                                             size="sm"
-                                            onClick={() => appendSource({ configId: "", path: "", excludePatterns: [], excludePatternPresetIds: [] })}
+                                            onClick={() => appendSource({ configId: "", path: "", excludePatterns: [], excludePatternPresetIds: defaultExcludePresetIds })}
                                             disabled={directorySourceOptions.length === 0}
                                         >
                                             <Plus className="h-4 w-4 mr-1" />

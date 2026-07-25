@@ -31,6 +31,8 @@ const RestoreFilesSchema = z.object({
         paths: z.array(z.string().min(1)).min(1).optional(),
     })).min(1).optional(),
     target: TargetSchema,
+    /** Glob patterns whose matching files are left out of the restore entirely. */
+    excludePatterns: z.array(z.string()).optional(),
     /** Resolve the selection and report its size without restoring anything. */
     dryRun: z.boolean().optional(),
     /**
@@ -58,7 +60,7 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
         if (!parsed.success) {
             return NextResponse.json({ success: false, error: parsed.error.issues[0]?.message ?? "Invalid request" }, { status: 400 });
         }
-        const { file, selections, target, dryRun, prepare } = parsed.data;
+        const { file, selections, target, excludePatterns, dryRun, prepare } = parsed.data;
 
         // A download only reads the backup, so it needs the download permission. Writing
         // files back into a storage destination is a restore and is gated accordingly.
@@ -67,7 +69,7 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
             target.kind === "download" ? PERMISSIONS.STORAGE.DOWNLOAD : PERMISSIONS.STORAGE.RESTORE
         );
 
-        const input: FileRestoreInput = { storageConfigId: id, file, selections, target };
+        const input: FileRestoreInput = { storageConfigId: id, file, selections, excludePatterns, target };
 
         if (dryRun) {
             return NextResponse.json({ success: true, data: await planFileRestore(input) });
@@ -80,7 +82,7 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
             // download the browser has already started writing to disk.
             const plan = await planFileRestore(input);
             const fileName = `${path.basename(file).replace(/\.[^.]+$/, "")}-files.tar.gz`;
-            const token = generateSelectionDownloadToken({ storageId: id, file, userId: ctx.userId, fileName, selections });
+            const token = generateSelectionDownloadToken({ storageId: id, file, userId: ctx.userId, fileName, selections, excludePatterns });
 
             return NextResponse.json({ success: true, data: { token, fileName, ...plan } });
         }
@@ -153,6 +155,7 @@ export async function GET(req: NextRequest, props: { params: Promise<{ id: strin
             storageConfigId: id,
             file: claim.file,
             selections: claim.selection.selections,
+            excludePatterns: claim.selection.excludePatterns,
             target: { kind: "download" },
         });
 

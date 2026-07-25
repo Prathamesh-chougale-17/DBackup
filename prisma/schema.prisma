@@ -113,6 +113,7 @@ model ExcludePatternPreset {
   name        String      @unique
   description String?
   patterns    String      // JSON array of glob-pattern strings, same shape as JobSource.excludePatterns
+  isDefault   Boolean     @default(false) // Pre-selected on newly added directory sources; several may be default
   isSystem    Boolean     @default(false)
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt

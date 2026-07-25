@@ -29,6 +29,8 @@ interface DownloadToken {
         /** The token is only honoured for the session that created it. */
         userId: string;
         selections?: DownloadSelection[];
+        /** Carried with the token so the browser's GET applies the same exclusions. */
+        excludePatterns?: string[];
         fileName: string;
     };
     /**
@@ -125,6 +127,7 @@ export function generateSelectionDownloadToken(params: {
     userId: string;
     fileName: string;
     selections?: DownloadSelection[];
+    excludePatterns?: string[];
 }): string {
     const token = crypto.randomBytes(32).toString("hex");
     const now = Date.now();
@@ -136,7 +139,12 @@ export function generateSelectionDownloadToken(params: {
         createdAt: now,
         expiresAt: now + TOKEN_TTL_MS,
         used: false,
-        selection: { userId: params.userId, selections: params.selections, fileName: params.fileName },
+        selection: {
+            userId: params.userId,
+            selections: params.selections,
+            excludePatterns: params.excludePatterns,
+            fileName: params.fileName,
+        },
     });
 
     return token;

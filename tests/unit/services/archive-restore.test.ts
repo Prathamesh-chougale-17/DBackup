@@ -426,6 +426,41 @@ describe('restoreArchiveSnapshot', () => {
         expect(result.errors.some((e) => e.error.includes('No restore target specified'))).toBe(true);
     });
 
+    it('skips files matching an exclude pattern instead of restoring them', async () => {
+        // Same pattern syntax as a backup's excludes, so a preset works on both sides. The
+        // motivating case: Dropbox refuses .DS_Store outright, so restoring it can only fail.
+        const { sourceAdapter } = await buildRemoteBackup([], {
+            'keep.txt': 'A', '.DS_Store': 'junk', 'sub/Thumbs.db': 'junk',
+        });
+        const storageAdapter = makeFakeStorageAdapter();
+        wire({ 'source-fs': sourceAdapter, 'local-filesystem': storageAdapter });
+
+        const result = await restoreArchiveSnapshot(makeInput({
+            directoryMapping: [{ entryId: 'src-1', targetConfigId: 'target-storage-1', targetPath: '/restore', selected: true }],
+            excludePatterns: ['.DS_Store', 'Thumbs.db'],
+        }), { log: vi.fn(), updateDetail: vi.fn(), setStage: vi.fn() });
+
+        const uploaded = vi.mocked(storageAdapter.upload).mock.calls.map((c: unknown[]) => c[2]);
+        expect(uploaded).toEqual(['/restore/keep.txt']);
+        // Excluded files were never meant to be written, so they are not failures.
+        expect(result.status).toBe('Success');
+        expect(result.errors).toHaveLength(0);
+    });
+
+    it('restores everything when no exclude pattern is given', async () => {
+        // Guard for the test above: the filter must not run unless the caller asked for it.
+        const { sourceAdapter } = await buildRemoteBackup([], { 'keep.txt': 'A', '.DS_Store': 'junk' });
+        const storageAdapter = makeFakeStorageAdapter();
+        wire({ 'source-fs': sourceAdapter, 'local-filesystem': storageAdapter });
+
+        await restoreArchiveSnapshot(makeInput({
+            directoryMapping: [{ entryId: 'src-1', targetConfigId: 'target-storage-1', targetPath: '/restore', selected: true }],
+        }), { log: vi.fn(), updateDetail: vi.fn(), setStage: vi.fn() });
+
+        const uploaded = vi.mocked(storageAdapter.upload).mock.calls.map((c: unknown[]) => c[2]);
+        expect(uploaded).toHaveLength(2);
+    });
+
     it('serialises writes for an adapter that cannot take them in parallel', async () => {
         // Dropbox permits one write per account and answers the rest with 429, so honouring
         // the user's higher setting there would only build a queue of retries. An adapter that

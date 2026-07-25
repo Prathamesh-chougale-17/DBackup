@@ -44,6 +44,7 @@ export async function updateExcludePatternPreset(
     name?: string;
     description?: string;
     patterns?: string[];
+    isDefault?: boolean;
   }
 ) {
   const preset = await prisma.excludePatternPreset.findUnique({ where: { id } });
@@ -64,11 +65,19 @@ export async function updateExcludePatternPreset(
       ...(input.name !== undefined && { name: input.name }),
       ...(input.description !== undefined && { description: input.description }),
       ...(input.patterns !== undefined && { patterns: JSON.stringify(input.patterns) }),
+      // Unlike a naming template, several presets can be default at once: their patterns are
+      // unioned, so marking one does not have to unmark the others.
+      ...(input.isDefault !== undefined && { isDefault: input.isDefault }),
     },
   });
 
   log.info("Exclude pattern preset updated", { id });
   return updated;
+}
+
+/** Presets pre-selected on a newly added directory source. */
+export async function getDefaultExcludePatternPresets() {
+  return prisma.excludePatternPreset.findMany({ where: { isDefault: true }, orderBy: { name: "asc" } });
 }
 
 /**
@@ -80,6 +89,16 @@ export async function updateExcludePatternPreset(
 export async function deleteExcludePatternPreset(id: string) {
   const preset = await prisma.excludePatternPreset.findUnique({ where: { id } });
   if (!preset) throw new NotFoundError("ExcludePatternPreset", id);
+
+  // A system preset ships with the product and stays available; its patterns can be edited,
+  // and it can be unstarred or simply left unselected, so there is no need to remove it.
+  if (preset.isSystem) {
+    throw new ServiceError(
+      "ExcludePatternPresetService",
+      "deleteExcludePatternPreset",
+      `"${preset.name}" is a built-in preset and cannot be deleted. Edit its patterns or remove its default star instead.`
+    );
+  }
 
   await prisma.excludePatternPreset.delete({ where: { id } });
   log.info("Exclude pattern preset deleted", { id });

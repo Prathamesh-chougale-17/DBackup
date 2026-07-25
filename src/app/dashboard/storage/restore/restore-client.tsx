@@ -12,7 +12,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { ArrowRight, ArrowLeft, FileIcon, AlertTriangle, ShieldAlert, Loader2, HardDrive, ChevronDown, ChevronUp, Server, ShieldCheck, HelpCircle, FolderInput, CheckCircle2, FolderOpen, MapPin, Download, GitBranch } from "lucide-react";
+import { ArrowRight, ArrowLeft, FileIcon, AlertTriangle, ShieldAlert, Loader2, HardDrive, ChevronDown, ChevronUp, Server, ShieldCheck, HelpCircle, FolderInput, CheckCircle2, FolderOpen, MapPin, Download, GitBranch, Filter } from "lucide-react";
 import { toast } from "sonner";
 import { FileInfo } from "@/app/dashboard/storage/columns";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -28,6 +28,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { RedisRestoreWizard } from "@/components/dashboard/storage/redis-restore-wizard";
 import { ArchiveFileTree, ArchiveTreeSelection } from "@/components/dashboard/storage/archive-file-tree";
 import { FolderPickerDialog } from "@/components/dashboard/storage/folder-picker-dialog";
+import { getExcludePatternPresets } from "@/app/actions/templates";
+import type { ExcludePatternPreset } from "@prisma/client";
 import { computeRestoreValidity } from "./restore-validation";
 import { parseRestoreScope, normalizeRestoreScope } from "@/components/dashboard/storage/restore-scope";
 
@@ -137,6 +139,16 @@ export function RestoreClient() {
     const [planError, setPlanError] = useState<string | null>(null);
     /** Which source's folder picker dialog is open, if any. */
     const [folderPickerFor, setFolderPickerFor] = useState<string | null>(null);
+    /**
+     * Exclude patterns applied to the whole restore, from presets and free-form entries.
+     *
+     * Useful for clutter a destination will not accept anyway - Dropbox refuses `.DS_Store`
+     * outright - without unticking files one by one in the tree. Presets starred as default
+     * come pre-selected, the same ones a new backup source would get.
+     */
+    const [excludePresets, setExcludePresets] = useState<ExcludePatternPreset[]>([]);
+    const [selectedExcludePresetIds, setSelectedExcludePresetIds] = useState<string[]>([]);
+    const [customExcludeInput, setCustomExcludeInput] = useState("");
 
     // Execution State
     const [restoring, setRestoring] = useState(false);
@@ -432,6 +444,33 @@ export function RestoreClient() {
             }));
     }, [dirConfig]);
 
+    // Exclude presets, pre-selecting the starred ones so the defaults a backup would use also
+    // apply here without the user having to remember them.
+    useEffect(() => {
+        if (!hasDirectories) return;
+        getExcludePatternPresets().then((res) => {
+            if (!res.success || !res.data) return;
+            setExcludePresets(res.data);
+            setSelectedExcludePresetIds(res.data.filter((p) => p.isDefault).map((p) => p.id));
+        });
+    }, [hasDirectories]);
+
+    /** Patterns from the chosen presets plus anything typed by hand, deduplicated. */
+    const excludePatterns = useMemo(() => {
+        const fromPresets = excludePresets
+            .filter((p) => selectedExcludePresetIds.includes(p.id))
+            .flatMap((p) => {
+                try {
+                    const parsed = JSON.parse(p.patterns);
+                    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+                } catch {
+                    return [];
+                }
+            });
+        const custom = customExcludeInput.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+        return [...new Set([...fromPresets, ...custom])];
+    }, [excludePresets, selectedExcludePresetIds, customExcludeInput]);
+
     // Server-side dry run over the current directory selection: resolves file count and
     // byte total, reports whether the destination can serve byte ranges, and surfaces a
     // broken incremental chain (missing archives, by name) before anything is restored.
@@ -449,7 +488,7 @@ export function RestoreClient() {
                 const res = await fetch(`/api/storage/${destinationId}/restore-files`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ file: file.path, selections, target: { kind: 'download' }, dryRun: true }),
+                    body: JSON.stringify({ file: file.path, selections, excludePatterns, target: { kind: 'download' }, dryRun: true }),
                 });
                 const data = await res.json();
                 if (data.success) {
@@ -466,7 +505,7 @@ export function RestoreClient() {
             }
         }, 500);
         return () => clearTimeout(timer);
-    }, [file, hasDirectories, buildSelections, destinationId]);
+    }, [file, hasDirectories, buildSelections, destinationId, excludePatterns]);
 
     const handleDownloadSelection = async () => {
         if (!file) return;
@@ -482,7 +521,7 @@ export function RestoreClient() {
             const res = await fetch(`/api/storage/${destinationId}/restore-files`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ file: file.path, selections, target: { kind: 'download' }, prepare: true }),
+                body: JSON.stringify({ file: file.path, selections, excludePatterns, target: { kind: 'download' }, prepare: true }),
             });
             const payload = await res.json().catch(() => ({ error: 'Download failed' }));
             if (!res.ok || !payload?.data?.token) {
@@ -568,6 +607,7 @@ export function RestoreClient() {
                 targetDatabaseName: targetDbName || undefined,
                 databaseMapping: mapping,
                 directoryMapping,
+                ...(excludePatterns.length > 0 ? { excludePatterns } : {}),
                 privilegedAuth: auth
             };
 
@@ -1090,6 +1130,45 @@ export function RestoreClient() {
                                         <AlertDescription className="text-xs ml-2">{planError}</AlertDescription>
                                     </Alert>
                                 )}
+
+                                {/* Pattern-based exclusions, applied on top of the tree selection.
+                                    Faster than unticking files one by one, and the way to leave
+                                    behind clutter a destination refuses outright. */}
+                                <div className="rounded-md border p-3 space-y-2">
+                                    <div className="flex items-center gap-2">
+                                        <Filter className="h-3.5 w-3.5 text-muted-foreground" />
+                                        <span className="text-sm font-medium">Exclude patterns</span>
+                                        {excludePatterns.length > 0 && (
+                                            <Badge variant="secondary" className="text-[10px] h-5 px-1.5">
+                                                {excludePatterns.length} active
+                                            </Badge>
+                                        )}
+                                    </div>
+                                    <p className="text-xs text-muted-foreground">
+                                        Files matching these are skipped. Same syntax as a backup&apos;s exclude patterns.
+                                    </p>
+                                    {excludePresets.length > 0 && (
+                                        <div className="flex flex-wrap gap-3">
+                                            {excludePresets.map((preset) => (
+                                                <label key={preset.id} className="flex items-center gap-1.5 text-sm">
+                                                    <Checkbox
+                                                        checked={selectedExcludePresetIds.includes(preset.id)}
+                                                        onCheckedChange={(checked) => setSelectedExcludePresetIds((prev) =>
+                                                            checked ? [...prev, preset.id] : prev.filter((id) => id !== preset.id)
+                                                        )}
+                                                    />
+                                                    <span>{preset.name}</span>
+                                                </label>
+                                            ))}
+                                        </div>
+                                    )}
+                                    <Input
+                                        value={customExcludeInput}
+                                        onChange={(e) => setCustomExcludeInput(e.target.value)}
+                                        placeholder="Additional patterns, comma separated (e.g. *.tmp, cache/**)"
+                                        className="h-8 text-xs font-mono"
+                                    />
+                                </div>
                                 {dirConfig.map(d => {
                                     const meta = directories.find(x => x.jobSourceId === d.entryId);
                                     return (

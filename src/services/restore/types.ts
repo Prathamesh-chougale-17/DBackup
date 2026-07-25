@@ -38,6 +38,14 @@ export interface RestoreInput {
     databaseMapping?: Record<string, string> | any[];
     /** Directory entries to restore from a combined (v2) archive - see DirectoryRestoreMapping. */
     directoryMapping?: DirectoryRestoreMapping[];
+    /**
+     * Glob patterns whose matching files are skipped, applied to every directory source.
+     *
+     * Same syntax as a backup's exclude patterns, so a preset can be reused on both sides.
+     * Useful for leaving behind clutter a destination will not take anyway - Dropbox refuses
+     * `.DS_Store` outright - without having to untick files one by one in the tree.
+     */
+    excludePatterns?: string[];
     privilegedAuth?: {
         user?: string;
         password?: string;

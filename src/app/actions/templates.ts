@@ -625,6 +625,7 @@ export async function updateExcludePatternPreset(
     name?: string;
     description?: string;
     patterns?: string[];
+    isDefault?: boolean;
   }
 ) {
   const headersList = await headers();
