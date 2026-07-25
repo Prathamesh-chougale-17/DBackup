@@ -1,0 +1,24 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dbackup",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev"],
+      "port": 3000,
+      "autoPort": true
+    },
+    {
+      "name": "dbackup-website",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "website", "dev"],
+      "port": 3001
+    },
+    {
+      "name": "dbackup-docs",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "docs", "run", "preview"],
+      "port": 4173
+    }
+  ]
+}

@@ -8,6 +8,7 @@ export default defineConfig({
   lang: 'en-US',
   cleanUrls: true, // Remove .html from URLs for better SEO
   lastUpdated: true, // Show last updated timestamp (uses git commit timestamps)
+  srcExclude: ['CLAUDE.md'], // Contributor guide, not a published docs page
   sitemap: {
     hostname: 'https://docs.dbackup.app'
   },
