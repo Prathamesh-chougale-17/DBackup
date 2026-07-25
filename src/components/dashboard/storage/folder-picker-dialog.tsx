@@ -89,7 +89,7 @@ export function FolderPickerDialog({ open, onOpenChange, configId, configName, o
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="flex max-h-[70vh] max-w-lg flex-col">
+            <DialogContent className="flex h-[70vh] max-w-lg flex-col">
                 <DialogHeader>
                     <DialogTitle>Choose a folder</DialogTitle>
                     <DialogDescription>
@@ -121,10 +121,12 @@ export function FolderPickerDialog({ open, onOpenChange, configId, configName, o
                     ))}
                 </div>
 
-                {/* Fixed height, deliberately without flex-1: in a flex column `flex-basis: 0%`
-                    takes over the main axis and overrides the height, so the list grew with its
-                    contents and spilled past the dialog instead of scrolling. */}
-                <ScrollArea className="h-80 rounded-md border">
+                {/* The dialog carries a definite height (h-, not max-h) so this can take the
+                    leftover space with flex-1: a ScrollArea's viewport is height:100%, which
+                    needs a definite height above it or it grows with its contents instead of
+                    scrolling. A fixed height here would instead push the footer out of a short
+                    window. */}
+                <ScrollArea className="min-h-0 flex-1 rounded-md border">
                     <div className="p-1">
                         {loading ? (
                             <div className="space-y-2 p-2">
