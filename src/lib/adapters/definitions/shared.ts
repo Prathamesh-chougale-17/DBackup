@@ -17,6 +17,18 @@ export type AdapterDefinition = {
      * config fields (inline user/password) are used as-is.
      */
     credentials?: { primary?: CredentialType; ssh?: CredentialType; primaryOptional?: boolean };
+    /**
+     * Storage only: how many files this adapter can usefully transfer at once as a directory
+     * source - a suggested starting point and a ceiling the connection may not exceed.
+     *
+     * Declared here rather than on the runtime adapter because the connection form has to show
+     * the range, and the form runs in the browser: importing the runtime adapters there would
+     * pull ssh2 and the cloud SDKs into the client bundle. Definitions are plain data.
+     *
+     * Omit it when the provider handles parallel transfers fine (S3, Google Drive, local),
+     * which is the common case - `DEFAULT_TRANSFER_CONCURRENCY` then applies.
+     */
+    transferConcurrency?: { default: number; max: number };
 }
 
 // Validation: Reject paths with null bytes or obvious shell injection patterns

@@ -1,4 +1,5 @@
 import path from "path";
+import os from "os";
 import fs from "fs/promises";
 import { RunnerContext } from "../types";
 import { resolveAdapterConfig } from "@/lib/adapters/config-resolver";
@@ -16,7 +17,7 @@ import { calculateFileChecksum } from "@/lib/crypto/checksum";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { PIPELINE_STAGES } from "@/lib/core/logs";
-import { getMaxConcurrentFiles } from "@/lib/settings/file-concurrency";
+import { resolveTransferConcurrency } from "@/lib/adapters/transfer-concurrency";
 
 const log = logger.child({ step: "combined-dump" });
 
@@ -178,7 +179,8 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
         if (dirTotal > 0) ctx.setStage(PIPELINE_STAGES.COLLECTING);
         // Files within a source are downloaded in parallel; over a network source the
         // per-file round trip dominates, so this is where most of the collection time is won.
-        const configuredConcurrency = dirTotal > 0 ? await getMaxConcurrentFiles() : 1;
+        // How many is decided per source: what one server welcomes another answers with rate
+        // limits, and the sources of a single job can be both.
         let dirDone = 0;
         for (const source of ctx.sources) {
             const displayPath = source.remotePath || "/";
@@ -233,10 +235,7 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
                 },
                 (msg, level, type, details) => ctx.log(`${logPrefix} ${msg}`, level, type ?? 'storage', details),
                 {
-                    // An adapter that serialises transfers anyway (Dropbox allows one write
-                    // per account) caps the setting, so reading from it never becomes a queue
-                    // of rate-limit retries.
-                    concurrency: Math.max(1, Math.min(configuredConcurrency, source.adapter.maxConcurrentTransfers ?? Infinity)),
+                    concurrency: resolveTransferConcurrency(source.adapter.id, readConfig),
                     ...(shouldDownload ? { shouldDownload } : {}),
                 }
             );
@@ -331,10 +330,11 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
             sourceType: job.source ? job.source.adapterId : DIRECTORY_ONLY_SOURCE_TYPE,
             engineVersion,
             compression: (job.compression as "NONE" | "GZIP" | "BROTLI" | undefined) ?? "NONE",
-            // Entries compress ahead of the sequential tar write, bounded by the same setting
-            // that limits parallel file transfers. Deliberately the configured value, not the
-            // per-adapter cap: this is local CPU work, unaffected by what a remote allows.
-            concurrency: configuredConcurrency,
+            // Entries compress and encrypt ahead of the sequential tar write. This is local CPU
+            // work, so it scales with cores rather than with anything a storage adapter allows -
+            // and it is capped because the work is bursty and the machine is also running the
+            // application. Falls back to 4 where the core count is unavailable.
+            concurrency: Math.max(2, Math.min(8, os.cpus().length || 4)),
             onProgress: (done, total, label) => {
                 ctx.updateStageProgress(Math.min(100, Math.round((done / total) * 100)));
                 ctx.updateDetail(`Packing ${done}/${total}: ${label}`);

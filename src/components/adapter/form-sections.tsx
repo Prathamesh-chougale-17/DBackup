@@ -24,6 +24,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { transferConcurrencyRange } from "@/lib/adapters/transfer-concurrency";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -133,6 +134,62 @@ function HealthCheckNotificationSwitch({
                 checked={disabled}
                 onCheckedChange={onChange}
             />
+        </div>
+    );
+}
+
+/**
+ * How many files this connection transfers at once, bounded by what the adapter allows.
+ *
+ * Belongs to the connection rather than to a global setting because the right number depends on
+ * the server at the other end - the same installation can hold a NAS that welcomes sixteen
+ * parallel transfers and a cloud drive that rate-limits above four.
+ */
+function TransferConcurrencyField({
+    adapterId,
+    value,
+    onChange,
+}: {
+    adapterId: string;
+    value: number | undefined;
+    onChange: (value: number) => void;
+}) {
+    const range = transferConcurrencyRange(adapterId);
+    // Clamped for display, not just on input: a ceiling lowered in a later version leaves stored
+    // values above it, and the runtime clamps them anyway. Showing the stored number would claim
+    // a parallelism the connection will never actually use.
+    const current = Math.min(range.max, value ?? range.default);
+    const fixed = range.max <= 1;
+
+    return (
+        <div className="rounded-lg border p-4 space-y-3">
+            <div className="flex items-center justify-between gap-4">
+                <div className="space-y-0.5">
+                    <Label htmlFor="max-concurrent-files">Parallel Transfers</Label>
+                    <p className="text-sm text-muted-foreground">
+                        Files read from or written to this connection at the same time.
+                    </p>
+                </div>
+                <Input
+                    id="max-concurrent-files"
+                    type="number"
+                    min={1}
+                    max={range.max}
+                    value={current}
+                    disabled={fixed}
+                    className="w-20 shrink-0"
+                    onChange={(e) => {
+                        const parsed = parseInt(e.target.value, 10);
+                        if (!Number.isFinite(parsed)) return;
+                        onChange(Math.min(range.max, Math.max(1, parsed)));
+                    }}
+                />
+            </div>
+            <p className="text-xs text-muted-foreground">
+                {range.max === range.default
+                    ? `This provider rate-limits concurrent transfers, so ${range.max} is both the default and the maximum.`
+                    : `Between 1 and ${range.max}, default ${range.default}. Higher is faster over a high-latency link, too high can exhaust a server's connection limit.`}
+            </p>
         </div>
     );
 }
@@ -981,6 +1038,15 @@ export function StorageFormContent({
                         <AdapterRolePicker
                             storageRole={storageRole ?? STORAGE_ROLES.DESTINATION}
                             onStorageRoleChange={onStorageRoleChange}
+                        />
+                    )}
+                    {/* Only for a directory source. A backup destination receives one archive
+                        plus two small sidecars per run, so there is nothing to parallelise. */}
+                    {storageRole === STORAGE_ROLES.SOURCE && (
+                        <TransferConcurrencyField
+                            adapterId={adapter.id}
+                            value={watch("config.maxConcurrentFiles")}
+                            onChange={(v) => setValue("config.maxConcurrentFiles", v, { shouldDirty: true })}
                         />
                     )}
                     {/* Only for a directory source: a snapshot of the place backups are

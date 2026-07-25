@@ -42,6 +42,8 @@ All notable changes to DBackup are documented here.
 
 ### 🔄 Changed
 
+- **storage**: How many files are transferred at once is now set per connection, on a directory source's Configuration tab, instead of once for the whole installation. The right number depends on the server at the other end - a NAS over SFTP is happy with sixteen parallel transfers where a rate-limited cloud drive is not - and one global number could only ever suit one of them. Each adapter states its own default and ceiling: SFTP and Rsync stop at 8 because every transfer is a fresh SSH login and OpenSSH refuses connections past `MaxStartups` (ten by default), and Dropbox stays at 4 whatever the field is set to. Backup destinations have no such field: a run writes one archive plus two small sidecars, so there is nothing to parallelise.
+
 - **templates**: The built-in "Standard" naming template now ends with `{chain}`, so an incremental backup reads `Job_2026-07-24_09-18-04_inc-001` instead of `inc-001-Job_2026-07-24_09-18-04`. Templates you created yourself are left untouched, as is a Standard template that was already edited.
 - **navigation**: Sources, Destinations and Notifications are now one page, **Connections**, with a tab per kind: Databases, Directory Sources, Backup Destinations and Notifications. Adapters are grouped by what they are rather than by the direction a job happens to use them in - which is what made a database "a source" even when restoring into it. The old routes redirect to the matching tab, and the active tab lives in the URL so links and bookmarks keep working.
 - **destinations**: A storage adapter now has one exclusive role, backup destination or directory source, instead of two independent toggles. They cannot be combined because a destination owns its configured path - the runner writes job and chain folders into it - while a source only reads folders out of it, so one adapter doing both would let a job back up its own archives. Existing adapters are migrated automatically.
@@ -67,6 +69,8 @@ All notable changes to DBackup are documented here.
 - **wiki**: Fixed the opening paragraph of the Backup Modes page, which had a sentence split across the intro note.
 
 ### 🧪 Tests
+
+- Fixed the adapter DTO tests intermittently timing out in a full run. They reset the module registry before each of six tests, which re-evaluated the entire adapter graph - every storage, database and notification SDK - six times over; the graph now loads once per file.
 
 - **backup**: Round-trip coverage for the archive format against awkward inputs - paths past 100 characters, unicode, spaces, empty files - verified with real `tar` and the standalone recovery kit, since "an unencrypted archive extracts with `tar -xf`" and "the kit reads what the writer emits" are promises only running them can prove.
 - **backup**: Regression coverage for the format's edge cases: TAR entries at the 8 GiB size boundary, incremental chains spanning several archives, chain-aware retention and deletion, restore path guards, and the SMB shadow copy lifecycle including release on failure and cancellation.

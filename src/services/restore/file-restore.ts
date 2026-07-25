@@ -28,7 +28,7 @@ import { checkChainCompleteness } from "@/lib/archive/chain";
 import { resolveSelection, totalSize } from "@/lib/archive/browse";
 import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
 import { getProfileMasterKey } from "@/services/backup/encryption-service";
-import { getMaxConcurrentFiles } from "@/lib/settings/file-concurrency";
+import { resolveTransferConcurrency } from "@/lib/adapters/transfer-concurrency";
 import { archiveIndexService } from "@/services/backup/archive-index-service";
 import { getTempDir } from "@/lib/temp-dir";
 import { ArchiveIndex, ArchiveManifest, IndexFileLine } from "@/lib/archive/types";
@@ -388,13 +388,14 @@ export async function restoreFilesToStorage(
     let restored = 0;
     let restoredBytes = 0;
 
-    // Write-back stages each file independently, so several run at once - the round-trip win
-    // when restoring to a network destination. An adapter that serialises writes anyway
-    // (Dropbox) caps it, so the setting cannot force it into a queue of retries.
-    const adapterCaps = [...targets.values()]
-        .map((t) => t.adapter.maxConcurrentTransfers)
-        .filter((n): n is number => typeof n === "number" && n > 0);
-    const concurrency = Math.max(1, Math.min(await getMaxConcurrentFiles(), ...adapterCaps, Infinity));
+    // Write-back stages each file independently, so several run at once - the round-trip
+    // win when restoring to a network destination. Each target states how many it can take;
+    // the files of every target share one pipeline, so the smallest wins. Anything else
+    // would push a rate-limited destination past what it said it could handle in order to
+    // keep a faster one busy.
+    const concurrency = Math.min(
+        ...[...targets.values()].map((t) => resolveTransferConcurrency(t.adapter.id, t.config)),
+    );
 
     const sessions = createDestinationSessions(concurrency);
 

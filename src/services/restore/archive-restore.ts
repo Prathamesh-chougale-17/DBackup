@@ -28,7 +28,7 @@ import { shouldRestoreDatabase, getTargetDatabaseName } from "@/lib/adapters/dat
 import { openArchiveEntry } from "@/lib/archive/reader";
 import { createDestinationSessions } from "./destination-sessions";
 import { forEachSnapshotFile, hashingStream } from "@/lib/archive/chain-source";
-import { getMaxConcurrentFiles } from "@/lib/settings/file-concurrency";
+import { resolveTransferConcurrency } from "@/lib/adapters/transfer-concurrency";
 import { resolveSelection } from "@/lib/archive/browse";
 import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
 import { summariseExcluded, formatExcludeSummary } from "@/lib/exclude-summary";
@@ -226,10 +226,14 @@ export async function restoreArchiveSnapshot(
             // network round-trip win the user sees restoring to S3/R2. An adapter that cannot
             // use parallel writes (Dropbox serialises them) caps it, so the setting never
             // forces a destination into a retry queue.
-            const adapterCaps = [...targets.values()]
-                .map((t) => t.adapter.maxConcurrentTransfers)
-                .filter((n): n is number => typeof n === "number" && n > 0);
-            const concurrency = Math.max(1, Math.min(await getMaxConcurrentFiles(), ...adapterCaps, Infinity));
+            // Write-back stages each file independently, so several run at once - the round-trip
+            // win when restoring to a network destination. Each target states how many it can take;
+            // the files of every target share one pipeline, so the smallest wins. Anything else
+            // would push a rate-limited destination past what it said it could handle in order to
+            // keep a faster one busy.
+            const concurrency = Math.min(
+                ...[...targets.values()].map((t) => resolveTransferConcurrency(t.adapter.id, t.config)),
+            );
             const sessions = createDestinationSessions(concurrency, log);
             try {
                 await forEachSnapshotFile(archive, workItems, async (file, content) => {

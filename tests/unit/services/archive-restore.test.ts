@@ -18,7 +18,12 @@ vi.mock('@/lib/core/registry', () => ({
 }));
 
 vi.mock('@/lib/adapters/config-resolver', () => ({
-    resolveAdapterConfig: vi.fn(async (config: unknown) => ({ ...(config as Record<string, unknown>) })),
+    // Mirrors the real resolver: it takes the stored adapter row and hands back the parsed
+    // config, not the row. Spreading the row instead hid every config value one level down.
+    resolveAdapterConfig: vi.fn(async (adapter: unknown) => {
+        const row = adapter as { config?: string };
+        return typeof row?.config === "string" ? JSON.parse(row.config) : { ...(adapter as Record<string, unknown>) };
+    }),
 }));
 
 const sourceStorageConfig = {
@@ -31,6 +36,7 @@ const dbTargetConfig = {
     createdAt: new Date(), updatedAt: new Date(),
 };
 
+// Mutated by the concurrency tests, reset in beforeEach.
 const storageTargetConfig = {
     id: 'target-storage-1', adapterId: 'local-filesystem', type: 'storage', name: 'Local Restore Target', config: '{}',
     createdAt: new Date(), updatedAt: new Date(),
@@ -170,6 +176,7 @@ function wire(adapters: Record<string, unknown>) {
 
 describe('restoreArchiveSnapshot', () => {
     beforeEach(() => {
+        storageTargetConfig.config = '{}';
         vi.clearAllMocks();
     });
 
@@ -461,17 +468,15 @@ describe('restoreArchiveSnapshot', () => {
         expect(uploaded).toHaveLength(2);
     });
 
-    it('serialises writes for an adapter that cannot take them in parallel', async () => {
-        // Dropbox permits one write per account and answers the rest with 429, so honouring
-        // the user's higher setting there would only build a queue of retries. An adapter that
-        // declares a cap gets it, whatever the setting says.
-        prismaMock.systemSetting.findUnique.mockResolvedValue({ key: 'maxConcurrentFiles', value: '10' } as never);
+    it('transfers as many files at once as the target connection allows', async () => {
+        // The number lives on the connection, because the right one depends on the server at the
+        // other end - the same installation can hold a NAS that welcomes sixteen parallel
+        // transfers and a rate-limited cloud drive that does not.
         const { sourceAdapter } = await buildRemoteBackup([], { 'a.txt': 'A', 'b.txt': 'B', 'c.txt': 'C', 'd.txt': 'D' });
 
         let inFlight = 0;
         let peak = 0;
         const storageAdapter = makeFakeStorageAdapter({
-            maxConcurrentTransfers: 1,
             upload: vi.fn().mockImplementation(async () => {
                 inFlight++;
                 peak = Math.max(peak, inFlight);
@@ -481,6 +486,7 @@ describe('restoreArchiveSnapshot', () => {
             }),
         });
         wire({ 'source-fs': sourceAdapter, 'local-filesystem': storageAdapter });
+        storageTargetConfig.config = JSON.stringify({ maxConcurrentFiles: 1 });
 
         const result = await restoreArchiveSnapshot(makeInput({
             directoryMapping: [{ entryId: 'src-1', targetConfigId: 'target-storage-1', targetPath: '/restore', selected: true }],
@@ -490,10 +496,9 @@ describe('restoreArchiveSnapshot', () => {
         expect(peak).toBe(1);
     });
 
-    it('uses the configured concurrency for an adapter with no cap', async () => {
-        // The guard for the test above: without a declared cap the setting must still apply,
-        // otherwise capping one adapter would quietly serialise every destination.
-        prismaMock.systemSetting.findUnique.mockResolvedValue({ key: 'maxConcurrentFiles', value: '4' } as never);
+    it('falls back to the adapter default when the connection names no value', async () => {
+        // The guard for the test above: a connection that was never configured must not end up
+        // serialised, which would quietly undo parallel restore for every existing destination.
         const { sourceAdapter } = await buildRemoteBackup([], { 'a.txt': 'A', 'b.txt': 'B', 'c.txt': 'C', 'd.txt': 'D' });
 
         let inFlight = 0;
@@ -508,6 +513,7 @@ describe('restoreArchiveSnapshot', () => {
             }),
         });
         wire({ 'source-fs': sourceAdapter, 'local-filesystem': storageAdapter });
+        storageTargetConfig.config = '{}';
 
         await restoreArchiveSnapshot(makeInput({
             directoryMapping: [{ entryId: 'src-1', targetConfigId: 'target-storage-1', targetPath: '/restore', selected: true }],

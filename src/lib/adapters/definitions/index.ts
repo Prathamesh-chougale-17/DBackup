@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { ADAPTER_CREDENTIAL_REQUIREMENTS } from "@/lib/core/credential-requirements";
 import type { AdapterDefinition } from "./shared";
 import {
@@ -37,13 +38,40 @@ export const ADAPTER_DEFINITIONS: AdapterDefinition[] = [
     { id: "s3-r2", type: "storage", group: "Cloud Storage (S3)", name: "Cloudflare R2", configSchema: S3R2Schema },
     { id: "s3-hetzner", type: "storage", group: "Cloud Storage (S3)", name: "Hetzner Object Storage", configSchema: S3HetznerSchema },
     { id: "google-drive", type: "storage", group: "Cloud Drives", name: "Google Drive", configSchema: GoogleDriveSchema },
-    { id: "dropbox", type: "storage", group: "Cloud Drives", name: "Dropbox", configSchema: DropboxSchema },
+    {
+        id: "dropbox", type: "storage", group: "Cloud Drives", name: "Dropbox", configSchema: DropboxSchema,
+        // Dropbox throttles concurrent writes per account rather than refusing them outright, so
+        // some parallelism genuinely pays: measured on a 130-file restore, ten at a time finished
+        // in ~64s (with retries along the way) where one at a time took ~219s. Four is the middle
+        // ground - most of the speed, far fewer collisions than ten. It is the ceiling as well as
+        // the default, because the throttle is per account: no connection setting can raise it,
+        // and offering a higher number would only trade throughput for retries.
+        transferConcurrency: { default: 4, max: 4 },
+    },
     { id: "onedrive", type: "storage", group: "Cloud Drives", name: "Microsoft OneDrive", configSchema: OneDriveSchema },
-    { id: "sftp", type: "storage", group: "Network", name: "SFTP (SSH)", configSchema: SFTPSchema },
+    {
+        id: "sftp", type: "storage", group: "Network", name: "SFTP (SSH)", configSchema: SFTPSchema,
+        // Every transfer is a fresh SSH login, and OpenSSH starts refusing connections above
+        // `MaxStartups` - ten concurrent unauthenticated ones by default. Eight leaves room for
+        // the administrator's own session and anything else logging in at that moment, which a
+        // backup quietly taking the last slots would otherwise lock out. Raising the ceiling buys
+        // little in any case: with 64 chunks in flight per file, one transfer already fills a
+        // fast link, so past a handful of files the limit is the link rather than the count.
+        transferConcurrency: { default: 4, max: 8 },
+    },
     { id: "ftp", type: "storage", group: "Network", name: "FTP / FTPS", configSchema: FTPSchema },
     { id: "webdav", type: "storage", group: "Network", name: "WebDAV", configSchema: WebDAVSchema },
     { id: "smb", type: "storage", group: "Network", name: "SMB (Samba)", configSchema: SMBSchema },
-    { id: "rsync", type: "storage", group: "Network", name: "Rsync (SSH)", configSchema: RsyncSchema },
+    {
+        id: "rsync", type: "storage", group: "Network", name: "Rsync (SSH)", configSchema: RsyncSchema,
+        // Every transfer is a fresh SSH login, and OpenSSH starts refusing connections above
+        // `MaxStartups` - ten concurrent unauthenticated ones by default. Eight leaves room for
+        // the administrator's own session and anything else logging in at that moment, which a
+        // backup quietly taking the last slots would otherwise lock out. Raising the ceiling buys
+        // little in any case: with 64 chunks in flight per file, one transfer already fills a
+        // fast link, so past a handful of files the limit is the link rather than the count.
+        transferConcurrency: { default: 4, max: 8 },
+    },
 
     { id: "discord", type: "notification", name: "Discord Webhook", configSchema: DiscordSchema },
     { id: "slack", type: "notification", name: "Slack Webhook", configSchema: SlackSchema },
@@ -60,6 +88,22 @@ export const ADAPTER_DEFINITIONS: AdapterDefinition[] = [
 for (const def of ADAPTER_DEFINITIONS) {
     const reqs = ADAPTER_CREDENTIAL_REQUIREMENTS[def.id];
     if (reqs) def.credentials = reqs;
+}
+
+// Every storage adapter can carry a parallel-transfer count, so the field belongs on all of
+// their schemas rather than being repeated in thirteen places. It has to be *in* the schema:
+// the connection form validates through zodResolver, and Zod drops keys it does not know - a
+// value set on an unlisted field is discarded in the browser and never reaches the server.
+//
+// Deliberately unbounded here beyond "a whole number of at least one". The real ceiling differs
+// per adapter and can be lowered in a later version; a bound baked into validation would then
+// make an existing connection unsaveable until its value was corrected by hand. Clamping to the
+// adapter's range happens where the value is read, in `resolveTransferConcurrency`.
+for (const def of ADAPTER_DEFINITIONS) {
+    if (def.type !== "storage") continue;
+    def.configSchema = def.configSchema.extend({
+        maxConcurrentFiles: z.coerce.number().int().min(1).optional(),
+    });
 }
 
 export function getAdapterDefinition(id: string) {

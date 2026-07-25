@@ -355,7 +355,6 @@ export const SFTPAdapter: StorageAdapter = {
             connect: async () => {
                 const entry: PooledClient = { client: null as unknown as Client, alive: true };
                 entry.client = await connectSFTP(config, () => { entry.alive = false; });
-                if (onLog) onLog(`Connected to SFTP ${config.host}:${config.port}`, 'info', 'storage');
                 return entry;
             },
             disconnect: async (entry) => { await entry.client.end().catch(() => { }); },
@@ -371,6 +370,19 @@ export const SFTPAdapter: StorageAdapter = {
         } catch (error) {
             await pool.close();
             throw error;
+        }
+
+        // Announced once for the session rather than once per connection. How many sockets a
+        // pool ends up opening is an implementation detail, and printing a line for each buried
+        // the run's actual events under a wall of identical "Connected to" entries.
+        if (onLog) {
+            const limit = options?.concurrency ?? 1;
+            onLog(
+                `Connected to SFTP ${config.host}:${config.port}`
+                + (limit > 1 ? ` (up to ${limit} parallel transfers)` : ''),
+                'info',
+                'storage'
+            );
         }
 
         // Shared across the pool, not per connection: which directories exist is a property of

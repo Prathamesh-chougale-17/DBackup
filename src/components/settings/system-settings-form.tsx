@@ -28,7 +28,6 @@ import { cn } from "@/lib/utils"
 
 const formSchema = z.object({
     maxConcurrentJobs: z.coerce.number().min(1).max(10),
-    maxConcurrentFiles: z.coerce.number().min(1).max(16).default(4),
     disablePasskeyLogin: z.boolean().default(false),
     sessionDuration: z.coerce.number().min(3600).max(7776000).default(604800),
     auditLogRetentionDays: z.coerce.number().min(1).max(1825).default(90),
@@ -43,7 +42,6 @@ const formSchema = z.object({
 
 interface SystemSettingsFormProps {
     initialMaxConcurrentJobs: number;
-    initialMaxConcurrentFiles?: number;
     initialDisablePasskeyLogin?: boolean;
     initialSessionDuration?: number;
     initialAuditLogRetentionDays?: number;
@@ -56,14 +54,13 @@ interface SystemSettingsFormProps {
     initialInstanceName?: string;
 }
 
-export function SystemSettingsForm({ initialMaxConcurrentJobs, initialMaxConcurrentFiles = 4, initialDisablePasskeyLogin, initialSessionDuration = 604800, initialAuditLogRetentionDays = 90, initialStorageSnapshotRetentionDays = 90, initialNotificationLogRetentionDays = 90, initialCheckForUpdates = true, initialShowQuickSetup = false, initialSystemTimezone = "UTC", initialFilenamePattern = "{name}_yyyy-MM-dd_HH-mm-ss", initialInstanceName = "" }: SystemSettingsFormProps) {
+export function SystemSettingsForm({ initialMaxConcurrentJobs, initialDisablePasskeyLogin, initialSessionDuration = 604800, initialAuditLogRetentionDays = 90, initialStorageSnapshotRetentionDays = 90, initialNotificationLogRetentionDays = 90, initialCheckForUpdates = true, initialShowQuickSetup = false, initialSystemTimezone = "UTC", initialFilenamePattern = "{name}_yyyy-MM-dd_HH-mm-ss", initialInstanceName = "" }: SystemSettingsFormProps) {
     const [openTimezone, setOpenTimezone] = useState(false);
     const timezones = Intl.supportedValuesOf('timeZone');
     const form = useForm<z.infer<typeof formSchema>>({
         resolver: zodResolver(formSchema) as any,
         defaultValues: {
             maxConcurrentJobs: initialMaxConcurrentJobs,
-            maxConcurrentFiles: initialMaxConcurrentFiles,
             disablePasskeyLogin: initialDisablePasskeyLogin === true,
             sessionDuration: initialSessionDuration,
             auditLogRetentionDays: initialAuditLogRetentionDays,
@@ -183,39 +180,6 @@ export function SystemSettingsForm({ initialMaxConcurrentJobs, initialMaxConcurr
                                             {Array.from({ length: 10 }, (_, i) => i + 1).map((num) => (
                                                 <SelectItem key={num} value={String(num)}>
                                                     {num} Job{num > 1 ? "s" : ""}
-                                                </SelectItem>
-                                            ))}
-                                        </SelectContent>
-                                    </Select>
-                                    <FormMessage />
-                                </FormItem>
-                            )}
-                        />
-
-                        <FormField
-                            control={form.control}
-                            name="maxConcurrentFiles"
-                            render={({ field }) => (
-                                <FormItem>
-                                    <FormLabel>Max Concurrent Files</FormLabel>
-                                    <FormDescription>
-                                        How many files a file backup or restore transfers at once. A higher
-                                        value speeds up transfers to network storage (S3, R2, SFTP) at the
-                                        cost of more open connections and temporary disk space.
-                                    </FormDescription>
-                                    <Select
-                                        onValueChange={(val) => handleAutoSave("maxConcurrentFiles", Number(val))}
-                                        defaultValue={String(field.value)}
-                                    >
-                                        <FormControl>
-                                            <SelectTrigger>
-                                                <SelectValue placeholder="Select limit" />
-                                            </SelectTrigger>
-                                        </FormControl>
-                                        <SelectContent>
-                                            {Array.from({ length: 16 }, (_, i) => i + 1).map((num) => (
-                                                <SelectItem key={num} value={String(num)}>
-                                                    {num} File{num > 1 ? "s" : ""}
                                                 </SelectItem>
                                             ))}
                                         </SelectContent>

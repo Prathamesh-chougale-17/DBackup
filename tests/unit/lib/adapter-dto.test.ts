@@ -11,11 +11,26 @@ describe("toAdapterListItem (adapter list DTO)", () => {
     beforeEach(() => vi.stubEnv("ENCRYPTION_KEY", VALID_KEY));
     afterEach(() => vi.unstubAllEnvs());
 
-    async function getModules() {
-        vi.resetModules();
+    // Loaded once for the file, not once per test. `@/lib/adapters/dto` pulls in
+    // `registerAdapters`, and with it every adapter - ssh2, the AWS and Google SDKs, the database
+    // drivers. Resetting the module registry before each test made the suite re-evaluate that
+    // whole graph six times, which is fine on its own and intermittently overran the five-second
+    // timeout once the rest of the suite was competing for the same cores. Every test here stubs
+    // the same key, so one load serves them all.
+    let modules: ReturnType<typeof loadModules> | null = null;
+
+    async function loadModules() {
         const crypto = await import("@/lib/crypto");
         const dto = await import("@/lib/adapters/dto");
         return { ...crypto, ...dto };
+    }
+
+    function getModules() {
+        if (!modules) {
+            vi.resetModules();
+            modules = loadModules();
+        }
+        return modules;
     }
 
     function baseRow(config: string) {

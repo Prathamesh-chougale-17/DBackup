@@ -34,8 +34,6 @@ export default async function SettingsPage() {
     const maxJobsSetting = await prisma.systemSetting.findUnique({ where: { key: "maxConcurrentJobs" } });
     const maxConcurrentJobs = maxJobsSetting ? parseInt(maxJobsSetting.value) : 1;
 
-    const maxFilesSetting = await prisma.systemSetting.findUnique({ where: { key: "maxConcurrentFiles" } });
-    const maxConcurrentFiles = maxFilesSetting ? parseInt(maxFilesSetting.value) : 4;
 
     const disablePasskeySetting = await prisma.systemSetting.findUnique({ where: { key: "auth.disablePasskeyLogin" } });
     const disablePasskeyLogin = disablePasskeySetting?.value === 'true';
@@ -137,7 +135,6 @@ export default async function SettingsPage() {
                 <TabsContent value="general" className="space-y-4">
                     <SystemSettingsForm
                         initialMaxConcurrentJobs={maxConcurrentJobs}
-                        initialMaxConcurrentFiles={maxConcurrentFiles}
                         initialDisablePasskeyLogin={disablePasskeyLogin}
                         initialSessionDuration={sessionDuration}
                         initialAuditLogRetentionDays={auditLogRetentionDays}
