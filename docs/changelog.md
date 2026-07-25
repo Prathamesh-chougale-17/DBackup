@@ -61,6 +61,7 @@ All notable changes to DBackup are documented here.
 
 ### 📝 Documentation
 
+- **file-backups**: Added guidance on choosing a directory source: what actually decides transfer speed (per-file overhead, not bandwidth), what each adapter's Parallel Transfers range is and why the ceilings differ, and the behavioural differences worth picking on - Rsync restoring only what differs, Rsync sources having no incremental advantage, and SMB being the one adapter that cannot restore a single file cheaply.
 - **wiki**: New **Archive Format** reference documenting the archive layout, key derivation and index format byte by byte, so a backup stays recoverable independently of DBackup - including the TAR header detail that trips up hand-written readers on entries past 8 GiB.
 - **wiki**: New **Backup Modes** guide covering incremental backups, chain storage, how retention interacts with chains, and when DBackup falls back to a full backup.
 - **wiki**: Updated the Recovery Kit, Storage Explorer, Restore, SMB and adapter overview guides for file backups, shadow copies and the Connections page.
