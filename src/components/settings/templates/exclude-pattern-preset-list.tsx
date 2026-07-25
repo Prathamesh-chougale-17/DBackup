@@ -36,6 +36,7 @@ import { DateDisplay } from "@/components/utils/date-display";
 import { Checkbox } from "@/components/ui/checkbox";
 import { EXCLUDE_GROUPS, resolveExcludePatterns } from "@/lib/exclude-groups";
 import { cn } from "@/lib/utils";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 function parsePatterns(patterns: string): string[] {
   try {
@@ -317,7 +318,7 @@ export function ExcludePatternPresetDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-2xl h-[85vh]">
         <DialogHeader>
           <DialogTitle>
             {preset ? "Edit Exclude Pattern Preset" : "New Exclude Pattern Preset"}
@@ -326,7 +327,8 @@ export function ExcludePatternPresetDialog({
             Define a reusable set of glob patterns to exclude from directory-source backups.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-4 py-2">
+        <ScrollArea className="flex-1 min-h-0 pr-4 -mr-4">
+          <div className="space-y-4 py-2">
           <div className="space-y-1.5">
             <Label htmlFor="epp-name">Name</Label>
             <Input
@@ -353,7 +355,7 @@ export function ExcludePatternPresetDialog({
             <p className="text-xs text-muted-foreground">
               Maintained by DBackup and kept up to date with each release. Untick individual patterns to skip them.
             </p>
-            <div className="space-y-2 rounded-md border p-3 max-h-56 overflow-y-auto">
+            <div className="space-y-3 rounded-md border p-3">
               {EXCLUDE_GROUPS.map((group) => {
                 const active = groups.includes(group.id);
                 return (
@@ -414,7 +416,8 @@ export function ExcludePatternPresetDialog({
             />
             <p className="text-xs text-muted-foreground">One glob pattern per line.</p>
           </div>
-        </div>
+          </div>
+        </ScrollArea>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel

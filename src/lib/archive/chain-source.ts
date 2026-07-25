@@ -18,7 +18,7 @@ import { AdapterConfig, StorageAdapter } from "@/lib/core/interfaces";
 import { openStorageArchiveSource, ManagedArchiveSource } from "./storage-source";
 import { openArchiveEntry, groupFilesByEntry, readArchiveManifest } from "./reader";
 import { readAll } from "./sources";
-import { mapWithConcurrency } from "@/lib/concurrency";
+import { createConcurrencyGate } from "@/lib/concurrency";
 import { ArchiveByteSource, ArchiveIndex, ArchiveManifest, IndexFileLine } from "./types";
 
 export interface OpenedChainArchive {
@@ -143,26 +143,63 @@ export async function forEachSnapshotFile(
 
         try {
             const entryGroups = [...groupFilesByEntry(group.map((g) => g.file))];
-            await mapWithConcurrency(entryGroups, concurrency, async ([key, entryFiles]) => {
+
+            // At 1 the caller needs strict order, not just "one at a time": the tar download
+            // writes each entry into a single stream, so files must arrive in index order.
+            if (concurrency <= 1) {
+                for (const [key, entryFiles] of entryGroups) {
+                    const entry = snapshot.index.entries.get(key);
+                    if (!entry) throw new Error(`Archive index is inconsistent: missing entry ${key}`);
+
+                    if (!entry.bundle) {
+                        await visit(
+                            entryFiles[0],
+                            await openArchiveEntry(opened.source, opened.manifest, entry, opened.masterKey)
+                        );
+                        continue;
+                    }
+
+                    const payload = await readAll(
+                        await openArchiveEntry(opened.source, opened.manifest, entry, opened.masterKey)
+                    );
+                    for (const file of entryFiles) {
+                        const start = file.o ?? 0;
+                        await visit(file, Readable.from([payload.subarray(start, start + (file.l ?? payload.length))]));
+                    }
+                }
+                continue;
+            }
+
+            // One gate across both levels below. A bundle holds many small files, and visiting
+            // them one after another - as this used to - meant a full network round trip per
+            // file even though the bytes were already in memory, which is exactly where a
+            // restore of many small files crawled. Sharing the gate lets them go out in
+            // parallel without entry-level and file-level concurrency multiplying.
+            const run = createConcurrencyGate(concurrency);
+
+            await Promise.all(entryGroups.map(async ([key, entryFiles]) => {
                 const entry = snapshot.index.entries.get(key);
                 if (!entry) throw new Error(`Archive index is inconsistent: missing entry ${key}`);
 
                 if (!entry.bundle) {
-                    await visit(
+                    await run(async () => visit(
                         entryFiles[0],
                         await openArchiveEntry(opened.source, opened.manifest, entry, opened.masterKey)
-                    );
+                    ));
                     return;
                 }
 
-                const payload = await readAll(
+                // Read under the gate too, so at most `concurrency` bundles are held in memory
+                // at once. Released before the files below ask for their own slots.
+                const payload = await run(async () => readAll(
                     await openArchiveEntry(opened.source, opened.manifest, entry, opened.masterKey)
-                );
-                for (const file of entryFiles) {
+                ));
+
+                await Promise.all(entryFiles.map((file) => run(async () => {
                     const start = file.o ?? 0;
                     await visit(file, Readable.from([payload.subarray(start, start + (file.l ?? payload.length))]));
-                }
-            });
+                })));
+            }));
         } finally {
             if (opened.dispose) await opened.dispose();
         }

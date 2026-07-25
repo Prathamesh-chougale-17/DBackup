@@ -12,6 +12,34 @@
  * want per-item failure handling (backup collection, storage restore) should catch inside
  * `fn` and return a result rather than throw.
  */
+/**
+ * A gate that lets at most `limit` calls run at once, shared across several loops.
+ *
+ * `mapWithConcurrency` bounds one list; this bounds work that arrives from more than one place
+ * at the same time. The restore path needs that: entries are visited in parallel, and a bundle
+ * entry then yields many small files which should also go out in parallel without the two
+ * levels multiplying into an unbounded number of concurrent uploads.
+ *
+ * Callers must not acquire a second slot while holding one - the queue is FIFO and would
+ * deadlock. Every use here releases before requesting again.
+ */
+export function createConcurrencyGate(limit: number): <T>(fn: () => Promise<T>) => Promise<T> {
+    const max = Math.max(1, Math.floor(limit) || 1);
+    let active = 0;
+    const waiting: (() => void)[] = [];
+
+    return async function run<T>(fn: () => Promise<T>): Promise<T> {
+        if (active >= max) await new Promise<void>((resolve) => waiting.push(resolve));
+        active++;
+        try {
+            return await fn();
+        } finally {
+            active--;
+            waiting.shift()?.();
+        }
+    };
+}
+
 export async function mapWithConcurrency<T, R>(
     items: readonly T[],
     limit: number,

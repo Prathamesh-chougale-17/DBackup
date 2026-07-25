@@ -34,12 +34,18 @@ vi.mock("@/lib/archive/storage-source", () => ({ openStorageArchiveSource }));
 
 const { forEachSnapshotFile } = await import("@/lib/archive/chain-source");
 
-/** A snapshot whose index resolves every key to a plain (non-bundled) entry. */
+/**
+ * The index lookup, swappable per test: `bundle` decides whether an entry is a bundle whose
+ * files are sliced from one read, or a standalone entry streamed on its own.
+ */
+const snapshotEntries = { get: () => ({ bundle: false }) as unknown };
+
+/** A snapshot whose index resolves every key through `snapshotEntries`. */
 function makeSnapshot() {
     return {
         source: { id: "snapshot-source" },
         manifest: { encryption: undefined },
-        index: { entries: { get: () => ({ bundle: false }) } },
+        index: { entries: snapshotEntries },
         masterKey: undefined,
         chain: {
             adapter: {} as never,
@@ -61,6 +67,9 @@ beforeEach(() => {
     vi.clearAllMocks();
     openArchives = 0;
     peakOpenArchives = 0;
+    // Back to the default: one file per entry, nothing bundled.
+    snapshotEntries.get = () => ({ bundle: false });
+    groupFilesByEntry.mockImplementation((files: { p: string }[]) => new Map(files.map((f) => [`k-${f.p}`, [f]])));
 });
 
 describe("forEachSnapshotFile concurrency", () => {
@@ -117,6 +126,67 @@ describe("forEachSnapshotFile concurrency", () => {
         // Exactly one sibling was opened, and never concurrently with another archive.
         expect(openStorageArchiveSource).toHaveBeenCalledTimes(1);
         expect(peakOpenArchives).toBe(1);
+    });
+
+    it("visits the files inside a bundle in parallel, not one after another", async () => {
+        // A bundle holds many small files whose bytes are already in memory. Visiting them
+        // serially meant a full network round trip each, which is where a restore of many
+        // small files crawled - the upload, not the read, is the slow part.
+        (snapshotEntries as { get: () => unknown }).get = () => ({ bundle: true });
+        groupFilesByEntry.mockImplementation((files: { p: string }[]) => new Map([["bundle-1", files]]));
+
+        let inFlight = 0;
+        let peak = 0;
+        const files = filesInArchive(undefined, 8);
+
+        await forEachSnapshotFile(makeSnapshot(), files, async (_file, content) => {
+            inFlight++;
+            peak = Math.max(peak, inFlight);
+            content.resume();
+            await new Promise((r) => setTimeout(r, 5));
+            inFlight--;
+        }, 4);
+
+        expect(peak).toBeGreaterThan(1);
+        expect(peak).toBeLessThanOrEqual(4);
+    });
+
+    it("keeps the shared limit across entries and bundle contents", async () => {
+        // Two levels of parallelism must not multiply: entries and the files within them draw
+        // from one gate, so the configured limit is the ceiling for the whole archive.
+        (snapshotEntries as { get: () => unknown }).get = () => ({ bundle: true });
+        groupFilesByEntry.mockImplementation((files: { p: string }[]) =>
+            new Map(files.map((f, i) => [`bundle-${i % 3}`, [f]])));
+
+        let inFlight = 0;
+        let peak = 0;
+        const files = filesInArchive(undefined, 12);
+
+        await forEachSnapshotFile(makeSnapshot(), files, async (_file, content) => {
+            inFlight++;
+            peak = Math.max(peak, inFlight);
+            content.resume();
+            await new Promise((r) => setTimeout(r, 5));
+            inFlight--;
+        }, 3);
+
+        expect(peak).toBeLessThanOrEqual(3);
+    });
+
+    it("keeps bundle files in index order at concurrency 1", async () => {
+        // The tar download writes into one stream, so order is not optional there.
+        (snapshotEntries as { get: () => unknown }).get = () => ({ bundle: true });
+        groupFilesByEntry.mockImplementation((files: { p: string }[]) => new Map([["bundle-1", files]]));
+
+        const seen: string[] = [];
+        const files = filesInArchive(undefined, 5);
+
+        await forEachSnapshotFile(makeSnapshot(), files, async (file, content) => {
+            content.resume();
+            seen.push((file as { p: string }).p);
+        }, 1);
+
+        expect(seen).toEqual(files.map((f) => (f.file as { p: string }).p));
     });
 
     it("interleaves visits only within the same archive", async () => {
