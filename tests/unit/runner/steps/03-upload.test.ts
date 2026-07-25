@@ -105,6 +105,10 @@ vi.mock('@/services/storage/storage-service', () => ({
     },
 }));
 
+// Deliberately NOT mocked: the row appended to the listing cache is derived by this mapper, and
+// the point of the test below is that the runner and the explorer derive it the same way.
+
+
 // --- Helpers ---
 
 function makeDestination(overrides: Partial<DestinationContext> = {}): DestinationContext {
@@ -496,6 +500,38 @@ describe('stepUpload', () => {
         await stepUpload(ctx);
 
         expect(ctx.finalRemotePath).toBe('Test Job/test_backup.sql');
+    });
+
+    it('caches a file backup with the compression and encryption it actually has', async () => {
+        // The row appended here is what the Storage Explorer shows until the destination is
+        // listed again from scratch - and reconciliation only enriches files it has not seen
+        // before, so a row written wrong stays wrong. A seekable (v2) archive keeps compression
+        // and encryption per entry under `archive.*`, which the hand-built row did not read:
+        // every file backup showed as uncompressed and unencrypted while both were on.
+        const { storageService } = await import('@/services/storage/storage-service');
+        const ctx = makeCtx();
+        ctx.metadata = {
+            ...ctx.metadata,
+            combined: { databases: 0, directorySources: 1 },
+            archive: {
+                formatVersion: 2,
+                indexFile: '.index',
+                encrypted: true,
+                profileId: 'profile-1',
+                compression: 'GZIP',
+                files: 129,
+            },
+        };
+
+        await stepUpload(ctx);
+
+        const appended = (storageService.appendStorageListCacheEntry as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1];
+        expect(appended).toMatchObject({
+            compression: 'GZIP',
+            isEncrypted: true,
+            encryptionProfileId: 'profile-1',
+            hasFileIndex: true,
+        });
     });
 
     it('includes multiDb metadata in the written sidecar', async () => {

@@ -1,5 +1,6 @@
 import { RunnerContext } from "../types";
 import path from "path";
+import { describeBackupFromMetadata } from "@/services/storage/backup-file-fields";
 import fs from "fs/promises";
 import prisma from "@/lib/prisma";
 import { createReadStream, createWriteStream } from "fs";
@@ -285,43 +286,25 @@ export async function stepUpload(ctx: RunnerContext) {
 
             dest.uploadResult = { success: true, path: remotePath };
             ctx.log(`${destLabel} Upload complete: ${remotePath}`);
-            const dbCount = typeof metadata.databases === 'object' && 'count' in metadata.databases
-                ? (metadata.databases as { count: number }).count
-                : (Array.isArray(metadata.databases) ? metadata.databases.length : 0);
-            const dbInfoLabel = metadata.combined
-                ? (metadata.combined.databases > 0
-                    ? `${metadata.combined.databases} DB${metadata.combined.databases === 1 ? '' : 's'} + ${metadata.combined.directorySources} Dir${metadata.combined.directorySources === 1 ? '' : 's'}`
-                    : `${metadata.combined.directorySources} Directory Source${metadata.combined.directorySources === 1 ? '' : 's'}`)
-                : (dbCount <= 1 ? "Single DB" : `${dbCount} DBs`);
-            const richEntry = {
-                name: path.basename(remotePath),
-                path: remotePath,
-                size: ctx.dumpSize ?? 0,
-                lastModified: new Date(),
-                jobName: metadata.jobName,
-                sourceName: metadata.sourceName,
-                sourceType: metadata.sourceType,
-                engineVersion: metadata.engineVersion,
-                engineEdition: metadata.engineEdition,
-                dbInfo: { count: dbCount, label: dbInfoLabel },
-                isEncrypted: metadata.encryption?.enabled,
-                encryptionProfileId: metadata.encryption?.profileId,
-                compression: metadata.compression,
-                locked: metadata.locked ?? false,
-                trigger: metadata.trigger as { type: string; actor?: string } | undefined,
-                checksum: metadata.checksum,
-                checksumMd5: metadata.checksumMd5,
-                hasFileIndex: metadata.archive?.formatVersion === 2,
-                backupType: metadata.backupType,
-                ...(metadata.combined ? { combined: metadata.combined } : {}),
-                ...(metadata.chain ? { chain: metadata.chain } : {}),
-                ...(typeof ctx.metadata?.logicalSize === 'number' ? { logicalSize: ctx.metadata.logicalSize } : {}),
-            };
             // Awaited rather than fired and forgotten: the previous form left the dynamic
             // import's own rejection unhandled (the .catch() only covered the inner call),
-            // and let the cache update outlive the run that produced it.
+            // and let the cache update outlive the run that produced it. Everything the cache
+            // needs stays inside the try, so no part of it can fail a completed upload.
             try {
                 const { storageService } = await import("@/services/storage/storage-service");
+                // Derived by the explorer's own mapper rather than assembled here. The two
+                // copies had already drifted once: a seekable (v2) archive records compression
+                // and encryption per entry under `archive.*`, which this side did not read, so
+                // every file backup was cached as plain and unencrypted - and stayed so,
+                // because reconciliation only enriches files it has not seen before.
+                const richEntry = {
+                    name: path.basename(remotePath),
+                    path: remotePath,
+                    size: ctx.dumpSize ?? 0,
+                    lastModified: new Date(),
+                    ...describeBackupFromMetadata(path.basename(remotePath), metadata),
+                    ...(typeof ctx.metadata?.logicalSize === 'number' ? { logicalSize: ctx.metadata.logicalSize } : {}),
+                };
                 await storageService.appendStorageListCacheEntry(dest.configId, richEntry);
             } catch (e: unknown) {
                 // A stale listing cache is cosmetic - it must never fail a successful upload.

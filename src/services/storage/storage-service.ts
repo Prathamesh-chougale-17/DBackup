@@ -20,6 +20,10 @@ const log = logger.child({ service: "StorageService" });
 // Fix: Ensure adapters are registered before service usage
 registerAdapters();
 
+import { describeBackupFromMetadata } from "./backup-file-fields";
+
+export { describeBackupFromMetadata } from "./backup-file-fields";
+
 export type RichFileInfo = FileInfo & {
     jobName?: string;
     sourceName?: string;
@@ -68,8 +72,10 @@ export type RichFileInfo = FileInfo & {
  *      bucket keys, so cached rows keyed by the old full-key path must be discarded. Also
  *      populates compression/encryption from a v2 archive's `archive.*` fields, so rows
  *      cached without them are rebuilt.
+ * - 3: the row the runner appends after an upload is now derived by the same code as the
+ *      explorer's, so rows it wrote without compression or encryption are rebuilt.
  */
-const CACHE_SCHEMA_VERSION = 2;
+export const CACHE_SCHEMA_VERSION = 3;
 
 interface CachedListing {
     v: number;
@@ -236,69 +242,15 @@ export class StorageService {
         executionMap: Map<string, any>
     ): RichFileInfo {
         const sidecar = metadataMap.get(file.name);
-        let isEncrypted = file.name.endsWith('.enc');
-        let encryptionProfileId: string | undefined = undefined;
-        let compression: string | undefined = undefined;
-
         if (sidecar) {
-            let count = 0;
-            let label = "Unknown";
-            const isConfigBackup = sidecar.sourceType === "SYSTEM" || file.name.startsWith("config_backup_");
-
-            if (isConfigBackup) {
-                count = 1;
-                label = "System Config";
-            } else {
-                count = typeof sidecar.databases === 'object' ? (sidecar.databases as any).count : (typeof sidecar.databases === 'number' ? sidecar.databases : 0);
-                if (sidecar.combined) {
-                    const { databases: dbCount, directorySources: dirCount } = sidecar.combined;
-                    count = dbCount;
-                    label = dbCount > 0
-                        ? `${dbCount} DB${dbCount === 1 ? '' : 's'} + ${dirCount} Dir${dirCount === 1 ? '' : 's'}`
-                        : `${dirCount} Directory Source${dirCount === 1 ? '' : 's'}`;
-                } else {
-                    label = count === 0 ? "Unknown" : (count === 1 ? "Single DB" : `${count} DBs`);
-                }
-            }
-
-            // A v2 (seekable) archive applies compression and encryption per entry, so the
-            // whole-archive top-level fields stay unset - the real state lives under
-            // `archive`. Fall back to it, otherwise a combined file backup shows no
-            // compression and no encryption in the explorer even when both are on.
-            if (sidecar.encryption?.enabled || sidecar.archive?.encrypted) isEncrypted = true;
-            encryptionProfileId = sidecar.encryption?.profileId ?? sidecar.archive?.profileId;
-            compression = sidecar.compression ?? sidecar.archive?.compression;
-
-            return {
-                ...file,
-                jobName: sidecar.jobName || (isConfigBackup ? "Config Backup" : undefined),
-                sourceName: sidecar.sourceName || (isConfigBackup ? "System" : undefined),
-                sourceType: sidecar.sourceType || (isConfigBackup ? "SYSTEM" : undefined),
-                engineVersion: sidecar.engineVersion,
-                engineEdition: sidecar.engineEdition,
-                dbInfo: { count, label },
-                isEncrypted,
-                encryptionProfileId,
-                compression,
-                locked: sidecar.locked,
-                trigger: sidecar.trigger as { type: string; actor?: string } | undefined,
-                checksum: sidecar.checksum,
-                checksumMd5: sidecar.checksumMd5,
-                hasFileIndex: sidecar.archive?.formatVersion === 2,
-                // Backups written before this field existed are full by construction -
-                // incremental mode did not exist yet.
-                backupType: sidecar.backupType ?? sidecar.chain?.type ?? 'full',
-                ...(sidecar.combined ? { combined: sidecar.combined } : {}),
-                ...(sidecar.chain ? { chain: sidecar.chain } : {}),
-                ...(typeof sidecar.logicalSize === 'number' ? { logicalSize: sidecar.logicalSize } : {}),
-                verification: sidecar.verification ? {
-                    verifiedAt: sidecar.verification.verifiedAt,
-                    passed: sidecar.verification.passed,
-                    trigger: sidecar.verification.trigger,
-                } : undefined,
-            };
+            return { ...file, ...describeBackupFromMetadata(file.name, sidecar) };
         }
 
+        // No sidecar: everything below is inferred from the filename and from what the job and
+        // execution records happen to say.
+        const isEncrypted = file.name.endsWith('.enc');
+        const encryptionProfileId: string | undefined = undefined;
+        let compression: string | undefined = undefined;
         if (file.name.endsWith('.gz')) compression = 'GZIP';
         else if (file.name.endsWith('.br')) compression = 'BROTLI';
 

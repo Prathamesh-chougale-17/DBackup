@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PassThrough } from 'stream';
 import { prismaMock } from '@/lib/testing/prisma-mock';
-import { StorageService } from '@/services/storage/storage-service';
+import { StorageService, CACHE_SCHEMA_VERSION } from '@/services/storage/storage-service';
 import { registry } from '@/lib/core/registry';
 import { StorageAdapter, FileInfo } from '@/lib/core/interfaces';
 
@@ -326,7 +326,7 @@ describe('StorageService - extra coverage', () => {
             prismaMock.storageListCache.findUnique.mockResolvedValue({
                 adapterConfigId: 'conf-123',
                 filesJson: JSON.stringify({
-                    v: 2,
+                    v: CACHE_SCHEMA_VERSION,
                     files: [{ name: 'backup.sql', path: 'backup.sql', size: 100, lastModified: new Date() }],
                 }),
                 cachedAt: new Date(),
@@ -455,7 +455,7 @@ describe('StorageService - extra coverage', () => {
             ];
             prismaMock.storageListCache.findUnique.mockResolvedValue({
                 adapterConfigId: 'conf-123',
-                filesJson: JSON.stringify({ v: 2, files: cachedFiles }),
+                filesJson: JSON.stringify({ v: CACHE_SCHEMA_VERSION, files: cachedFiles }),
                 cachedAt: new Date(), // fresh
             } as any);
 
@@ -473,7 +473,7 @@ describe('StorageService - extra coverage', () => {
             ];
             prismaMock.storageListCache.findUnique.mockResolvedValue({
                 adapterConfigId: 'conf-123',
-                filesJson: JSON.stringify({ v: 2, files: cachedFiles }),
+                filesJson: JSON.stringify({ v: CACHE_SCHEMA_VERSION, files: cachedFiles }),
                 cachedAt: staleDate,
             } as any);
 
@@ -507,10 +507,36 @@ describe('StorageService - extra coverage', () => {
             expect(result).toHaveLength(0);
         });
 
+        it('discards a payload written by an older schema version', async () => {
+            // This is how a fixed enrichment reaches rows that are already cached. Reconciliation
+            // only enriches files it has not seen before, so a row cached with a field missing
+            // keeps that field missing forever - the version bump is what rebuilds it. Without
+            // this, correcting the mapping fixes only backups made after the upgrade.
+            prismaMock.storageListCache.findUnique.mockResolvedValue({
+                adapterConfigId: 'conf-123',
+                filesJson: JSON.stringify({
+                    v: CACHE_SCHEMA_VERSION - 1,
+                    files: [{ name: 'stale.sql', path: 'stale.sql', size: 100, lastModified: new Date().toISOString() }],
+                }),
+                cachedAt: new Date(),
+            } as any);
+            prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());
+            const adapter = makeAdapter({ list: vi.fn().mockResolvedValue([]) });
+            vi.mocked(registry.get).mockReturnValue(adapter);
+            prismaMock.job.findMany.mockResolvedValue([]);
+            prismaMock.execution.findMany.mockResolvedValue([]);
+
+            const result = await service.listFilesWithMetadata('conf-123');
+
+            // Listed from the destination again rather than served from the outdated payload.
+            expect(adapter.list).toHaveBeenCalled();
+            expect(result.some((f) => f.name === 'stale.sql')).toBe(false);
+        });
+
         it('bypasses cache when bypassCache=true', async () => {
             prismaMock.storageListCache.findUnique.mockResolvedValue({
                 adapterConfigId: 'conf-123',
-                filesJson: JSON.stringify({ v: 2, files: [{ name: 'cached.sql', path: 'cached.sql', size: 100, lastModified: new Date().toISOString() }] }),
+                filesJson: JSON.stringify({ v: CACHE_SCHEMA_VERSION, files: [{ name: 'cached.sql', path: 'cached.sql', size: 100, lastModified: new Date().toISOString() }] }),
                 cachedAt: new Date(),
             } as any);
 

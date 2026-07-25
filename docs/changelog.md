@@ -27,6 +27,7 @@ All notable changes to DBackup are documented here.
 
 ### 🐛 Bug Fixes
 
+- **storage**: Fixed file backups showing no compression and no encryption in the Storage Explorer while both were on. The row cached right after an upload was assembled separately from the one the explorer builds when it reads the sidecars, and only the latter knew that a seekable archive records both per entry. The two now derive from the same code, and existing rows are rebuilt on first read.
 - **sftp**: Fixed a connection being opened and closed for every single file. Collecting a directory and restoring files now share a pool holding at most as many connections as there are parallel transfers, so a 130-file run performs a handful of logins instead of 130 - which is also what keeps a server's connection-rate limits (OpenSSH's `MaxStartups`, fail2ban) from cutting a backup short.
 - **sftp**: Fixed transfers running one request per round trip, which capped a single file at about 3 MB/s over a 20 ms link regardless of bandwidth. Uploads and downloads now keep 64 chunks in flight. Downloads were additionally choosing the slow path whenever no progress callback was passed - which is exactly what directory collection does, so every file of a file backup took it.
 - **sftp**: Fixed a file failing with "permission denied" when several transfers created the same folder at once. Both saw the folder missing and both created it, and the one that lost the race reported the server's error as a rights problem - on a folder every other file wrote into successfully.

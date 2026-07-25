@@ -2,6 +2,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 const VALID_KEY = "a".repeat(64);
 
+// Loading `@/lib/adapters/dto` means loading every adapter behind `registerAdapters` - ssh2, the
+// AWS and Google SDKs, the database drivers. That is seconds of work on its own, and the default
+// five-second budget is measured while the rest of the suite competes for the same cores, so the
+// first test here paid a cost that has nothing to do with what it asserts.
+vi.setConfig({ testTimeout: 30_000 });
+
 /**
  * Mirrors the reported PoC (read-only user retrieving decrypted adapter secrets):
  * a stored adapter whose secrets are encrypted must, once mapped through the
