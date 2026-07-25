@@ -18,6 +18,8 @@ export async function createExcludePatternPreset(input: {
   name: string;
   description?: string;
   patterns: string[];
+  groups?: string[];
+  excludedGroupPatterns?: string[];
 }) {
   const existing = await prisma.excludePatternPreset.findUnique({
     where: { name: input.name },
@@ -31,6 +33,8 @@ export async function createExcludePatternPreset(input: {
       name: input.name,
       description: input.description,
       patterns: JSON.stringify(input.patterns),
+      groups: JSON.stringify(input.groups ?? []),
+      excludedGroupPatterns: JSON.stringify(input.excludedGroupPatterns ?? []),
     },
   });
 
@@ -44,6 +48,8 @@ export async function updateExcludePatternPreset(
     name?: string;
     description?: string;
     patterns?: string[];
+    groups?: string[];
+    excludedGroupPatterns?: string[];
     isDefault?: boolean;
   }
 ) {
@@ -65,6 +71,8 @@ export async function updateExcludePatternPreset(
       ...(input.name !== undefined && { name: input.name }),
       ...(input.description !== undefined && { description: input.description }),
       ...(input.patterns !== undefined && { patterns: JSON.stringify(input.patterns) }),
+      ...(input.groups !== undefined && { groups: JSON.stringify(input.groups) }),
+      ...(input.excludedGroupPatterns !== undefined && { excludedGroupPatterns: JSON.stringify(input.excludedGroupPatterns) }),
       // Unlike a naming template, several presets can be default at once: their patterns are
       // unioned, so marking one does not have to unmark the others.
       ...(input.isDefault !== undefined && { isDefault: input.isDefault }),

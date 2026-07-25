@@ -22,6 +22,7 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { ExcludePatternPreset } from "@prisma/client";
 import { getExcludePatternPresets } from "@/app/actions/templates";
+import { resolveExcludePatterns } from "@/lib/exclude-groups";
 import { ExcludePatternPresetDialog } from "@/components/settings/templates/exclude-pattern-preset-list";
 
 function parsePatterns(patterns: string): string[] {
@@ -73,7 +74,15 @@ export function ExcludePatternPresetPicker({ value, onChange, placeholder = "Add
   }, [fetchPresets]);
 
   const selected = presets.find((p) => p.id === value);
-  const selectedPatterns = selected ? parsePatterns(selected.patterns) : [];
+  // Groups plus own entries - the same resolution the backup applies, so the preview here
+  // matches what a run will actually exclude.
+  const selectedPatterns = selected
+    ? resolveExcludePatterns({
+        groups: parsePatterns(selected.groups),
+        excludedGroupPatterns: parsePatterns(selected.excludedGroupPatterns),
+        patterns: parsePatterns(selected.patterns),
+      })
+    : [];
 
   return (
     <div className="space-y-2">

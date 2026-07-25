@@ -442,10 +442,11 @@ export interface StorageAdapter extends BaseAdapter {
      * Upper bound on files this adapter can usefully transfer at once, overriding the user's
      * "Max Concurrent Files" setting when it is lower.
      *
-     * For an adapter the provider serialises anyway - Dropbox permits one write per account
-     * and answers the rest with 429 - running several at once buys nothing and turns into a
-     * queue of retries. Omit it when the provider genuinely handles parallel transfers (S3,
-     * Google Drive, local), which is the common case.
+     * For a provider that throttles concurrent writes (Dropbox answers them with 429), pushing
+     * the user's full setting at it spends most of the time in retries. The cap is the point
+     * where more parallelism stops paying - not zero, since some concurrency still helps.
+     * Omit it when the provider handles parallel transfers fine (S3, Google Drive, local),
+     * which is the common case.
      */
     maxConcurrentTransfers?: number;
 

@@ -4,6 +4,7 @@ import { registry } from "@/lib/core/registry";
 import { DatabaseAdapter, StorageAdapter } from "@/lib/core/interfaces";
 import { registerAdapters } from "@/lib/adapters";
 import { resolveAdapterConfig } from "@/lib/adapters/config-resolver";
+import { resolveExcludePatterns, parseJsonStringArray } from "@/lib/exclude-groups";
 import { RetentionConfiguration } from "@/lib/core/retention";
 
 // Ensure adapters are loaded
@@ -86,7 +87,15 @@ export async function stepInitialize(ctx: RunnerContext) {
         // Exclude patterns are the union of every live-linked preset's current patterns (if any -
         // re-read fresh here so editing a preset later applies retroactively, same as naming
         // templates/schedule presets) and this source's own job-specific patterns.
-        const presetPatterns: string[] = src.excludePatternPresets.flatMap((p) => JSON.parse(p.patterns || "[]"));
+        //
+        // A preset's patterns come from the curated groups it references plus its own entries,
+        // resolved here rather than stored, so a group extended in a later release applies to
+        // existing jobs without anyone editing them.
+        const presetPatterns: string[] = src.excludePatternPresets.flatMap((p) => resolveExcludePatterns({
+            groups: parseJsonStringArray(p.groups),
+            excludedGroupPatterns: parseJsonStringArray(p.excludedGroupPatterns),
+            patterns: parseJsonStringArray(p.patterns),
+        }));
         const ownPatterns: string[] = JSON.parse(src.excludePatterns || "[]");
         const excludePatterns = [...new Set([...presetPatterns, ...ownPatterns])];
 

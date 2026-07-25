@@ -30,6 +30,7 @@ import { ArchiveFileTree, ArchiveTreeSelection } from "@/components/dashboard/st
 import { FolderPickerDialog } from "@/components/dashboard/storage/folder-picker-dialog";
 import { getExcludePatternPresets } from "@/app/actions/templates";
 import type { ExcludePatternPreset } from "@prisma/client";
+import { resolveExcludePatterns, parseJsonStringArray } from "@/lib/exclude-groups";
 import { computeRestoreValidity } from "./restore-validation";
 import { parseRestoreScope, normalizeRestoreScope } from "@/components/dashboard/storage/restore-scope";
 
@@ -459,14 +460,11 @@ export function RestoreClient() {
     const excludePatterns = useMemo(() => {
         const fromPresets = excludePresets
             .filter((p) => selectedExcludePresetIds.includes(p.id))
-            .flatMap((p) => {
-                try {
-                    const parsed = JSON.parse(p.patterns);
-                    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
-                } catch {
-                    return [];
-                }
-            });
+            .flatMap((p) => resolveExcludePatterns({
+                groups: parseJsonStringArray(p.groups),
+                excludedGroupPatterns: parseJsonStringArray(p.excludedGroupPatterns),
+                patterns: parseJsonStringArray(p.patterns),
+            }));
         const custom = customExcludeInput.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
         return [...new Set([...fromPresets, ...custom])];
     }, [excludePresets, selectedExcludePresetIds, customExcludeInput]);

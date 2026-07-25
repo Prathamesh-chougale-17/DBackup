@@ -33,6 +33,9 @@ import {
 import { DataTable } from "@/components/ui/data-table";
 import { ColumnDef } from "@tanstack/react-table";
 import { DateDisplay } from "@/components/utils/date-display";
+import { Checkbox } from "@/components/ui/checkbox";
+import { EXCLUDE_GROUPS, resolveExcludePatterns } from "@/lib/exclude-groups";
+import { cn } from "@/lib/utils";
 
 function parsePatterns(patterns: string): string[] {
   try {
@@ -118,7 +121,13 @@ export function ExcludePatternPresetList() {
       accessorKey: "patterns",
       header: "Patterns",
       cell: ({ row }) => {
-        const patterns = parsePatterns(row.original.patterns);
+        // What this preset actually applies: the groups it follows, minus opt-outs, plus its
+        // own entries - the same resolution the backup and restore paths perform.
+        const patterns = resolveExcludePatterns({
+          groups: parsePatterns(row.original.groups),
+          excludedGroupPatterns: parsePatterns(row.original.excludedGroupPatterns),
+          patterns: parsePatterns(row.original.patterns),
+        });
         return (
           <div className="flex flex-wrap gap-1 max-w-md">
             {patterns.length === 0 && <span className="text-xs text-muted-foreground">No patterns</span>}
@@ -273,6 +282,10 @@ export function ExcludePatternPresetDialog({
   const [patternsText, setPatternsText] = useState(
     preset ? parsePatterns(preset.patterns).join("\n") : (initialPatterns ?? []).join("\n")
   );
+  // Curated groups this preset follows, and the individual patterns it opts out of. Stored as
+  // references so a group extended in a later release reaches this preset on its own.
+  const [groups, setGroups] = useState<string[]>(preset ? parsePatterns(preset.groups) : []);
+  const [optedOut, setOptedOut] = useState<string[]>(preset ? parsePatterns(preset.excludedGroupPatterns) : []);
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
@@ -281,6 +294,8 @@ export function ExcludePatternPresetDialog({
       setName(preset?.name ?? "");
       setDescription(preset?.description ?? "");
       setPatternsText(preset ? parsePatterns(preset.patterns).join("\n") : (initialPatterns ?? []).join("\n"));
+      setGroups(preset ? parsePatterns(preset.groups) : []);
+      setOptedOut(preset ? parsePatterns(preset.excludedGroupPatterns) : []);
     }
   }, [open, preset, initialPatterns]);
 
@@ -289,8 +304,8 @@ export function ExcludePatternPresetDialog({
     const patterns = patternsText.split("\n").map((l) => l.trim()).filter(Boolean);
     setIsSaving(true);
     const res = preset
-      ? await updateExcludePatternPreset(preset.id, { name, description, patterns })
-      : await createExcludePatternPreset({ name, description, patterns });
+      ? await updateExcludePatternPreset(preset.id, { name, description, patterns, groups, excludedGroupPatterns: optedOut })
+      : await createExcludePatternPreset({ name, description, patterns, groups, excludedGroupPatterns: optedOut });
     setIsSaving(false);
     if (res.success && res.data) {
       toast.success(preset ? "Exclude pattern preset updated" : "Exclude pattern preset created");
@@ -331,14 +346,70 @@ export function ExcludePatternPresetDialog({
               rows={2}
             />
           </div>
+          {/* Curated lists, referenced rather than copied: DBackup keeps them current across
+              releases, and unticking a single pattern below opts out of just that one. */}
+          <div className="space-y-2">
+            <Label>Built-in groups</Label>
+            <p className="text-xs text-muted-foreground">
+              Maintained by DBackup and kept up to date with each release. Untick individual patterns to skip them.
+            </p>
+            <div className="space-y-2 rounded-md border p-3 max-h-56 overflow-y-auto">
+              {EXCLUDE_GROUPS.map((group) => {
+                const active = groups.includes(group.id);
+                return (
+                  <div key={group.id} className="space-y-1">
+                    <label className="flex items-start gap-2">
+                      <Checkbox
+                        className="mt-0.5"
+                        checked={active}
+                        onCheckedChange={(checked) => setGroups((prev) =>
+                          checked ? [...prev, group.id] : prev.filter((id) => id !== group.id)
+                        )}
+                      />
+                      <span>
+                        <span className="text-sm font-medium">{group.label}</span>
+                        <span className="block text-xs text-muted-foreground">{group.description}</span>
+                      </span>
+                    </label>
+                    {active && (
+                      <div className="flex flex-wrap gap-1 pl-6">
+                        {group.patterns.map((pattern) => {
+                          const off = optedOut.includes(pattern);
+                          return (
+                            <button
+                              key={pattern}
+                              type="button"
+                              title={off ? "Click to include again" : "Click to skip this pattern"}
+                              onClick={() => setOptedOut((prev) =>
+                                off ? prev.filter((p) => p !== pattern) : [...prev, pattern]
+                              )}
+                              className={cn(
+                                "rounded border px-1.5 py-0.5 font-mono text-xs transition-colors",
+                                off
+                                  ? "text-muted-foreground line-through opacity-60"
+                                  : "hover:bg-muted"
+                              )}
+                            >
+                              {pattern}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
           <div className="space-y-1.5">
-            <Label htmlFor="epp-patterns">Patterns</Label>
+            <Label htmlFor="epp-patterns">Your own patterns</Label>
             <Textarea
               id="epp-patterns"
               value={patternsText}
               onChange={(e) => setPatternsText(e.target.value)}
               placeholder={"node_modules/**\n*.tmp\n.cache/**"}
-              rows={6}
+              rows={5}
               className="font-mono text-sm"
             />
             <p className="text-xs text-muted-foreground">One glob pattern per line.</p>

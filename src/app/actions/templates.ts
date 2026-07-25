@@ -590,6 +590,8 @@ export async function getExcludePatternPresets() {
 }
 
 export async function createExcludePatternPreset(input: {
+  groups?: string[];
+  excludedGroupPatterns?: string[];
   name: string;
   description?: string;
   patterns: string[];
@@ -625,6 +627,8 @@ export async function updateExcludePatternPreset(
     name?: string;
     description?: string;
     patterns?: string[];
+    groups?: string[];
+    excludedGroupPatterns?: string[];
     isDefault?: boolean;
   }
 ) {

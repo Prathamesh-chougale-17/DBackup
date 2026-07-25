@@ -112,7 +112,9 @@ model ExcludePatternPreset {
   id          String      @id @default(cuid())
   name        String      @unique
   description String?
-  patterns    String      // JSON array of glob-pattern strings, same shape as JobSource.excludePatterns
+  patterns    String      // JSON array of the preset's OWN glob patterns, on top of any groups below
+  groups      String      @default("[]") // JSON array of curated group ids from src/lib/exclude-groups.ts - referenced, not copied, so releases can extend them
+  excludedGroupPatterns String @default("[]") // JSON array of individual group patterns this preset opts out of
   isDefault   Boolean     @default(false) // Pre-selected on newly added directory sources; several may be default
   isSystem    Boolean     @default(false)
   createdAt   DateTime    @default(now())
