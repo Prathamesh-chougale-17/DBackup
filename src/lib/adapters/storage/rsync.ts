@@ -160,6 +160,36 @@ function getPasswordEnv(config: RsyncConfig): NodeJS.ProcessEnv | undefined {
 }
 
 /**
+ * Whether the local rsync understands `--info=progress2`.
+ *
+ * The flag reports one aggregate percentage for a whole directory transfer instead of one per
+ * file, which is what the collection progress bar wants - but it arrived in rsync 3.1. Two
+ * common installations are older: rsync 2.6.9, still shipped by some distributions, and
+ * openrsync, which Apple made the default `rsync` in macOS 15 and which reports itself as "2.6.9
+ * compatible". Both refuse the flag outright and abort the transfer, so it has to be asked for
+ * rather than assumed.
+ *
+ * Probed once and cached for the process lifetime, like the sshpass check below.
+ */
+let _infoFlagSupported: boolean | null = null;
+async function supportsInfoProgress(): Promise<boolean> {
+    if (_infoFlagSupported !== null) return _infoFlagSupported;
+    try {
+        const { stdout } = await execAsync("rsync --version", { timeout: 5000 });
+        // openrsync claims 2.6.9 compatibility in the same output, so it has to be ruled out by
+        // name before the version number is read.
+        const version = /openrsync/i.test(stdout) ? null : stdout.match(/version\s+(\d+)\.(\d+)/);
+        _infoFlagSupported = version
+            ? Number(version[1]) > 3 || (Number(version[1]) === 3 && Number(version[2]) >= 1)
+            : false;
+    } catch {
+        // No usable version output - assume the older behaviour, which every rsync accepts.
+        _infoFlagSupported = false;
+    }
+    return _infoFlagSupported;
+}
+
+/**
  * Checks if sshpass is available on the system.
  * Called once and cached for the process lifetime.
  */
@@ -236,15 +266,19 @@ function executeRsync(rsync: Rsync, onLog?: (msg: string, level?: LogLevel, type
                 }
             },
             (data: Buffer) => {
-                const line = data.toString().trim();
-                if (line && onLog) {
-                    onLog(line, "info", "storage");
+                if (!onLog) return;
+                // A chunk regularly carries several lines - a filename followed by its progress,
+                // for instance. Reported one by one so each can be judged on its own.
+                for (const line of data.toString().split("\n")) {
+                    const trimmed = line.trim();
+                    if (trimmed) onLog(trimmed, "info", "storage");
                 }
             },
             (data: Buffer) => {
-                const line = data.toString().trim();
-                if (line && onLog) {
-                    onLog(sanitizeCommand(`stderr: ${line}`), "warning", "storage");
+                if (!onLog) return;
+                for (const line of data.toString().split("\n")) {
+                    const trimmed = line.trim();
+                    if (trimmed) onLog(sanitizeCommand(`stderr: ${trimmed}`), "warning", "storage");
                 }
             }
         );
@@ -516,7 +550,9 @@ export const RsyncAdapter: StorageAdapter = {
             if (onLog) onLog(`Starting rsync directory download from: ${config.host}:${remotePath} (${totalFiles} file(s))`, "info", "storage");
 
             const rsync = await createRsyncInstance(config, keyFile);
-            rsync.set("info", "progress2");
+            // Without it the transfer still reports progress, just per file rather than as one
+            // figure for the whole directory - `--progress` is set either way.
+            if (await supportsInfoProgress()) rsync.set("info", "progress2");
             if (excludePatterns && excludePatterns.length > 0) {
                 rsync.exclude(excludePatterns);
             }
@@ -527,9 +563,12 @@ export const RsyncAdapter: StorageAdapter = {
             rsync.destination(localPath);
 
             await executeRsync(rsync, (msg, level, type, details) => {
-                // Aggregate progress line from --info=progress2, e.g.
-                // " 1,234,567  45%   12.34MB/s    0:00:05  (xfr#12, to-chk=34/56)"
-                const match = msg.match(/^\s*([\d,]+)\s+(\d+)%.*to-chk=(\d+)\/(\d+)\)/);
+                // Progress lines come in two dialects, and the remaining-files counter is spelled
+                // differently in each: `to-chk` from rsync 3's --info=progress2, `to-check` from
+                // the 2.6.9 format that openrsync also speaks.
+                //   " 1,234,567  45%  12.34MB/s  0:00:05 (xfr#12, to-chk=34/56)"
+                //   "   3851813 100%  15.35MB/s  0:00:00 (xfer#1, to-check=3/132)"
+                const match = msg.match(/([\d,]+)\s+(\d+)%.*?to-ch(?:k|eck)=(\d+)\/(\d+)/);
                 if (match && onProgress) {
                     const bytes = parseInt(match[1].replace(/,/g, ""), 10);
                     const remaining = parseInt(match[3], 10);
@@ -537,7 +576,14 @@ export const RsyncAdapter: StorageAdapter = {
                     const processedFiles = Math.max(0, totalToCheck - remaining);
                     onProgress(bytes, totalBytes, Math.min(processedFiles, totalFiles), totalFiles);
                 }
-                if (onLog) onLog(msg, level, type, details);
+
+                // rsync narrates every file and every progress tick on stdout. Execution logs are
+                // stored as a single JSON string on the run, so forwarding that puts one line per
+                // file - several for a large one - into the database on every backup: thousands
+                // of lines for a real source, burying the events that matter. Progress is already
+                // reported through onProgress and the totals are summarised below, so only what
+                // rsync sends to stderr (warnings, refusals) earns a line here.
+                if (onLog && level && level !== "info") onLog(msg, level, type, details);
             });
 
             if (onProgress) onProgress(totalBytes, totalBytes, totalFiles, totalFiles);

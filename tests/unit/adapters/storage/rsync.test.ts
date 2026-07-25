@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // --- Hoisted mocks ---
 // child_process functions use callbacks, so promisify works when the mock calls its callback
-const { mockExecCb, mockExecFileCb, mockRsyncExecute, mockFsWriteFile, mockFsUnlink, mockFsMkdir, mockFsReadFile, mockRsyncShell } = vi.hoisted(() => ({
+const { mockExecCb, mockExecFileCb, mockRsyncExecute, mockFsWriteFile, mockFsUnlink, mockFsMkdir, mockFsReadFile, mockRsyncShell, mockRsyncSet } = vi.hoisted(() => ({
     mockExecCb: vi.fn(),
     mockExecFileCb: vi.fn(),
     mockRsyncExecute: vi.fn(),
@@ -13,6 +13,7 @@ const { mockExecCb, mockExecFileCb, mockRsyncExecute, mockFsWriteFile, mockFsUnl
     // The `--rsh` command rsync is told to use. This is where the bulk of the SSH logins happen,
     // so a test that only inspects execFile calls would miss the transfers entirely.
     mockRsyncShell: vi.fn(),
+    mockRsyncSet: vi.fn(),
 }));
 
 // child_process mock - exec/execFile call their last-arg callback so promisify works
@@ -26,7 +27,7 @@ vi.mock("child_process", () => ({
 vi.mock("rsync", () => {
     class MockRsync {
         flags() { return this; }
-        set() { return this; }
+        set(...args: unknown[]) { mockRsyncSet(...args); return this; }
         shell(cmd: string) { mockRsyncShell(cmd); return this; }
         env() { return this; }
         source() { return this; }
@@ -700,5 +701,174 @@ describe("RsyncAdapter", () => {
             expect(ok).toBe(true);
         });
     });
+
+    // ===== rsync capability probing =====
+
+    describe("downloadDirectory() flag support", () => {
+        // The probe result is cached for the process, which is right in production and wrong
+        // here: each case needs its own rsync. Reloading the module gives it a fresh cache.
+        // The vi.mock registrations above survive resetModules, so the mocks still apply.
+        let Adapter: typeof RsyncAdapter;
+        beforeEach(async () => {
+            vi.resetModules();
+            ({ RsyncAdapter: Adapter } = await import("@/lib/adapters/storage/rsync"));
+        });
+
+        function rsyncVersion(output: string) {
+            mockExecCb.mockImplementation((cmd: unknown, ...rest: unknown[]) => {
+                const cb = rest[rest.length - 1] as (err: Error | null, result?: { stdout: string }) => void;
+                if (String(cmd).includes("--version")) return cb(null, { stdout: output });
+                if (String(cmd).includes("which sshpass")) return cb(null, { stdout: "/usr/bin/sshpass" });
+                cb(null, { stdout: "" });
+            });
+        }
+
+        function infoFlagUsed(): boolean {
+            return mockRsyncSet.mock.calls.some((c) => c[0] === "info" && c[1] === "progress2");
+        }
+
+        it("asks for aggregate progress where rsync understands it", async () => {
+            rsyncVersion("rsync  version 3.2.7  protocol version 31");
+            sshSucceeds("/backups/Job/a.txt\t100\t1700000000.0\n");
+            rsyncSucceeds();
+
+            await Adapter.downloadDirectory!(agentConfig, "Job", "/local/job");
+
+            expect(infoFlagUsed()).toBe(true);
+        });
+
+        it("leaves it out for openrsync, which aborts on an option it does not know", async () => {
+            // Apple made openrsync the default `rsync` in macOS 15. It reports itself as "2.6.9
+            // compatible" and refuses --info=progress2 outright, failing the whole collection -
+            // so the flag has to be asked for, not assumed.
+            rsyncVersion("openrsync: protocol version 29\nrsync version 2.6.9 compatible");
+            sshSucceeds("/backups/Job/a.txt\t100\t1700000000.0\n");
+            rsyncSucceeds();
+
+            await Adapter.downloadDirectory!(agentConfig, "Job", "/local/job");
+
+            expect(infoFlagUsed()).toBe(false);
+        });
+
+        it("leaves it out for openrsync even when it claims a newer compatibility", async () => {
+            // The guard for the version check: openrsync states which rsync it is compatible
+            // *with*, and that claim has moved up over time. It still does not implement the
+            // flag, so the name is what decides - not the number next to it.
+            rsyncVersion("openrsync: protocol version 29\nrsync version 3.2.7 compatible");
+            sshSucceeds("/backups/Job/a.txt\t100\t1700000000.0\n");
+            rsyncSucceeds();
+
+            await Adapter.downloadDirectory!(agentConfig, "Job", "/local/job");
+
+            expect(infoFlagUsed()).toBe(false);
+        });
+
+        it("leaves it out for an rsync older than 3.1", async () => {
+            rsyncVersion("rsync  version 2.6.9  protocol version 29");
+            sshSucceeds("/backups/Job/a.txt\t100\t1700000000.0\n");
+            rsyncSucceeds();
+
+            await Adapter.downloadDirectory!(agentConfig, "Job", "/local/job");
+
+            expect(infoFlagUsed()).toBe(false);
+        });
+
+        it("leaves it out when the version cannot be read at all", async () => {
+            // An unreadable probe must not cost the transfer: the older behaviour works everywhere.
+            mockExecCb.mockImplementation((...args: unknown[]) => {
+                const cb = args[args.length - 1] as (err: Error) => void;
+                cb(new Error("rsync: not found"));
+            });
+            sshSucceeds("/backups/Job/a.txt\t100\t1700000000.0\n");
+            rsyncSucceeds();
+
+            await Adapter.downloadDirectory!(agentConfig, "Job", "/local/job");
+
+            expect(infoFlagUsed()).toBe(false);
+        });
+    });
+
+    // ===== rsync output handling =====
+
+    describe("downloadDirectory() logging and progress", () => {
+        /** Feeds rsync's stdout/stderr the way the real process does: in chunks, not lines. */
+        function rsyncEmits(stdout: string[], stderr: string[] = []) {
+            mockRsyncExecute.mockImplementation((
+                done: (err: null, code: number, cmd: string) => void,
+                onOut: (b: Buffer) => void,
+                onErr: (b: Buffer) => void
+            ) => {
+                for (const chunk of stdout) onOut(Buffer.from(chunk));
+                for (const chunk of stderr) onErr(Buffer.from(chunk));
+                done(null, 0, "rsync ...");
+            });
+        }
+
+        it("keeps rsync's per-file narration out of the execution log", async () => {
+            // Execution logs live as one JSON string on the run, so a line per file lands in the
+            // database on every backup - thousands of them for a real source, burying the events
+            // that matter. The transfer is summarised instead.
+            sshSucceeds("/backups/Job/a.txt\t100\t1700000000.0\n");
+            rsyncEmits([
+                "Java/rt.jar\n     51656928 100%   17.29MB/s    0:00:02 (xfer#99, to-check=102/132)\n",
+                "Java/sax2.jar\n        33188 100%    9.03MB/s    0:00:00 (xfer#101, to-check=104/132)\n",
+            ]);
+            const onLog = vi.fn();
+
+            await RsyncAdapter.downloadDirectory!(agentConfig, "Job", "/local/job", undefined, undefined, onLog);
+
+            const messages = onLog.mock.calls.map((c) => String(c[0]));
+            expect(messages.some((m) => m.includes("Java/rt.jar"))).toBe(false);
+            expect(messages.some((m) => m.includes("to-check="))).toBe(false);
+            expect(messages.some((m) => m.includes("125 file(s)") || m.includes("file(s),"))).toBe(true);
+        });
+
+        it("still reports what rsync sends to stderr", async () => {
+            // The guard for the test above: silencing the narration must not silence a refusal.
+            sshSucceeds("/backups/Job/a.txt\t100\t1700000000.0\n");
+            rsyncEmits(["Java/rt.jar\n"], ["some files vanished before they could be transferred\n"]);
+            const onLog = vi.fn();
+
+            await RsyncAdapter.downloadDirectory!(agentConfig, "Job", "/local/job", undefined, undefined, onLog);
+
+            const warnings = onLog.mock.calls.filter((c) => c[1] === "warning").map((c) => String(c[0]));
+            expect(warnings.some((m) => m.includes("vanished"))).toBe(true);
+        });
+
+        it("reports each stderr line separately rather than as one blob", async () => {
+            // stderr is what survives the filter now, so it is worth reading. rsync writes it in
+            // chunks, and two refusals arriving together would otherwise become one entry whose
+            // second half is easy to miss.
+            sshSucceeds("/backups/Job/a.txt\t100\t1700000000.0\n");
+            rsyncEmits([], ["some files vanished before they could be transferred\nrsync: chgrp failed\n"]);
+            const onLog = vi.fn();
+
+            await RsyncAdapter.downloadDirectory!(agentConfig, "Job", "/local/job", undefined, undefined, onLog);
+
+            const warnings = onLog.mock.calls.filter((c) => c[1] === "warning").map((c) => String(c[0]));
+            expect(warnings.some((m) => m.includes("vanished") && !m.includes("chgrp"))).toBe(true);
+            expect(warnings.some((m) => m.includes("chgrp") && !m.includes("vanished"))).toBe(true);
+        });
+
+        it("reads progress from both rsync dialects", async () => {
+            // `to-chk` comes from rsync 3's --info=progress2, `to-check` from the 2.6.9 format
+            // that openrsync also speaks - and a chunk can carry the filename and the figures
+            // together, which a line-anchored parse would miss.
+            sshSucceeds("/backups/Job/a.txt\t100\t1700000000.0\n");
+            rsyncEmits([
+                "Java/rt.jar\n     51656928 100%   17.29MB/s    0:00:02 (xfer#99, to-check=102/132)\n",
+                " 1,234,567  45%   12.34MB/s    0:00:05 (xfr#12, to-chk=34/56)\n",
+            ]);
+            const onProgress = vi.fn();
+
+            await RsyncAdapter.downloadDirectory!(agentConfig, "Job", "/local/job", undefined, onProgress);
+
+            const byteValues = onProgress.mock.calls.map((c) => c[0]);
+            expect(byteValues).toContain(51656928);
+            expect(byteValues).toContain(1234567);
+        });
+    });
+
+
 
 });
