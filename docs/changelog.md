@@ -56,7 +56,6 @@ All notable changes to DBackup are documented here.
 ### 🗑️ Removed
 
 - **storage**: Removed the separate "Browse files" button and dialog from the Storage Explorer - browsing and per-file restore now live on the restore page.
-- **contributing**: Removed the GitHub Copilot configuration - `copilot-instructions.md`, `.github/instructions/` and `.github/agents/` - now covered by the `CLAUDE.md` guides and `.claude/agents/`.
 
 ### 📝 Documentation
 
@@ -73,7 +72,6 @@ All notable changes to DBackup are documented here.
 - **wiki**: The documentation home page now covers file backups, incremental chains, per-adapter directory source support, and how the archive format keeps the no-lock-in promise.
 - **wiki**: Backup Modes explains why whole changed files are stored rather than deduplicated chunks, with the storage cost spelled out per situation.
 - **wiki**: Fixed the opening paragraph of the Backup Modes page, which had a sentence split across the intro note.
-- **contributing**: Consolidated the contributor instructions into per-area `CLAUDE.md` guides - root, `src`, `src/components`, `src/lib/adapters`, `docs` and `tests` - including a new design system guide covering ScrollArea, dialog, form, icon and dark mode conventions, and corrected the API route auth pattern that documented `auth.api.getSession` where the code uses `getAuthContext`.
 
 ### 🧪 Tests
 

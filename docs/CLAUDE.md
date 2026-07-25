@@ -92,6 +92,16 @@ Each category (sources, destinations, notifications) has an index page with a ta
 
 # Part 2 - Changelog format (`docs/changelog.md`)
 
+## What never gets an entry
+
+This file is published on the docs site for people who run DBackup. AI tooling is invisible to them and stays out:
+
+- `CLAUDE.md` files anywhere in the tree
+- `.claude/` in full - agents, skills, commands, settings, launch config
+- `.gitignore` rules that only exist to track those files
+
+Code that ships in the repository still counts even when its purpose is to keep the assistant honest. A lint guard under `tests/` changes the build for every contributor and belongs in `### 🧪 Tests`.
+
 ## Entry format
 
 ```

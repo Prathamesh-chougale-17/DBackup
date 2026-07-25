@@ -20,7 +20,7 @@ Claude Code loads the nearest `CLAUDE.md` when you touch files in a directory. R
 
 1. **Package manager is `pnpm`.** Never `npm install` or `yarn`. Prisma CLI calls go through `npx prisma ...`.
 2. **Never use `console.log` / `console.error` / `console.warn`.** Use the logger from `@/lib/logging/logger`. This holds in Client Components too.
-3. **Every change updates `docs/changelog.md`** in the same response. See [Changelog workflow](#changelog-workflow).
+3. **Every change updates `docs/changelog.md`** in the same response, except AI tooling changes. See [Changelog workflow](#changelog-workflow).
 4. **Typography**: no em dashes, no semicolons. Use a hyphen where a dash is needed, and end sentences with a period. Applies to code comments, docs, and commit messages.
 5. **Language**: all code, comments, and documentation in English.
 6. **Never run `prisma migrate dev` while `pnpm dev` is running**, and never use `prisma db push`. See [Prisma migrations](#prisma-migrations).
@@ -69,6 +69,14 @@ Running `migrate dev` against a live dev server can trigger an interactive DB re
 ## Changelog workflow
 
 Every change - feature, bug fix, refactor, docs, CI - gets an entry in `docs/changelog.md` in the same response. Do not defer it.
+
+**Exception: AI tooling changes never get a changelog entry.** The changelog is published on the docs site for people who run DBackup. Anything that only configures the assistant is invisible to them:
+
+- `CLAUDE.md` files anywhere in the tree
+- `.claude/` in full - agents, skills, commands, settings, launch config
+- `.gitignore` rules that only exist to track those files
+
+The test is who the line is for. A reader upgrading their instance never needs to know a prompt file changed. Code that ships in the product still counts even when it exists to keep the assistant honest - a lint guard under `tests/` changes the build for every contributor, so it belongs in `### 🧪 Tests`.
 
 **Find the active version**: either a `## vNEXT` block at the top, or the topmost `## vX.Y.Z` block marked `*Release: In Progress*`. If neither exists, run `pnpm changelog:next` first.
 
