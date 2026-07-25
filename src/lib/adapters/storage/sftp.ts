@@ -1,5 +1,6 @@
 import { StorageAdapter, StorageSession, FileInfo, DirectoryBrowseEntry } from "@/lib/core/interfaces";
 import { normalizeSshPrivateKey } from "@/lib/ssh/pkcs8-compat";
+import { createConnectionPool } from "@/lib/adapters/storage/common/connection-pool";
 import { SFTPSchema } from "@/lib/adapters/definitions";
 import Client from "ssh2-sftp-client";
 import { Readable } from "stream";
@@ -28,7 +29,7 @@ interface SFTPConfig {
  * what lets an rsync destination serve byte ranges despite rsync itself having no such
  * concept.
  */
-export const connectSFTP = async (config: SFTPConfig): Promise<Client> => {
+export const connectSFTP = async (config: SFTPConfig, onDisconnect?: (reason: string) => void): Promise<Client> => {
     // PKCS#8 encrypted keys (BEGIN ENCRYPTED PRIVATE KEY) are not supported by
     // ssh2-sftp-client. Decrypt them in-memory via Node.js crypto first.
     let privateKey = config.privateKey;
@@ -38,7 +39,21 @@ export const connectSFTP = async (config: SFTPConfig): Promise<Client> => {
         }
         privateKey = normalizeSshPrivateKey(privateKey, config.passphrase);
     }
-    const sftp = new Client();
+    // Second constructor argument, not an afterthought: SftpClient is not an EventEmitter, so
+    // these callbacks are the only supported way to hear that a connection dropped - which a
+    // pool must know before handing it to the next transfer. Passing them also replaces the
+    // library's defaults, which write to the console directly.
+    const sftp = new Client('sftp', {
+        error: (err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err);
+            // Debug, not warn: a connection dropping is expected during teardown, and the
+            // transfer that cared about it reports its own failure.
+            log.debug('SFTP connection error', { host: config.host, error: message });
+            onDisconnect?.(message);
+        },
+        end: () => onDisconnect?.('the connection ended'),
+        close: () => onDisconnect?.('the connection closed'),
+    });
     await sftp.connect({
         host: config.host,
         port: config.port,
@@ -50,6 +65,12 @@ export const connectSFTP = async (config: SFTPConfig): Promise<Client> => {
     });
     return sftp;
 };
+
+/** A pooled connection plus whether it is still usable, kept together so the pool can check it. */
+interface PooledClient {
+    client: Client;
+    alive: boolean;
+}
 
 /** How many sibling names to name in a diagnostic - enough to recognise the place, short enough to read. */
 const ROOT_HINT_ENTRIES = 12;
@@ -241,6 +262,35 @@ async function ensureRemoteDir(
     }
 }
 
+/** Performs a single download on an already-connected SFTP client. */
+async function performSftpDownload(
+    sftp: Client,
+    config: SFTPConfig,
+    remotePath: string,
+    localPath: string,
+    onProgress?: (processed: number, total: number) => void
+): Promise<boolean> {
+    try {
+        const source = config.pathPrefix
+            ? path.posix.join(config.pathPrefix, remotePath)
+            : remotePath;
+
+        // fastGet regardless of whether anyone watches progress: which transfer algorithm runs
+        // must not depend on whether a caller passed a callback. Directory collection reports
+        // progress per file rather than per byte and passes none, and that alone used to put
+        // every file of a file backup on the slow single-request path.
+        const total = onProgress ? (await sftp.stat(source)).size : 0;
+        await sftp.fastGet(source, localPath, {
+            ...TRANSFER_TUNING,
+            step: (transferred: number) => onProgress?.(transferred, total),
+        });
+        return true;
+    } catch (error) {
+        log.error("SFTP download failed", { host: config.host, remotePath }, wrapError(error));
+        return false;
+    }
+}
+
 /**
  * Performs a single upload on an already-connected SFTP client. The directory
  * cache prevents redundant mkdir calls when reused across multiple uploads
@@ -268,15 +318,12 @@ async function performSftpUpload(
 
         if (onLog) onLog(`Starting SFTP upload to: ${destination}`, 'info', 'storage');
 
-        const stats = await import('fs').then(fs => fs.promises.stat(localPath));
-        const totalSize = stats.size;
-
+        // The transfer already knows the size and hands it to every step callback, so asking the
+        // filesystem for it separately would only add a stat per file for a number we are given.
         await sftp.fastPut(localPath, destination, {
             ...TRANSFER_TUNING,
-            step: (total_transferred: number) => {
-                if (onProgress && totalSize > 0) {
-                    onProgress(Math.round((total_transferred / totalSize) * 100));
-                }
+            step: (transferred: number, _chunk: number, total: number) => {
+                if (onProgress && total > 0) onProgress(Math.round((transferred / total) * 100));
             },
         });
 
@@ -296,16 +343,47 @@ export const SFTPAdapter: StorageAdapter = {
     configSchema: SFTPSchema,
     credentials: { primary: "SSH_KEY" },
 
-    async openSession(config: SFTPConfig, onLog?): Promise<StorageSession> {
-        const sftp = await connectSFTP(config);
-        if (onLog) onLog(`Connected to SFTP ${config.host}:${config.port}`, 'info', 'storage');
+    async openSession(config: SFTPConfig, onLog?, options?): Promise<StorageSession> {
+        // One connection unless the caller transfers several files at once, in which case the
+        // pool holds exactly as many as it allows in flight - the handshake count follows the
+        // configured concurrency instead of the number of files.
+        // Liveness is tracked by the connection telling us it dropped, rather than by inspecting
+        // the client afterwards: the default has to be "usable", so that a future library change
+        // cannot silently turn pooling off by making every connection look dead.
+        const pool = createConnectionPool<PooledClient>({
+            limit: options?.concurrency ?? 1,
+            connect: async () => {
+                const entry: PooledClient = { client: null as unknown as Client, alive: true };
+                entry.client = await connectSFTP(config, () => { entry.alive = false; });
+                if (onLog) onLog(`Connected to SFTP ${config.host}:${config.port}`, 'info', 'storage');
+                return entry;
+            },
+            disconnect: async (entry) => { await entry.client.end().catch(() => { }); },
+            isAlive: (entry) => entry.alive,
+        });
+
+        // Opened right away rather than on the first transfer, so bad credentials or an
+        // unreachable host fail here - where the caller can report one clear error - instead of
+        // separately for every file. The remaining connections are opened only if the transfers
+        // actually run in parallel.
+        try {
+            await pool.withConnection(async () => undefined);
+        } catch (error) {
+            await pool.close();
+            throw error;
+        }
+
+        // Shared across the pool, not per connection: which directories exist is a property of
+        // the server, so one file's mkdir spares every other file the same check.
         const dirCache = new Set<string>();
+
         return {
             upload: (localPath, remotePath, onProgress, uploadLog) =>
-                performSftpUpload(sftp, config, localPath, remotePath, onProgress, uploadLog ?? onLog, dirCache),
-            close: async () => {
-                await sftp.end().catch(() => { });
-            },
+                pool.withConnection(({ client }) =>
+                    performSftpUpload(client, config, localPath, remotePath, onProgress, uploadLog ?? onLog, dirCache)),
+            download: (remotePath, localPath, onProgress) =>
+                pool.withConnection(({ client }) => performSftpDownload(client, config, remotePath, localPath, onProgress)),
+            close: () => pool.close(),
         };
     },
 
@@ -442,21 +520,7 @@ export const SFTPAdapter: StorageAdapter = {
         let sftp: Client | null = null;
         try {
             sftp = await connectSFTP(config);
-
-            const source = config.pathPrefix
-                ? path.posix.join(config.pathPrefix, remotePath)
-                : remotePath;
-
-            // fastGet regardless of whether anyone watches progress: which transfer algorithm
-            // runs must not depend on whether a caller passed a callback. Directory collection
-            // reports progress per file rather than per byte and passes none, and that alone used
-            // to put every file of a file backup on the slow single-request path.
-            const total = onProgress ? (await sftp.stat(source)).size : 0;
-            await sftp.fastGet(source, localPath, {
-                ...TRANSFER_TUNING,
-                step: (transferred: number) => onProgress?.(transferred, total),
-            });
-            return true;
+            return await performSftpDownload(sftp, config, remotePath, localPath, onProgress);
         } catch (error) {
             log.error("SFTP download failed", { host: config.host, remotePath }, wrapError(error));
             return false;

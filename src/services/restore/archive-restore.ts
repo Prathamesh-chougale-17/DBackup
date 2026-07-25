@@ -26,6 +26,7 @@ import { resolveAdapterConfig } from "@/lib/adapters/config-resolver";
 import { LogLevel, LogType, RESTORE_STAGES } from "@/lib/core/logs";
 import { shouldRestoreDatabase, getTargetDatabaseName } from "@/lib/adapters/database/common/tar-utils";
 import { openArchiveEntry } from "@/lib/archive/reader";
+import { createDestinationSessions } from "./destination-sessions";
 import { forEachSnapshotFile, hashingStream } from "@/lib/archive/chain-source";
 import { getMaxConcurrentFiles } from "@/lib/settings/file-concurrency";
 import { resolveSelection } from "@/lib/archive/browse";
@@ -229,45 +230,50 @@ export async function restoreArchiveSnapshot(
                 .map((t) => t.adapter.maxConcurrentTransfers)
                 .filter((n): n is number => typeof n === "number" && n > 0);
             const concurrency = Math.max(1, Math.min(await getMaxConcurrentFiles(), ...adapterCaps, Infinity));
-            await forEachSnapshotFile(archive, workItems, async (file, content) => {
-                const target = targets.get(file.src)!;
-                const stagePath = path.join(getTempDir(), `restore-${process.pid}-${crypto.randomUUID()}`);
-                let digest: string | undefined;
+            const sessions = createDestinationSessions(concurrency, log);
+            try {
+                await forEachSnapshotFile(archive, workItems, async (file, content) => {
+                    const target = targets.get(file.src)!;
+                    const stagePath = path.join(getTempDir(), `restore-${process.pid}-${crypto.randomUUID()}`);
+                    let digest: string | undefined;
 
-                try {
-                    await pipeline(content, hashingStream((d) => { digest = d; }), createWriteStream(stagePath));
+                    try {
+                        await pipeline(content, hashingStream((d) => { digest = d; }), createWriteStream(stagePath));
 
-                    // For unencrypted archives this is the only integrity check the file
-                    // gets - there is no AEAD tag protecting its bytes.
-                    if (file.h && digest && digest !== file.h) {
-                        throw new Error(`Checksum mismatch: expected ${file.h}, got ${digest}`);
+                        // For unencrypted archives this is the only integrity check the file
+                        // gets - there is no AEAD tag protecting its bytes.
+                        if (file.h && digest && digest !== file.h) {
+                            throw new Error(`Checksum mismatch: expected ${file.h}, got ${digest}`);
+                        }
+
+                        const remotePath = safeRemoteJoin(target.basePath, file.p);
+                        // Forward the adapter's own warnings and errors (a rate-limit retry, a real
+                        // rejection) into the restore log; the per-file "started/finished" info is
+                        // dropped so a large restore does not bury the history.
+                        const uploadOk = await sessions.upload(
+                            target, stagePath, remotePath,
+                            (msg, level, type, details) => { if (level && level !== 'info') log(`${file.p}: ${msg}`, level, type ?? 'storage', details); }
+                        );
+                        if (!uploadOk) {
+                            throw new Error(`Adapter '${target.adapter.id}' rejected the upload`);
+                        }
+
+                        perSourceDone.set(file.src, (perSourceDone.get(file.src) ?? 0) + 1);
+                    } catch (e: unknown) {
+                        const message = e instanceof Error ? e.message : String(e);
+                        perSourceFailed.set(file.src, (perSourceFailed.get(file.src) ?? 0) + 1);
+                        errors.push({ entry: `${labels.get(file.src) ?? file.src}/${file.p}`, error: message });
+                        log(`Failed to restore '${file.p}' to ${target.label}: ${message}`, 'error', 'storage');
+                    } finally {
+                        await fs.unlink(stagePath).catch(() => { });
                     }
 
-                    const remotePath = safeRemoteJoin(target.basePath, file.p);
-                    // Forward the adapter's own warnings and errors (a rate-limit retry, a real
-                    // rejection) into the restore log; the per-file "started/finished" info is
-                    // dropped so a large restore does not bury the history.
-                    const uploadOk = await target.adapter.upload(
-                        target.config, stagePath, remotePath, undefined,
-                        (msg, level, type, details) => { if (level && level !== 'info') log(`${file.p}: ${msg}`, level, type ?? 'storage', details); }
-                    );
-                    if (!uploadOk) {
-                        throw new Error(`Adapter '${target.adapter.id}' rejected the upload`);
-                    }
-
-                    perSourceDone.set(file.src, (perSourceDone.get(file.src) ?? 0) + 1);
-                } catch (e: unknown) {
-                    const message = e instanceof Error ? e.message : String(e);
-                    perSourceFailed.set(file.src, (perSourceFailed.get(file.src) ?? 0) + 1);
-                    errors.push({ entry: `${labels.get(file.src) ?? file.src}/${file.p}`, error: message });
-                    log(`Failed to restore '${file.p}' to ${target.label}: ${message}`, 'error', 'storage');
-                } finally {
-                    await fs.unlink(stagePath).catch(() => { });
-                }
-
-                done++;
-                updateDetail(`Files: ${done}/${workItems.length} restored`);
-            }, concurrency);
+                    done++;
+                    updateDetail(`Files: ${done}/${workItems.length} restored`);
+                }, concurrency);
+            } finally {
+                await sessions.close();
+            }
 
             for (const dir of selectedDirs) {
                 if (!targets.has(dir.src)) continue; // target resolution already failed above

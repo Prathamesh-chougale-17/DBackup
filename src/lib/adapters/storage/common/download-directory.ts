@@ -107,53 +107,69 @@ export async function downloadDirectoryGeneric(
         ? (msg, level, type, details) => { if (level && level !== "info") onLog(msg, level, type, details); }
         : undefined;
 
-    const outcomes = await mapWithConcurrency(entries, options?.concurrency ?? 1, async (entry): Promise<Outcome> => {
-        // Incremental backups skip files the chain already holds. They still belong to the
-        // snapshot, so they are reported as unchanged rather than dropped - the archive
-        // writer carries them forward by reference.
-        if (options?.shouldDownload && !options.shouldDownload(entry)) {
-            skippedFiles++;
-            bump(0);
-            return { kind: "entry", entry: { relativePath: entry.relativePath, size: entry.size, lastModified: entry.lastModified, unchanged: true } };
+    // Adapters that authenticate per connection (SFTP, FTP) charge a full handshake before the
+    // first byte moves. A session pools exactly as many connections as we run transfers, turning
+    // one handshake per file into one per worker - and keeping the socket count at what the
+    // server was told to expect rather than at however many files a source happens to hold.
+    const concurrency = options?.concurrency ?? 1;
+    const session = adapter.openSession
+        ? await adapter.openSession(config, onLog, { concurrency }).catch(() => undefined)
+        : undefined;
+    const fetchFile = session?.download
+        ? (sourcePath: string, target: string) => session.download!(sourcePath, target)
+        : (sourcePath: string, target: string) => adapter.download(config, sourcePath, target, undefined, fileOnLog);
+
+    try {
+        const outcomes = await mapWithConcurrency(entries, concurrency, async (entry): Promise<Outcome> => {
+            // Incremental backups skip files the chain already holds. They still belong to the
+            // snapshot, so they are reported as unchanged rather than dropped - the archive
+            // writer carries them forward by reference.
+            if (options?.shouldDownload && !options.shouldDownload(entry)) {
+                skippedFiles++;
+                bump(0);
+                return { kind: "entry", entry: { relativePath: entry.relativePath, size: entry.size, lastModified: entry.lastModified, unchanged: true } };
+            }
+
+            // The relative path comes from the remote server's listing, so it is not trusted:
+            // an S3 key is stored verbatim and a WebDAV href is whatever the server sends. A
+            // ".." segment would otherwise write outside the work directory during collection.
+            let localFilePath: string;
+            try {
+                localFilePath = resolveWithinRoot(localPath, entry.relativePath);
+            } catch (error: unknown) {
+                const message = error instanceof Error ? error.message : String(error);
+                onLog?.(`Refused to collect '${entry.relativePath}': ${message}`, "error", "security");
+                return { kind: "failure", failure: { path: entry.relativePath, error: message } };
+            }
+            await fs.mkdir(path.dirname(localFilePath), { recursive: true });
+
+            const success = await fetchFile(entry.sourcePath, localFilePath);
+            if (!success) {
+                // Recorded, not swallowed: the file is absent from the archive, and a backup
+                // that hides that is worse than one that admits it.
+                onLog?.(`Failed to download ${entry.sourcePath}`, "error", "storage");
+                return { kind: "failure", failure: { path: entry.relativePath, error: "the source did not return the file" } };
+            }
+
+            bump(entry.size);
+            return { kind: "entry", entry: { relativePath: entry.relativePath, size: entry.size, lastModified: entry.lastModified } };
+        });
+
+        const resultEntries: DirectoryFileEntry[] = [];
+        const failures: { path: string; error: string }[] = [];
+        for (const outcome of outcomes) {
+            if (outcome.kind === "entry") resultEntries.push(outcome.entry);
+            else failures.push(outcome.failure);
         }
 
-        // The relative path comes from the remote server's listing, so it is not trusted:
-        // an S3 key is stored verbatim and a WebDAV href is whatever the server sends. A
-        // ".." segment would otherwise write outside the work directory during collection.
-        let localFilePath: string;
-        try {
-            localFilePath = resolveWithinRoot(localPath, entry.relativePath);
-        } catch (error: unknown) {
-            const message = error instanceof Error ? error.message : String(error);
-            onLog?.(`Refused to collect '${entry.relativePath}': ${message}`, "error", "security");
-            return { kind: "failure", failure: { path: entry.relativePath, error: message } };
-        }
-        await fs.mkdir(path.dirname(localFilePath), { recursive: true });
-
-        const success = await adapter.download(config, entry.sourcePath, localFilePath, undefined, fileOnLog);
-        if (!success) {
-            // Recorded, not swallowed: the file is absent from the archive, and a backup
-            // that hides that is worse than one that admits it.
-            onLog?.(`Failed to download ${entry.sourcePath}`, "error", "storage");
-            return { kind: "failure", failure: { path: entry.relativePath, error: "the source did not return the file" } };
+        if (skippedFiles > 0) {
+            onLog?.(`${skippedFiles} of ${totalFiles} file(s) unchanged, not transferred`, "info", "storage");
         }
 
-        bump(entry.size);
-        return { kind: "entry", entry: { relativePath: entry.relativePath, size: entry.size, lastModified: entry.lastModified } };
-    });
-
-    const resultEntries: DirectoryFileEntry[] = [];
-    const failures: { path: string; error: string }[] = [];
-    for (const outcome of outcomes) {
-        if (outcome.kind === "entry") resultEntries.push(outcome.entry);
-        else failures.push(outcome.failure);
+        return { files: resultEntries.length, bytes: processedBytes, entries: resultEntries, failures };
+    } finally {
+        await session?.close().catch(() => { });
     }
-
-    if (skippedFiles > 0) {
-        onLog?.(`${skippedFiles} of ${totalFiles} file(s) unchanged, not transferred`, "info", "storage");
-    }
-
-    return { files: resultEntries.length, bytes: processedBytes, entries: resultEntries, failures };
 }
 
 /**

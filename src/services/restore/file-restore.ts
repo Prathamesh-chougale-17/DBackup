@@ -22,6 +22,7 @@ import crypto from "crypto";
 import { BackupMetadata, StorageAdapter, AdapterConfig } from "@/lib/core/interfaces";
 import { openStorageArchiveSource, resolveStorageAdapter, ManagedArchiveSource } from "@/lib/archive/storage-source";
 import { readArchiveManifest, readArchiveIndex } from "@/lib/archive/reader";
+import { createDestinationSessions } from "./destination-sessions";
 import { forEachSnapshotFile, hashingStream, ChainReaderOptions } from "@/lib/archive/chain-source";
 import { checkChainCompleteness } from "@/lib/archive/chain";
 import { resolveSelection, totalSize } from "@/lib/archive/browse";
@@ -395,6 +396,8 @@ export async function restoreFilesToStorage(
         .filter((n): n is number => typeof n === "number" && n > 0);
     const concurrency = Math.max(1, Math.min(await getMaxConcurrentFiles(), ...adapterCaps, Infinity));
 
+    const sessions = createDestinationSessions(concurrency);
+
     try {
         await forEachSnapshotFile(archive, files, async (file, content) => {
             const target = targets.get(file.src);
@@ -413,7 +416,7 @@ export async function restoreFilesToStorage(
                 }
 
                 const remotePath = safeRemoteJoin(target.basePath, file.p);
-                if (!(await target.adapter.upload(target.config, stagePath, remotePath))) {
+                if (!(await sessions.upload(target, stagePath, remotePath))) {
                     throw new Error(`Adapter '${target.adapter.id}' rejected the upload`);
                 }
 
@@ -429,6 +432,7 @@ export async function restoreFilesToStorage(
             }
         }, concurrency);
     } finally {
+        await sessions.close();
         await archive.dispose();
     }
 

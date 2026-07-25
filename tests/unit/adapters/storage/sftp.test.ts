@@ -205,6 +205,71 @@ describe("SFTPAdapter", () => {
         });
     });
 
+    // ===== openSession() connection reuse =====
+
+    describe("openSession() pooling", () => {
+        it("transfers many files over the connections it was allowed, not one per file", async () => {
+            // The point of the session: 130 files used to mean 130 handshakes, which is slow and
+            // is what makes an SSH server start refusing connections mid-backup.
+            mockSftpExists.mockResolvedValue("d");
+            const session = await SFTPAdapter.openSession!(config, undefined, { concurrency: 4 });
+
+            await Promise.all(Array.from({ length: 30 }, (_, i) =>
+                session.upload(`/tmp/f${i}`, `Job/f${i}`)));
+            await session.close();
+
+            expect(mockSftpConnect.mock.calls.length).toBeLessThanOrEqual(4);
+            expect(mockSftpFastPut).toHaveBeenCalledTimes(30);
+        });
+
+        it("serves downloads over the same connections as uploads", async () => {
+            // Backup collection reads through the session too - without that, a file backup from
+            // an SFTP source still paid a handshake per file even though the session existed.
+            const session = await SFTPAdapter.openSession!(config, undefined, { concurrency: 2 });
+
+            await Promise.all(Array.from({ length: 10 }, (_, i) =>
+                session.download!(`Job/f${i}`, `/tmp/f${i}`)));
+            await session.close();
+
+            expect(mockSftpConnect.mock.calls.length).toBeLessThanOrEqual(2);
+            expect(mockSftpFastGet).toHaveBeenCalledTimes(10);
+        });
+
+        it("opens a single connection when no concurrency is requested", async () => {
+            mockSftpExists.mockResolvedValue("d");
+            const session = await SFTPAdapter.openSession!(config);
+
+            await session.upload("/tmp/a", "Job/a");
+            await session.upload("/tmp/b", "Job/b");
+            await session.close();
+
+            expect(mockSftpConnect).toHaveBeenCalledTimes(1);
+        });
+
+        it("checks a directory once for the whole session rather than once per file", async () => {
+            // The directory cache is shared across the pool because which folders exist is a
+            // property of the server, not of the connection that asked.
+            mockSftpExists.mockResolvedValue("d");
+            const session = await SFTPAdapter.openSession!(config, undefined, { concurrency: 4 });
+
+            for (let i = 0; i < 5; i++) await session.upload(`/tmp/f${i}`, `Job/f${i}`);
+            await session.close();
+
+            expect(mockSftpExists).toHaveBeenCalledTimes(1);
+        });
+
+        it("closes every connection it opened", async () => {
+            mockSftpExists.mockResolvedValue("d");
+            const session = await SFTPAdapter.openSession!(config, undefined, { concurrency: 3 });
+
+            await Promise.all(Array.from({ length: 9 }, (_, i) => session.upload(`/tmp/f${i}`, `Job/f${i}`)));
+            const opened = mockSftpConnect.mock.calls.length;
+            await session.close();
+
+            expect(mockSftpEnd).toHaveBeenCalledTimes(opened);
+        });
+    });
+
     // ===== download() =====
 
     describe("download()", () => {
@@ -560,7 +625,6 @@ describe("SFTPAdapter", () => {
     describe("upload() step callback progress", () => {
         it("invokes onProgress via the upload step callback when totalSize > 0", async () => {
             mockSftpExists.mockResolvedValue("d");
-            mockFsStat.mockResolvedValue({ size: 2048 });
 
             let stepCb: ((transferred: number, chunk: unknown, total: number) => void) | undefined;
             mockSftpFastPut.mockImplementation((_src: unknown, _dst: unknown, opts: any) => {

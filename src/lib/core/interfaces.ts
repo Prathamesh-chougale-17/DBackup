@@ -354,6 +354,16 @@ export interface StorageSession {
         onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
         options?: UploadOptions
     ): Promise<boolean>;
+    /**
+     * Optional: downloads over the session's connections too. Present on adapters where opening
+     * a connection is expensive enough that a directory collection should not pay for one per
+     * file. Callers must fall back to `StorageAdapter.download()` when it is absent.
+     */
+    download?(
+        remotePath: string,
+        localPath: string,
+        onProgress?: (processed: number, total: number) => void
+    ): Promise<boolean>;
     close(): Promise<void>;
 }
 
@@ -471,13 +481,18 @@ export interface StorageAdapter extends BaseAdapter {
     ): Promise<'passed' | 'failed' | 'unsupported'>;
 
     /**
-     * Optional: Opens a persistent session for multiple uploads on a single connection.
-     * Adapters that do not implement this fall back to per-call `upload()` (stateless).
-     * Implementations should hold the underlying connection until `close()` is invoked.
+     * Optional: Opens a persistent session for multiple transfers over pooled connections.
+     * Adapters that do not implement this fall back to per-call `upload()`/`download()` (stateless).
+     * Implementations should hold the underlying connections until `close()` is invoked.
+     *
+     * `options.concurrency` is how many transfers the caller intends to run at once, and so how
+     * many connections the session may open. Sessions must never open more than that: on SFTP
+     * and FTP the connection count is what servers rate-limit, not the byte count.
      */
     openSession?(
         config: AdapterConfig,
-        onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
+        onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
+        options?: { concurrency?: number }
     ): Promise<StorageSession>;
 
     /**
