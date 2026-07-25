@@ -5,11 +5,15 @@ All notable changes to DBackup are documented here.
 ## vNEXT
 *Release: In Progress*
 
-> ⚠️ **Breaking:** Combined (database + directory source) backups now use a new seekable archive format. Compression and encryption are applied to each entry inside the archive instead of to the archive as a whole, which is what makes it possible to restore a single file without downloading and decrypting the entire backup. Restoring such a backup requires this version or newer. Database-only backups are unaffected and keep their existing format.
+> **Note:** File backups introduce artefacts that did not exist before. A combined (database +
+> directory source) backup is a seekable archive - compression and encryption are applied per entry
+> rather than to the archive as a whole, which is what lets a single file be restored without
+> fetching the rest - and it carries a `<backup>.index` sidecar next to the usual `.meta.json`. An
+> incremental job stores its snapshots in `<job>/chain-<timestamp>/` instead of flat. Tooling that
+> walks a destination and expects two files per backup will meet a third one next to these.
 >
-> ⚠️ **Breaking:** Combined backups now write a third sidecar file next to the backup (`<backup>.index`) on every destination, alongside the existing `.meta.json`. It holds the archive's file index. Retention and storage tooling that assumes exactly two files per backup needs updating.
->
-> ⚠️ **Breaking:** Jobs using the new incremental mode store their backups in one folder per chain, named `<job>/chain-<timestamp>/`, with a `full-`/`inc-` prefix and the snapshot's position in the chain. Jobs in the default full-backup mode keep the existing flat layout.
+> Nothing existing changes: database-only backups keep their format, their layout and their restore
+> path. Only the reverse matters - a backup written by this version cannot be read by an older one.
 
 ### ✨ Features
 
