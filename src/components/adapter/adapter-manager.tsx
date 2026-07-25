@@ -28,6 +28,7 @@ import { HealthStatusBadge } from "@/components/ui/health-status-badge";
 import { StorageHistoryModal } from "@/components/dashboard/widgets/storage-history-modal";
 import { PERMISSIONS } from "@/lib/auth/permissions";
 import { CloneDialog } from "@/components/ui/clone-dialog";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 export function AdapterManager({ type, title, description, canManage = true, permissions = [], roleFilter, defaultRole, hidePageHeading = false }: AdapterManagerProps) {
     const [configs, setConfigs] = useState<AdapterConfig[]>([]);
@@ -445,18 +446,22 @@ export function AdapterManager({ type, title, description, canManage = true, per
 
             {/* Step 1: Adapter Picker */}
             <Dialog open={isPickerOpen} onOpenChange={setIsPickerOpen}>
-                <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto" aria-describedby={undefined}>
-                    <DialogHeader>
+                <DialogContent className="sm:max-w-2xl max-h-[90vh] p-0" aria-describedby={undefined}>
+                    <DialogHeader className="px-6 pt-6 pb-2 shrink-0">
                         <DialogTitle>{type === 'notification' ? "Select Notification Type" : (type === 'database' ? "Select Database Type" : (type === 'storage' ? "Select Destination Type" : "Select Type"))}</DialogTitle>
                     </DialogHeader>
-                    <AdapterPicker
-                        adapters={availableAdapters}
-                        onSelect={(adapter) => {
-                            setSelectedAdapterForNew(adapter.id);
-                            setIsPickerOpen(false);
-                            setIsDialogOpen(true);
-                        }}
-                    />
+                    <ScrollArea className="*:data-[slot=scroll-area-viewport]:max-h-[calc(90vh-9rem)]">
+                        <div className="px-6 pb-6">
+                            <AdapterPicker
+                                adapters={availableAdapters}
+                                onSelect={(adapter) => {
+                                    setSelectedAdapterForNew(adapter.id);
+                                    setIsPickerOpen(false);
+                                    setIsDialogOpen(true);
+                                }}
+                            />
+                        </div>
+                    </ScrollArea>
                 </DialogContent>
             </Dialog>
 

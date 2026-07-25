@@ -16,13 +16,15 @@ A raw overflow container renders the native OS scrollbar, which sits next to the
 
 ### Where the max-height goes
 
-This is the part that silently fails. `ScrollArea` renders a Radix Root wrapping a Viewport. A `max-h-*` on the root alone does **not** clip the content - the viewport keeps growing. Constrain the viewport:
+This is the part that silently fails. `ScrollArea` renders a Radix Root wrapping a Viewport, and the **Viewport** is the element that gets `overflow-y: scroll` - our wrapper sizes it with `size-full`, so its height is `100%`. A percentage height cannot resolve against a parent that only carries a `max-height`, so a `max-h-*` on the root leaves the scrolling element unconstrained. Put it on the viewport:
 
 ```tsx
 <ScrollArea className="*:data-[slot=scroll-area-viewport]:max-h-[calc(90vh-9rem)]">
 ```
 
 `*:data-[slot=scroll-area-viewport]:` is the canonical selector - it matches the `data-slot` our wrapper sets in `ui/scroll-area.tsx`. A few older files use `*:data-radix-scroll-area-viewport:`. Both work at runtime, but do not copy the old form into new code.
+
+Four files still set `max-h` on the root. `tests/unit/lint-guards/design-system.test.ts` holds that count as a baseline and fails the build if it grows, so new code cannot add to it.
 
 ### Filling the remaining height in a flex parent
 
@@ -42,7 +44,7 @@ This is the part that silently fails. `ScrollArea` renders a Radix Root wrapping
 
 ### Scrollable dialog (canonical)
 
-Reference implementations: `src/components/settings/credential-profile-dialog.tsx`, `src/app/dashboard/users/create-group-dialog.tsx`, `src/components/adapter/adapter-form.tsx`.
+Reference implementation: `src/components/adapter/adapter-form.tsx` - it is the one that gets both the layout and the viewport selector right. `credential-profile-dialog.tsx` has the layout below but still sets `max-h` on the ScrollArea root, so copy its structure, not its ScrollArea line.
 
 ```tsx
 <DialogContent className="sm:max-w-xl max-h-[90vh] p-0">
@@ -198,6 +200,19 @@ Never log whole session, user, or config objects. Log the specific field (`{ use
 - Permission flags are resolved server-side (`getUserPermissions()`) and passed down as booleans such as `canManage`, `canExecute`. Do not re-check permissions in the client for security - client checks are for hiding UI only.
 
 ---
+
+## What is enforced automatically
+
+`tests/unit/lint-guards/design-system.test.ts` runs in `pnpm test` and `pnpm validate`:
+
+| Rule | Mode |
+| :--- | :--- |
+| Raw `overflow-y-auto` instead of ScrollArea | Fails the build |
+| Locale date formatting | Fails the build |
+| `max-h` on the ScrollArea root | Baseline of 4, fails if it grows |
+| Palette color with no `dark:` variant | Baseline of 126, fails if it grows |
+
+Baselines may only be lowered. Fix violations, drop the number, and the guard locks the win in. Everything else in this guide is on you.
 
 ## Pre-commit UI checklist
 

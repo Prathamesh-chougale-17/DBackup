@@ -44,6 +44,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { EncryptionKeyResolutionDialog, type KeyResolutionResult } from "@/components/common/encryption-key-resolution-dialog";
 import type { StorageHistoryTabRef } from "@/components/dashboard/storage/storage-history-tab";
 import type { StorageSettingsTabRef } from "@/components/dashboard/storage/storage-settings-tab";
+import { logger } from "@/lib/logging/logger";
+import { wrapError } from "@/lib/logging/errors";
+
+const log = logger.child({ component: "StorageClient" });
 
 interface AdapterConfig {
     id: string;
@@ -109,7 +113,7 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
                 }
             }
         } catch (e) {
-            console.error(e);
+            log.error("Failed to load storage destinations", {}, wrapError(e));
         }
     }, [searchParams]);
 

@@ -24,6 +24,10 @@ import { formatTwoFactorCode } from "@/lib/utils"
 import { ShieldCheck, Box, Settings2, Globe } from "lucide-react"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { logLoginSuccess } from "@/app/actions/audit/audit-log"
+import { logger } from "@/lib/logging/logger"
+import { wrapError } from "@/lib/logging/errors"
+
+const log = logger.child({ component: "LoginForm" })
 
 const formSchema = z.object({
   email: z.string().email(),
@@ -114,7 +118,7 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
             const result = await signIn.passkey({
                 fetchOptions: {
                     onSuccess: async () => {
-                        await logLoginSuccess().catch(e => console.error("Logging failed", e));
+                        await logLoginSuccess().catch(e => log.error("Audit log for login failed", {}, wrapError(e)));
                         toast.success("Login successful")
                         router.push("/dashboard")
                     }
@@ -147,7 +151,7 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
                   code: totpCode,
                   fetchOptions: {
                       onSuccess: async () => {
-                           await logLoginSuccess().catch(e => console.error("Logging failed", e));
+                           await logLoginSuccess().catch(e => log.error("Audit log for login failed", {}, wrapError(e)));
                            router.push("/dashboard")
                            toast.success("Login successful")
                       },
@@ -162,7 +166,7 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
                   code: totpCode,
                   fetchOptions: {
                       onSuccess: async () => {
-                           await logLoginSuccess().catch(e => console.error("Logging failed", e));
+                           await logLoginSuccess().catch(e => log.error("Audit log for login failed", {}, wrapError(e)));
                            router.push("/dashboard")
                            toast.success("Login successful")
                       },
@@ -174,7 +178,7 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
               })
           }
       } catch (error) {
-          console.error(error)
+          log.error("Two-factor verification failed", {}, wrapError(error))
           toast.error("An error occurred")
           setLoading(false)
       }
@@ -213,17 +217,15 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
           callbackURL: "/dashboard",
           fetchOptions: {
             onSuccess: async (ctx) => {
-               console.log("Login Success Context:", ctx);
                if (ctx.data?.twoFactorRedirect) {
                  setTwoFactorStep(true)
                  setLoading(false)
                  return
                }
-               await logLoginSuccess().catch(e => console.error("Logging failed", e));
+               await logLoginSuccess().catch(e => log.error("Audit log for login failed", {}, wrapError(e)));
               router.push("/dashboard")
             },
             onError: (ctx) => {
-              console.log("Login Error Context:", ctx);
               if (ctx.error.code === "TWO_FACTOR_REQUIRED" || ctx.error.message?.includes("2FA") || ctx.error.message?.includes("Two factor")) {
                  setTwoFactorStep(true)
                  setLoading(false)
@@ -253,7 +255,7 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
         })
       }
     } catch (error) {
-       console.error(error);
+       log.error("Login submit failed", {}, wrapError(error));
        setLoading(false);
     }
   }

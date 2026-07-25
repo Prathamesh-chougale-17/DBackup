@@ -26,6 +26,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
+import { logger } from "@/lib/logging/logger";
+import { wrapError } from "@/lib/logging/errors";
+
+const log = logger.child({ component: "HistoryPage" });
 
 export default function HistoryPage() {
     return (
@@ -89,7 +93,7 @@ function HistoryContent() {
                 setSystemTimezone(data.systemTimezone);
             }
         } catch (_e) {
-            console.error(_e);
+            log.error("Failed to load execution history", {}, wrapError(_e));
         } finally {
             fetchInFlight.current = false;
         }
@@ -103,7 +107,7 @@ function HistoryContent() {
                 setNotificationLogs(result.data);
             }
         } catch (_e) {
-            console.error(_e);
+            log.error("Failed to load notification logs", {}, wrapError(_e));
         }
     }, []);
 

@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn, formatBytes } from "@/lib/utils";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface DownloadLinkModalProps {
     open: boolean;
@@ -148,7 +149,8 @@ export function DownloadLinkModal({
                     </DialogDescription>
                 </DialogHeader>
 
-                <div className="overflow-y-auto space-y-4 pt-4">
+                <ScrollArea className="flex-1 min-h-0">
+                <div className="space-y-4 pt-4">
                     {/* File Info */}
                     <div className="flex items-start gap-4 p-4 border rounded-lg bg-secondary/20">
                         <div className="p-2 rounded bg-background border shadow-sm">
@@ -334,6 +336,7 @@ export function DownloadLinkModal({
                     </div>
                 )}
                 </div>
+                </ScrollArea>
             </DialogContent>
         </Dialog>
     );

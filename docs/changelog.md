@@ -35,6 +35,9 @@ All notable changes to DBackup are documented here.
 - **sftp**: Fixed a destination with a configured path failing with a permission error on a path nobody entered (`Permission denied /volume1` for a configured `/volume1/Transfer/restore`). Creating a directory walked *upwards* until it found one that exists, which on a NAS means climbing to the filesystem root, since an account can usually write inside its share without being able to stat the volume above it. The configured path is now treated as a precondition and only folders below it are created. When it is unreachable, the error names that path, says which segment of it stops being visible, and - where SFTP is confined below the filesystem root, which is what `ChrootDirectory` in `sshd_config` and most NAS and hosted SFTP setups do - names a rewritten path after confirming that the server actually has it.
 - **webdav**: Fixed uploads reading the whole backup into memory before sending it, which made a backup larger than the machine's RAM fail on this destination alone. Uploads now stream, as every other destination already did.
 - **backup**: Fixed the storage listing cache update after an upload being fired without awaiting it, which left its failures unhandled and could let it outlive the backup run that produced it.
+- **auth**: Removed two debug statements that wrote the full better-auth context object to the browser console on every login attempt.
+- **notifications**: Fixed the notification preview showing timestamps in the browser locale instead of the user's configured timezone and format.
+- **storage**: Fixed the download link dialog, the SSO provider editor and the adapter type picker scrolling with the native scrollbar instead of the styled one.
 - **auth**: Fixed two-factor authentication failing since v2.10.1 with an empty error in the UI and an `Unknown argument 'failedVerificationCount'` database error in the logs. The Better Auth update added lockout tracking to the two-factor record, but the matching columns were never added to the schema, so both enabling 2FA and verifying TOTP or backup codes failed. Failed attempts are now counted and the lockout works as intended. ([#130](https://github.com/Skyfay/DBackup/issues/130))
 
 ### 🔒 Security
@@ -79,6 +82,8 @@ All notable changes to DBackup are documented here.
 - **backup**: Round-trip coverage for the archive format against awkward inputs - paths past 100 characters, unicode, spaces, empty files - verified with real `tar` and the standalone recovery kit, since "an unencrypted archive extracts with `tar -xf`" and "the kit reads what the writer emits" are promises only running them can prove.
 - **backup**: Regression coverage for the format's edge cases: TAR entries at the 8 GiB size boundary, incremental chains spanning several archives, chain-aware retention and deletion, restore path guards, and the SMB shadow copy lifecycle including release on failure and cancellation.
 - **lint-guards**: New guards that fail the build when code enumerates storage adapters without filtering by role, or links to the retired Sources/Destinations/Notifications routes.
+- **lint-guards**: New design system guards covering raw overflow containers, locale date formatting, ScrollArea max-height placement and palette colors without a dark mode variant. The last two carry a baseline count that may only go down, so the existing backlog is tolerated but nothing new is added.
+- **lint-guards**: The no-console guard no longer exempts Client Components. The exemption assumed the logger needed Node APIs, which it never did, and it was hiding 21 console calls.
 
 ### 🐳 Docker
 

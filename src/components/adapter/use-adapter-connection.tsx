@@ -3,6 +3,10 @@
 import { useState } from "react";
 import { toast } from "sonner";
 import { UseFormReturn } from "react-hook-form";
+import { logger } from "@/lib/logging/logger";
+import { wrapError } from "@/lib/logging/errors";
+
+const log = logger.child({ component: "useAdapterConnection" });
 
 interface UseAdapterConnectionProps {
     adapterId: string;
@@ -131,7 +135,7 @@ export function useAdapterConnection({ adapterId, form, initialDataId, primaryCr
                  toast.error("Failed to list databases: " + (data.message || data.error || "Unknown"));
              }
         } catch(e) {
-            console.error(e);
+            log.error("Failed to list databases", {}, wrapError(e));
             toast.error("Network error while listing databases");
         } finally {
             setIsLoadingDbs(false);
