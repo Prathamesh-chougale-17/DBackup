@@ -195,7 +195,7 @@ describe('restoreArchiveSnapshot', () => {
         expect(result.restoredDirectories).toEqual(['src-1']);
         expect(dbAdapter.prepareRestore).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining(['db1_restored', 'db2']));
         expect(dbAdapter.restoreOne).toHaveBeenCalledTimes(2);
-        expect(storageAdapter.upload).toHaveBeenCalledWith(expect.anything(), expect.any(String), '/restore/dir/a.txt');
+        expect(storageAdapter.upload).toHaveBeenCalledWith(expect.anything(), expect.any(String), '/restore/dir/a.txt', undefined, expect.any(Function));
     });
 
     it('sets the two restore stages according to what the snapshot holds', async () => {
@@ -407,7 +407,7 @@ describe('restoreArchiveSnapshot', () => {
         expect(result.restoredDirectories).toEqual(['src-1']);
         expect(result.restoredDatabases).toEqual([]);
         expect(dbAdapter.restoreOne).not.toHaveBeenCalled();
-        expect(storageAdapter.upload).toHaveBeenCalledWith(expect.anything(), expect.any(String), '/restore/dir/a.txt');
+        expect(storageAdapter.upload).toHaveBeenCalledWith(expect.anything(), expect.any(String), '/restore/dir/a.txt', undefined, expect.any(Function));
     });
 
     it('records an error (Partial) for a directory entry with no restore target specified', async () => {
@@ -424,6 +424,96 @@ describe('restoreArchiveSnapshot', () => {
         expect(result.restoredDatabases).toEqual(['db1']);
         expect(result.restoredDirectories).toHaveLength(0);
         expect(result.errors.some((e) => e.error.includes('No restore target specified'))).toBe(true);
+    });
+
+    it('serialises writes for an adapter that cannot take them in parallel', async () => {
+        // Dropbox permits one write per account and answers the rest with 429, so honouring
+        // the user's higher setting there would only build a queue of retries. An adapter that
+        // declares a cap gets it, whatever the setting says.
+        prismaMock.systemSetting.findUnique.mockResolvedValue({ key: 'maxConcurrentFiles', value: '10' } as never);
+        const { sourceAdapter } = await buildRemoteBackup([], { 'a.txt': 'A', 'b.txt': 'B', 'c.txt': 'C', 'd.txt': 'D' });
+
+        let inFlight = 0;
+        let peak = 0;
+        const storageAdapter = makeFakeStorageAdapter({
+            maxConcurrentTransfers: 1,
+            upload: vi.fn().mockImplementation(async () => {
+                inFlight++;
+                peak = Math.max(peak, inFlight);
+                await new Promise((r) => setTimeout(r, 5));
+                inFlight--;
+                return true;
+            }),
+        });
+        wire({ 'source-fs': sourceAdapter, 'local-filesystem': storageAdapter });
+
+        const result = await restoreArchiveSnapshot(makeInput({
+            directoryMapping: [{ entryId: 'src-1', targetConfigId: 'target-storage-1', targetPath: '/restore', selected: true }],
+        }), { log: vi.fn(), updateDetail: vi.fn(), setStage: vi.fn() });
+
+        expect(result.status).toBe('Success');
+        expect(peak).toBe(1);
+    });
+
+    it('uses the configured concurrency for an adapter with no cap', async () => {
+        // The guard for the test above: without a declared cap the setting must still apply,
+        // otherwise capping one adapter would quietly serialise every destination.
+        prismaMock.systemSetting.findUnique.mockResolvedValue({ key: 'maxConcurrentFiles', value: '4' } as never);
+        const { sourceAdapter } = await buildRemoteBackup([], { 'a.txt': 'A', 'b.txt': 'B', 'c.txt': 'C', 'd.txt': 'D' });
+
+        let inFlight = 0;
+        let peak = 0;
+        const storageAdapter = makeFakeStorageAdapter({
+            upload: vi.fn().mockImplementation(async () => {
+                inFlight++;
+                peak = Math.max(peak, inFlight);
+                await new Promise((r) => setTimeout(r, 5));
+                inFlight--;
+                return true;
+            }),
+        });
+        wire({ 'source-fs': sourceAdapter, 'local-filesystem': storageAdapter });
+
+        await restoreArchiveSnapshot(makeInput({
+            directoryMapping: [{ entryId: 'src-1', targetConfigId: 'target-storage-1', targetPath: '/restore', selected: true }],
+        }), { log: vi.fn(), updateDetail: vi.fn(), setStage: vi.fn() });
+
+        expect(peak).toBeGreaterThan(1);
+    });
+
+    it('reports Partial - not Failed - when a single file of a directory source is rejected', async () => {
+        // The real case: Dropbox refuses one filename outright while the other 129 files land.
+        // Judging a source as all-or-nothing turned that into a failed run reporting that no
+        // entries could be restored, which was both wrong and alarming.
+        const { sourceAdapter } = await buildRemoteBackup([], {
+            'keep-a.txt': 'A', 'keep-b.txt': 'B', '.DS_Store': 'junk',
+        });
+        const storageAdapter = makeFakeStorageAdapter({
+            upload: vi.fn().mockImplementation(async (_c: unknown, _local: string, remotePath: string) =>
+                !remotePath.endsWith('.DS_Store')),
+        });
+        wire({ 'source-fs': sourceAdapter, 'local-filesystem': storageAdapter });
+
+        const result = await restoreArchiveSnapshot(makeInput({
+            directoryMapping: [{ entryId: 'src-1', targetConfigId: 'target-storage-1', targetPath: '/restore', selected: true }],
+        }), { log: vi.fn(), updateDetail: vi.fn(), setStage: vi.fn() });
+
+        expect(result.status).toBe('Partial');
+        expect(result.errors).toHaveLength(1);
+        expect(result.errors[0].entry).toContain('.DS_Store');
+    });
+
+    it('still reports Failed when every file of a directory source is rejected', async () => {
+        // The distinction that makes Partial meaningful: nothing arrived at all.
+        const { sourceAdapter } = await buildRemoteBackup([], { 'a.txt': 'A', 'b.txt': 'B' });
+        const storageAdapter = makeFakeStorageAdapter({ upload: vi.fn().mockResolvedValue(false) });
+        wire({ 'source-fs': sourceAdapter, 'local-filesystem': storageAdapter });
+
+        const result = await restoreArchiveSnapshot(makeInput({
+            directoryMapping: [{ entryId: 'src-1', targetConfigId: 'target-storage-1', targetPath: '/restore', selected: true }],
+        }), { log: vi.fn(), updateDetail: vi.fn(), setStage: vi.fn() });
+
+        expect(result.status).toBe('Failed');
     });
 
     it('fails a file whose content does not match its recorded checksum', async () => {

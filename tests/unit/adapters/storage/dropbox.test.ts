@@ -219,6 +219,87 @@ describe("DropboxAdapter", () => {
             expect(onProgress).toHaveBeenCalledWith(100);
         });
 
+        it("retries a rate-limited upload and succeeds once Dropbox lets it through", async () => {
+            // Dropbox permits one write per account at a time and answers concurrent uploads
+            // with 429. The upload must wait the stated delay and retry, not report failure -
+            // otherwise a parallel restore loses every file that happened to collide.
+            vi.useFakeTimers();
+            try {
+                mockFs.stat.mockResolvedValue({ size: 100 });
+                mockFs.readFile.mockResolvedValue(Buffer.from("data"));
+                const rateLimit = Object.assign(new Error("too_many_write_operations"), {
+                    status: 429,
+                    headers: { "retry-after": "2" },
+                });
+                mockDbx.filesUpload
+                    .mockRejectedValueOnce(rateLimit)
+                    .mockRejectedValueOnce(rateLimit)
+                    .mockResolvedValueOnce({});
+
+                const onLog = vi.fn();
+                const promise = DropboxAdapter.upload(validConfig, "/tmp/f.jar", "Java/f.jar", undefined, onLog);
+                await vi.advanceTimersByTimeAsync(2000); // first backoff
+                await vi.advanceTimersByTimeAsync(2000); // second backoff
+
+                expect(await promise).toBe(true);
+                expect(mockDbx.filesUpload).toHaveBeenCalledTimes(3);
+                expect(onLog.mock.calls.some(([msg, level]) => level === "warning" && /rate-limiting/.test(msg))).toBe(true);
+            } finally {
+                vi.useRealTimers();
+            }
+        });
+
+        it("names the reason when Dropbox refuses a filename outright", async () => {
+            // Dropbox never stores .DS_Store, desktop.ini or Thumbs.db and answers with a 409
+            // whose body carries the reason. The SDK's own message is just "Response failed
+            // with a 409 code", which tells the user nothing about what to do.
+            mockFs.stat.mockResolvedValue({ size: 100 });
+            mockFs.readFile.mockResolvedValue(Buffer.from("data"));
+            mockDbx.filesUpload.mockRejectedValue({
+                status: 409,
+                message: "Response failed with a 409 code",
+                error: { error_summary: "path/disallowed_name/...", error: { ".tag": "path" } },
+            });
+
+            const onLog = vi.fn();
+            const result = await DropboxAdapter.upload(validConfig, "/tmp/.DS_Store", ".DS_Store", undefined, onLog);
+
+            expect(result).toBe(false);
+            const errorLog = onLog.mock.calls.find(([, level]) => level === "error")?.[0] as string;
+            expect(errorLog).toMatch(/does not allow this filename/);
+            expect(errorLog).toContain("disallowed_name");
+        });
+
+        it("gives up and reports failure on a non-rate-limit error, without retrying", async () => {
+            mockFs.stat.mockResolvedValue({ size: 100 });
+            mockFs.readFile.mockResolvedValue(Buffer.from("data"));
+            mockDbx.filesUpload.mockRejectedValue(Object.assign(new Error("insufficient_space"), { status: 507 }));
+
+            const result = await DropboxAdapter.upload(validConfig, "/tmp/f.jar", "Java/f.jar");
+
+            expect(result).toBe(false);
+            expect(mockDbx.filesUpload).toHaveBeenCalledTimes(1);
+        });
+
+        it("reads the retry delay from the error body when there is no header", async () => {
+            vi.useFakeTimers();
+            try {
+                mockFs.stat.mockResolvedValue({ size: 100 });
+                mockFs.readFile.mockResolvedValue(Buffer.from("data"));
+                mockDbx.filesUpload
+                    .mockRejectedValueOnce({ status: 429, error: { error: { retry_after: 3 } } })
+                    .mockResolvedValueOnce({});
+
+                const promise = DropboxAdapter.upload(validConfig, "/tmp/f.jar", "Java/f.jar");
+                await vi.advanceTimersByTimeAsync(3000);
+
+                expect(await promise).toBe(true);
+                expect(mockDbx.filesUpload).toHaveBeenCalledTimes(2);
+            } finally {
+                vi.useRealTimers();
+            }
+        });
+
         it("should build correct path with folderPath", async () => {
             mockFs.stat.mockResolvedValue({ size: 10 });
             mockFs.readFile.mockResolvedValue(Buffer.from("data"));

@@ -23,6 +23,94 @@ const UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024; // 8 MB per chunk for session upload
 const SIMPLE_UPLOAD_LIMIT = 150 * 1024 * 1024; // 150 MB
 
 /**
+ * Turns a Dropbox SDK error into something a user can act on.
+ *
+ * The SDK's own message is just "Response failed with a 409 code" - the reason lives in the
+ * error body as a tag like `path/disallowed_name`. Without unwrapping it, a legitimate refusal
+ * (Dropbox never stores `.DS_Store`, `desktop.ini` or `Thumbs.db`) is indistinguishable from a
+ * broken connection.
+ */
+function dropboxErrorMessage(error: unknown): string {
+    const e = error as {
+        status?: number;
+        message?: string;
+        error?: { error_summary?: string; error?: { [".tag"]?: string } };
+    };
+
+    const summary = e?.error?.error_summary;
+    if (typeof summary === "string" && summary.length > 0) {
+        // error_summary looks like "path/disallowed_name/..." - the leading tags are the useful part.
+        const tag = summary.replace(/\/\.*$/, "").replace(/\.$/, "");
+        if (tag.includes("disallowed_name")) {
+            return `Dropbox does not allow this filename (${tag})`;
+        }
+        if (tag.includes("insufficient_space")) {
+            return "The Dropbox account is out of space";
+        }
+        return `Dropbox rejected the request: ${tag}`;
+    }
+
+    const base = e?.message ?? String(error);
+    return e?.status ? `${base} (HTTP ${e.status})` : base;
+}
+
+/**
+ * How long to wait before retrying a rate-limited Dropbox call, or null if the error is not
+ * a rate limit.
+ *
+ * Dropbox allows only one write per account at a time and answers concurrent writes with
+ * `429 too_many_write_operations`. With several files uploading at once - which restore does -
+ * some are always rejected, even though the account and the path are fine. The API hands back
+ * how long to back off, in a `Retry-After` header or a `retry_after` field on the error body;
+ * honouring it is Dropbox's documented remedy and turns concurrent writes into a queue instead
+ * of a pile of failures.
+ */
+function dropboxRetryAfterMs(error: unknown): number | null {
+    const e = error as { status?: number; headers?: unknown; error?: { error?: { retry_after?: number } } };
+    if (e?.status !== 429) return null;
+
+    let seconds: number | undefined;
+    const headers = e.headers as { get?: (k: string) => string | null } & Record<string, string> | undefined;
+    const rawHeader = typeof headers?.get === "function"
+        ? headers.get("retry-after")
+        : headers?.["retry-after"] ?? headers?.["Retry-After"];
+    if (rawHeader != null) {
+        const parsed = parseInt(String(rawHeader), 10);
+        if (Number.isFinite(parsed)) seconds = parsed;
+    }
+    if (seconds === undefined && typeof e.error?.error?.retry_after === "number") {
+        seconds = e.error.error.retry_after;
+    }
+
+    // A rate limit with no stated delay still needs a sane wait, not a busy loop.
+    return Math.max(1, seconds ?? 1) * 1000;
+}
+
+/**
+ * Runs a write operation, retrying when Dropbox rate-limits it.
+ *
+ * Retries only on 429 - any other failure surfaces at once. The wait is what Dropbox asks
+ * for, so concurrent uploads effectively take turns rather than failing.
+ */
+async function withWriteRetry<T>(
+    fn: () => Promise<T>,
+    label: string,
+    onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
+    maxRetries = 8
+): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await fn();
+        } catch (error: unknown) {
+            const waitMs = dropboxRetryAfterMs(error);
+            if (waitMs === null || attempt >= maxRetries) throw error;
+            if (onLog) onLog(`Dropbox is rate-limiting writes, retrying ${label} in ${Math.round(waitMs / 1000)}s`, "warning", "storage");
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+        }
+    }
+}
+
+/**
  * Patched fetch that adds `.buffer()` to the Response object.
  * The Dropbox SDK internally calls `res.buffer()` (a node-fetch v2 method)
  * which doesn't exist on the native Node.js fetch Response.
@@ -168,6 +256,11 @@ export const DropboxAdapter: StorageAdapter = {
     // stays structural. The refreshToken is written by the OAuth callback.
     credentials: { primary: "OAUTH" },
 
+    // Dropbox permits one write per account at a time and answers the rest with 429, so
+    // transferring in parallel only produces a queue of retries. One at a time is both
+    // faster here and quiet in the log.
+    maxConcurrentTransfers: 1,
+
     async upload(
         config: DropboxConfig,
         localPath: string,
@@ -185,14 +278,14 @@ export const DropboxAdapter: StorageAdapter = {
             const fileSize = stats.size;
 
             if (fileSize <= SIMPLE_UPLOAD_LIMIT) {
-                // Simple upload for files <= 150 MB
+                // Simple upload for files <= 150 MB. Overwrite mode makes a retry idempotent.
                 const contents = await fs.readFile(localPath);
-                await dbx.filesUpload({
+                await withWriteRetry(() => dbx.filesUpload({
                     path: dropboxPath,
                     contents,
                     mode: { ".tag": "overwrite" },
                     autorename: false,
-                });
+                }), dropboxPath, onLog);
             } else {
                 // Session upload for large files
                 const fileStream = createReadStream(localPath, { highWaterMark: UPLOAD_CHUNK_SIZE });
@@ -204,10 +297,10 @@ export const DropboxAdapter: StorageAdapter = {
 
                     if (!sessionId) {
                         // Start session
-                        const startRes = await dbx.filesUploadSessionStart({
+                        const startRes = await withWriteRetry(() => dbx.filesUploadSessionStart({
                             close: false,
                             contents: buffer,
-                        });
+                        }), dropboxPath, onLog);
                         sessionId = startRes.result.session_id;
                         offset = buffer.length;
                     } else {
@@ -215,22 +308,22 @@ export const DropboxAdapter: StorageAdapter = {
 
                         if (isLast) {
                             // Finish session
-                            await dbx.filesUploadSessionFinish({
-                                cursor: { session_id: sessionId, offset },
+                            await withWriteRetry(() => dbx.filesUploadSessionFinish({
+                                cursor: { session_id: sessionId!, offset },
                                 commit: {
                                     path: dropboxPath,
                                     mode: { ".tag": "overwrite" },
                                     autorename: false,
                                 },
                                 contents: buffer,
-                            });
+                            }), dropboxPath, onLog);
                         } else {
                             // Append to session
-                            await dbx.filesUploadSessionAppendV2({
-                                cursor: { session_id: sessionId, offset },
+                            await withWriteRetry(() => dbx.filesUploadSessionAppendV2({
+                                cursor: { session_id: sessionId!, offset },
                                 close: false,
                                 contents: buffer,
-                            });
+                            }), dropboxPath, onLog);
                         }
                         offset += buffer.length;
                     }
@@ -246,7 +339,7 @@ export const DropboxAdapter: StorageAdapter = {
             return true;
         } catch (error: unknown) {
             log.error("Dropbox upload failed", { remotePath }, wrapError(error));
-            if (onLog) onLog(`Dropbox upload failed: ${error instanceof Error ? error.message : String(error)}`, "error", "storage");
+            if (onLog) onLog(`Dropbox upload failed: ${dropboxErrorMessage(error)}`, "error", "storage");
             return false;
         }
     },

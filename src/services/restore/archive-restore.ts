@@ -128,6 +128,8 @@ export async function restoreArchiveSnapshot(
 
         const restoredDatabases: string[] = [];
         const restoredDirectories: string[] = [];
+        /** Sources where some files arrived and some did not - enough to rule out "Failed". */
+        const partiallyRestoredDirectories = new Set<string>();
         const errors: { entry: string; error: string }[] = [];
 
         // ── Databases ─────────────────────────────────────────────────────────
@@ -197,8 +199,13 @@ export async function restoreArchiveSnapshot(
             let done = 0;
 
             // Files stream and stage independently, so several transfer at once - this is the
-            // network round-trip win the user sees restoring to S3/R2.
-            const concurrency = await getMaxConcurrentFiles();
+            // network round-trip win the user sees restoring to S3/R2. An adapter that cannot
+            // use parallel writes (Dropbox serialises them) caps it, so the setting never
+            // forces a destination into a retry queue.
+            const adapterCaps = [...targets.values()]
+                .map((t) => t.adapter.maxConcurrentTransfers)
+                .filter((n): n is number => typeof n === "number" && n > 0);
+            const concurrency = Math.max(1, Math.min(await getMaxConcurrentFiles(), ...adapterCaps, Infinity));
             await forEachSnapshotFile(archive, workItems, async (file, content) => {
                 const target = targets.get(file.src)!;
                 const stagePath = path.join(getTempDir(), `restore-${process.pid}-${crypto.randomUUID()}`);
@@ -214,7 +221,14 @@ export async function restoreArchiveSnapshot(
                     }
 
                     const remotePath = safeRemoteJoin(target.basePath, file.p);
-                    if (!(await target.adapter.upload(target.config, stagePath, remotePath))) {
+                    // Forward the adapter's own warnings and errors (a rate-limit retry, a real
+                    // rejection) into the restore log; the per-file "started/finished" info is
+                    // dropped so a large restore does not bury the history.
+                    const uploadOk = await target.adapter.upload(
+                        target.config, stagePath, remotePath, undefined,
+                        (msg, level, type, details) => { if (level && level !== 'info') log(`${file.p}: ${msg}`, level, type ?? 'storage', details); }
+                    );
+                    if (!uploadOk) {
                         throw new Error(`Adapter '${target.adapter.id}' rejected the upload`);
                     }
 
@@ -235,19 +249,30 @@ export async function restoreArchiveSnapshot(
             for (const dir of selectedDirs) {
                 if (!targets.has(dir.src)) continue; // target resolution already failed above
                 const failed = perSourceFailed.get(dir.src) ?? 0;
+                const restored = perSourceDone.get(dir.src) ?? 0;
                 if (failed === 0) {
                     restoredDirectories.push(dir.src);
-                    log(`Directory restored: ${dir.label} (${perSourceDone.get(dir.src) ?? 0} file(s))`, 'success', 'storage');
+                    log(`Directory restored: ${dir.label} (${restored} file(s))`, 'success', 'storage');
                 } else {
-                    log(`Directory '${dir.label}': ${failed} of ${perSourceTotals.get(dir.src)} file(s) failed`, 'error', 'storage');
+                    // A source counts as partly restored when some of its files did land, so a
+                    // single rejected file cannot make the whole run look like nothing arrived.
+                    if (restored > 0) partiallyRestoredDirectories.add(dir.src);
+                    log(
+                        `Directory '${dir.label}': ${restored} of ${perSourceTotals.get(dir.src)} file(s) restored, ${failed} failed`,
+                        'error', 'storage'
+                    );
                 }
             }
         }
 
         const totalSelected = selectedDbNames.length + selectedDirs.length;
-        const totalRestored = restoredDatabases.length + restoredDirectories.length;
+        const fullyRestored = restoredDatabases.length + restoredDirectories.length;
+        // "Failed" has to mean nothing at all was written. Judging a directory source as all
+        // or nothing turned 129 of 130 restored files into a failed run that claimed no entries
+        // could be restored - which was both wrong and alarming.
+        const anythingRestored = fullyRestored > 0 || partiallyRestoredDirectories.size > 0;
         const status: ArchiveRestoreResult["status"] =
-            totalRestored === 0 ? "Failed" : totalRestored < totalSelected ? "Partial" : "Success";
+            !anythingRestored ? "Failed" : fullyRestored < totalSelected ? "Partial" : "Success";
 
         return { status, restoredDatabases, restoredDirectories, errors };
     } finally {

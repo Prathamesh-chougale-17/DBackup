@@ -178,7 +178,7 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
         if (dirTotal > 0) ctx.setStage(PIPELINE_STAGES.COLLECTING);
         // Files within a source are downloaded in parallel; over a network source the
         // per-file round trip dominates, so this is where most of the collection time is won.
-        const fileConcurrency = dirTotal > 0 ? await getMaxConcurrentFiles() : 1;
+        const configuredConcurrency = dirTotal > 0 ? await getMaxConcurrentFiles() : 1;
         let dirDone = 0;
         for (const source of ctx.sources) {
             const displayPath = source.remotePath || "/";
@@ -232,7 +232,13 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
                     ctx.updateDetail(`${label}: ${processedFiles}/${totalFiles} files, ${formatBytes(processedBytes)}/${formatBytes(totalBytes)}`);
                 },
                 (msg, level, type, details) => ctx.log(`${logPrefix} ${msg}`, level, type ?? 'storage', details),
-                { concurrency: fileConcurrency, ...(shouldDownload ? { shouldDownload } : {}) }
+                {
+                    // An adapter that serialises transfers anyway (Dropbox allows one write
+                    // per account) caps the setting, so reading from it never becomes a queue
+                    // of rate-limit retries.
+                    concurrency: Math.max(1, Math.min(configuredConcurrency, source.adapter.maxConcurrentTransfers ?? Infinity)),
+                    ...(shouldDownload ? { shouldDownload } : {}),
+                }
             );
 
             // A file the source would not hand over is missing from this backup. Naming each
@@ -326,8 +332,9 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
             engineVersion,
             compression: (job.compression as "NONE" | "GZIP" | "BROTLI" | undefined) ?? "NONE",
             // Entries compress ahead of the sequential tar write, bounded by the same setting
-            // that limits parallel file transfers.
-            concurrency: fileConcurrency,
+            // that limits parallel file transfers. Deliberately the configured value, not the
+            // per-adapter cap: this is local CPU work, unaffected by what a remote allows.
+            concurrency: configuredConcurrency,
             onProgress: (done, total, label) => {
                 ctx.updateStageProgress(Math.min(100, Math.round((done / total) * 100)));
                 ctx.updateDetail(`Packing ${done}/${total}: ${label}`);

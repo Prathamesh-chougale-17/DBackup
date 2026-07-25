@@ -439,6 +439,17 @@ export interface SnapshotHandle {
 export interface StorageAdapter extends BaseAdapter {
     type: 'storage';
     /**
+     * Upper bound on files this adapter can usefully transfer at once, overriding the user's
+     * "Max Concurrent Files" setting when it is lower.
+     *
+     * For an adapter the provider serialises anyway - Dropbox permits one write per account
+     * and answers the rest with 429 - running several at once buys nothing and turns into a
+     * queue of retries. Omit it when the provider genuinely handles parallel transfers (S3,
+     * Google Drive, local), which is the common case.
+     */
+    maxConcurrentTransfers?: number;
+
+    /**
      * Uploads a local file to the storage destination.
      * Pass `options.checksumSha256` / `options.checksumMd5` so adapters that support
      * native checksum storage (S3, etc.) can attach the hash during the upload request.

@@ -374,8 +374,12 @@ export async function restoreFilesToStorage(
     let restoredBytes = 0;
 
     // Write-back stages each file independently, so several run at once - the round-trip win
-    // when restoring to a network destination.
-    const concurrency = await getMaxConcurrentFiles();
+    // when restoring to a network destination. An adapter that serialises writes anyway
+    // (Dropbox) caps it, so the setting cannot force it into a queue of retries.
+    const adapterCaps = [...targets.values()]
+        .map((t) => t.adapter.maxConcurrentTransfers)
+        .filter((n): n is number => typeof n === "number" && n > 0);
+    const concurrency = Math.max(1, Math.min(await getMaxConcurrentFiles(), ...adapterCaps, Infinity));
 
     try {
         await forEachSnapshotFile(archive, files, async (file, content) => {
