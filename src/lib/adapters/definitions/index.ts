@@ -59,7 +59,15 @@ export const ADAPTER_DEFINITIONS: AdapterDefinition[] = [
         // fast link, so past a handful of files the limit is the link rather than the count.
         transferConcurrency: { default: 4, max: 8 },
     },
-    { id: "ftp", type: "storage", group: "Network", name: "FTP / FTPS", configSchema: FTPSchema },
+    {
+        id: "ftp", type: "storage", group: "Network", name: "FTP / FTPS", configSchema: FTPSchema,
+        // FTP spends two sockets on every concurrent transfer - a control connection and a
+        // separate data connection - and servers commonly cap connections per client address at
+        // around five (vsftpd's max_per_ip, ProFTPD's MaxClientsPerHost). Two transfers stay
+        // under that on any such server; four needs one configured more generously, which is why
+        // it is the ceiling rather than the default.
+        transferConcurrency: { default: 2, max: 4 },
+    },
     { id: "webdav", type: "storage", group: "Network", name: "WebDAV", configSchema: WebDAVSchema },
     { id: "smb", type: "storage", group: "Network", name: "SMB (Samba)", configSchema: SMBSchema },
     {
