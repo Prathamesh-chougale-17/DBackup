@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { SFTPAdapter } from "@/lib/adapters/storage/sftp";
 
 // --- Hoisted mocks ---
-const { mockSftpConnect, mockSftpEnd, mockSftpPut, mockSftpGet, mockSftpFastGet, mockSftpList, mockSftpExists, mockSftpMkdir, mockSftpDelete, mockSftpStat, mockSftpCwd, mockFsStat } = vi.hoisted(() => ({
+const { mockSftpConnect, mockSftpEnd, mockSftpPut, mockSftpGet, mockSftpFastGet, mockSftpFastPut, mockSftpList, mockSftpExists, mockSftpMkdir, mockSftpDelete, mockSftpStat, mockSftpCwd, mockFsStat } = vi.hoisted(() => ({
     mockSftpConnect: vi.fn(),
     mockSftpEnd: vi.fn().mockResolvedValue(undefined),
     mockSftpPut: vi.fn().mockResolvedValue(undefined),
@@ -14,6 +14,7 @@ const { mockSftpConnect, mockSftpEnd, mockSftpPut, mockSftpGet, mockSftpFastGet,
     mockSftpDelete: vi.fn().mockResolvedValue(undefined),
     mockSftpStat: vi.fn(),
     mockSftpCwd: vi.fn(),
+    mockSftpFastPut: vi.fn().mockResolvedValue(undefined),
     mockFsStat: vi.fn().mockResolvedValue({ size: 1024 }),
 }));
 
@@ -30,6 +31,7 @@ vi.mock("ssh2-sftp-client", () => {
         delete = mockSftpDelete;
         stat = mockSftpStat;
         cwd = mockSftpCwd;
+        fastPut = mockSftpFastPut;
     }
     return { default: MockSFTPClient };
 });
@@ -75,6 +77,8 @@ describe("SFTPAdapter", () => {
         mockSftpMkdir.mockResolvedValue(undefined);
         mockSftpExists.mockResolvedValue("d");
         mockSftpCwd.mockResolvedValue("/");
+        mockSftpFastPut.mockResolvedValue(undefined);
+        mockSftpFastGet.mockResolvedValue(undefined);
         mockFsStat.mockResolvedValue({ size: 1024 });
     });
 
@@ -83,12 +87,11 @@ describe("SFTPAdapter", () => {
     describe("upload()", () => {
         it("returns true on successful upload", async () => {
             mockSftpExists.mockResolvedValue("d"); // dir exists
-            mockSftpPut.mockResolvedValue(undefined);
 
             const result = await SFTPAdapter.upload(config, "/tmp/backup.sql", "Job/backup.sql");
 
             expect(result).toBe(true);
-            expect(mockSftpPut).toHaveBeenCalled();
+            expect(mockSftpFastPut).toHaveBeenCalled();
             expect(mockSftpEnd).toHaveBeenCalled();
         });
 
@@ -123,9 +126,9 @@ describe("SFTPAdapter", () => {
             expect(result).toBe(false);
         });
 
-        it("returns false when put() throws", async () => {
+        it("returns false when the upload throws", async () => {
             mockSftpExists.mockResolvedValue("d");
-            mockSftpPut.mockRejectedValue(new Error("Disk full"));
+            mockSftpFastPut.mockRejectedValue(new Error("Disk full"));
 
             const result = await SFTPAdapter.upload(config, "/tmp/backup.sql", "Job/backup.sql");
 
@@ -134,11 +137,61 @@ describe("SFTPAdapter", () => {
 
         it("always calls end() even on failure", async () => {
             mockSftpExists.mockResolvedValue("d");
-            mockSftpPut.mockRejectedValue(new Error("Error"));
+            mockSftpFastPut.mockRejectedValue(new Error("Error"));
 
             await SFTPAdapter.upload(config, "/tmp/backup.sql", "Job/backup.sql");
 
             expect(mockSftpEnd).toHaveBeenCalled();
+        });
+
+        it("keeps many requests in flight instead of one per round trip", async () => {
+            // A stream put sends one WRITE and waits for the acknowledgement before the next,
+            // which caps a transfer at one chunk per round trip - about 3 MB/s over a 20 ms path
+            // however fast the link is. fastPut keeps `concurrency` chunks outstanding.
+            mockSftpExists.mockResolvedValue("d");
+
+            await SFTPAdapter.upload(config, "/tmp/backup.sql", "Job/backup.sql");
+
+            expect(mockSftpFastPut).toHaveBeenCalledWith(
+                "/tmp/backup.sql",
+                "/backups/Job/backup.sql",
+                expect.objectContaining({ concurrency: 64, chunkSize: 32768 })
+            );
+            expect(mockSftpPut).not.toHaveBeenCalled();
+        });
+
+        it("survives two parallel transfers creating the same folder", async () => {
+            // Restoring several files at once puts two of them in the same new folder: both see
+            // it missing, both call mkdir, one loses. The server reports that as a permission
+            // error, indistinguishable from a real one - which is how a single file out of 130
+            // failed on a folder the other 129 wrote into.
+            let created = false;
+            mockSftpExists.mockImplementation(async (p: string) => {
+                if (p === '/backups') return 'd';
+                if (p === '/backups/Job') return created ? 'd' : false;
+                return false;
+            });
+            mockSftpMkdir.mockImplementation(async () => {
+                // The race partner won between our exists() and this call.
+                created = true;
+                throw new Error('permission denied');
+            });
+
+            const ok = await SFTPAdapter.upload(config, "/tmp/backup.sql", "Job/backup.sql");
+
+            expect(ok).toBe(true);
+            expect(mockSftpFastPut).toHaveBeenCalled();
+        });
+
+        it("still reports a genuine failure to create a folder", async () => {
+            // The mutation guard for the test above: swallowing every mkdir error would turn a
+            // real rights problem into an upload that silently writes nowhere.
+            mockSftpExists.mockImplementation(async (p: string) => (p === '/backups' ? 'd' : false));
+            mockSftpMkdir.mockRejectedValue(new Error('permission denied'));
+
+            const ok = await SFTPAdapter.upload(config, "/tmp/backup.sql", "Job/backup.sql");
+
+            expect(ok).toBe(false);
         });
 
         it("logs connection and start messages", async () => {
@@ -156,20 +209,40 @@ describe("SFTPAdapter", () => {
 
     describe("download()", () => {
         it("returns true on successful download (no progress)", async () => {
-            mockSftpGet.mockResolvedValue(undefined);
-
             const result = await SFTPAdapter.download(config, "Job/backup.sql", "/tmp/out.sql");
 
             expect(result).toBe(true);
-            expect(mockSftpGet).toHaveBeenCalled();
+            expect(mockSftpFastGet).toHaveBeenCalled();
         });
 
-        it("returns false when get() throws", async () => {
-            mockSftpGet.mockRejectedValue(new Error("No such file"));
+        it("returns false when the download throws", async () => {
+            mockSftpFastGet.mockRejectedValue(new Error("No such file"));
 
             const result = await SFTPAdapter.download(config, "Job/missing.sql", "/tmp/out.sql");
 
             expect(result).toBe(false);
+        });
+
+        it("uses the pipelined transfer even when nobody watches progress", async () => {
+            // Which transfer algorithm runs must not depend on whether a caller passed a
+            // callback. Directory collection reports progress per file, not per byte, and passes
+            // none - which put every file of a file backup on the slow single-request path.
+            await SFTPAdapter.download(config, "Job/backup.sql", "/tmp/out.sql");
+
+            expect(mockSftpFastGet).toHaveBeenCalledWith(
+                "/backups/Job/backup.sql",
+                "/tmp/out.sql",
+                expect.objectContaining({ concurrency: 64, chunkSize: 32768 })
+            );
+            expect(mockSftpGet).not.toHaveBeenCalled();
+        });
+
+        it("does not stat the file when no progress is reported", async () => {
+            // The size is only needed to turn bytes into a percentage - fetching it regardless
+            // would spend a round trip per file on a number nobody reads.
+            await SFTPAdapter.download(config, "Job/backup.sql", "/tmp/out.sql");
+
+            expect(mockSftpStat).not.toHaveBeenCalled();
         });
 
         it("uses fastGet when onProgress is provided", async () => {
@@ -485,12 +558,12 @@ describe("SFTPAdapter", () => {
     // upload() step callback progress (lines 76-80)
     // ====================================================================
     describe("upload() step callback progress", () => {
-        it("invokes onProgress via put step callback when totalSize > 0", async () => {
+        it("invokes onProgress via the upload step callback when totalSize > 0", async () => {
             mockSftpExists.mockResolvedValue("d");
             mockFsStat.mockResolvedValue({ size: 2048 });
 
             let stepCb: ((transferred: number, chunk: unknown, total: number) => void) | undefined;
-            mockSftpPut.mockImplementation((_src: unknown, _dst: unknown, opts: any) => {
+            mockSftpFastPut.mockImplementation((_src: unknown, _dst: unknown, opts: any) => {
                 stepCb = opts?.step;
                 return Promise.resolve(undefined);
             });

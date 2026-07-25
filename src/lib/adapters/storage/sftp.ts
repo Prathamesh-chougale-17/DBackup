@@ -2,7 +2,6 @@ import { StorageAdapter, StorageSession, FileInfo, DirectoryBrowseEntry } from "
 import { normalizeSshPrivateKey } from "@/lib/ssh/pkcs8-compat";
 import { SFTPSchema } from "@/lib/adapters/definitions";
 import Client from "ssh2-sftp-client";
-import { createReadStream } from "fs";
 import { Readable } from "stream";
 import path from "path";
 import { LogLevel, LogType } from "@/lib/core/logs";
@@ -54,6 +53,43 @@ export const connectSFTP = async (config: SFTPConfig): Promise<Client> => {
 
 /** How many sibling names to name in a diagnostic - enough to recognise the place, short enough to read. */
 const ROOT_HINT_ENTRIES = 12;
+
+/**
+ * Keeps many SFTP requests in flight per file, which is what decides throughput on this protocol.
+ *
+ * A plain stream transfer (put/get) sends one READ or WRITE and waits for the server to
+ * acknowledge it before sending the next - see ssh2's SFTP WriteStream._write and
+ * ReadStream._read, both of which issue a single request per callback. One 64 KB request per
+ * round trip caps a transfer at 64 KB / RTT no matter how fast the link is: roughly 3 MB/s over
+ * a 20 ms path, and no faster for a 10 Gbit line. Parallel *files* hide that while many are
+ * running, then the last large file drops back to the single-stream ceiling.
+ *
+ * fastGet/fastPut keep `concurrency` chunks outstanding instead, so the ceiling becomes
+ * concurrency x chunkSize / RTT. The defaults (64 x 32 KB = 2 MB in flight) lift the same 20 ms
+ * path to ~100 MB/s, past what the link or the disk will give. Left at the library's defaults
+ * deliberately: 32 KB is the packet size every SFTP server accepts, and raising it risks servers
+ * that reject larger packets for a ceiling that is already far above the bottleneck.
+ */
+const TRANSFER_TUNING = { concurrency: 64, chunkSize: 32768 } as const;
+
+/**
+ * Creates a directory, treating "someone else just created it" as success.
+ *
+ * With several files being transferred at once, two of them landing in the same new folder race:
+ * both see it missing, both call mkdir, one loses. Servers report that as a plain failure - the
+ * SFTP status codes do not distinguish "exists" from "denied", and OpenSSH's sftp-server answers
+ * with a permission error - so the message is indistinguishable from a real rights problem, which
+ * is exactly how it turned up: one file out of 130 failing with "permission denied" on a folder
+ * the other 129 wrote into happily. Re-reading the directory afterwards is the only reliable way
+ * to tell a lost race from an actual error.
+ */
+async function mkdirIdempotent(sftp: Client, dir: string): Promise<void> {
+    try {
+        await sftp.mkdir(dir);
+    } catch (error) {
+        if (await sftp.exists(dir) !== 'd') throw error;
+    }
+}
 
 /**
  * Rewrites a path that failed because SFTP starts somewhere below the filesystem root.
@@ -200,7 +236,7 @@ async function ensureRemoteDir(
         current = path.posix.join(current, segment);
         if (await sftp.exists(current) !== 'd') {
             if (onLog) onLog(`Creating remote directory: ${current}`, 'info', 'storage');
-            await sftp.mkdir(current);
+            await mkdirIdempotent(sftp, current);
         }
     }
 }
@@ -235,19 +271,14 @@ async function performSftpUpload(
         const stats = await import('fs').then(fs => fs.promises.stat(localPath));
         const totalSize = stats.size;
 
-        const fileStream = createReadStream(localPath);
-        try {
-            await sftp.put(fileStream, destination, {
-                step: (total_transferred: any, _chunk: any, _total: any) => {
-                    if (onProgress && totalSize > 0) {
-                        const percent = Math.round((total_transferred / totalSize) * 100);
-                        onProgress(percent);
-                    }
+        await sftp.fastPut(localPath, destination, {
+            ...TRANSFER_TUNING,
+            step: (total_transferred: number) => {
+                if (onProgress && totalSize > 0) {
+                    onProgress(Math.round((total_transferred / totalSize) * 100));
                 }
-            } as any);
-        } finally {
-            fileStream.destroy();
-        }
+            },
+        });
 
         if (onLog) onLog(`SFTP upload completed successfully`, 'info', 'storage');
         return true;
@@ -416,19 +447,15 @@ export const SFTPAdapter: StorageAdapter = {
                 ? path.posix.join(config.pathPrefix, remotePath)
                 : remotePath;
 
-            if (onProgress) {
-                const stat = await sftp.stat(source);
-                const total = stat.size;
-                let processed = 0;
-                await sftp.fastGet(source, localPath, {
-                    step: (transferred) => {
-                        processed = transferred;
-                        onProgress(processed, total);
-                    }
-                });
-            } else {
-                await sftp.get(source, localPath);
-            }
+            // fastGet regardless of whether anyone watches progress: which transfer algorithm
+            // runs must not depend on whether a caller passed a callback. Directory collection
+            // reports progress per file rather than per byte and passes none, and that alone used
+            // to put every file of a file backup on the slow single-request path.
+            const total = onProgress ? (await sftp.stat(source)).size : 0;
+            await sftp.fastGet(source, localPath, {
+                ...TRANSFER_TUNING,
+                step: (transferred: number) => onProgress?.(transferred, total),
+            });
             return true;
         } catch (error) {
             log.error("SFTP download failed", { host: config.host, remotePath }, wrapError(error));
