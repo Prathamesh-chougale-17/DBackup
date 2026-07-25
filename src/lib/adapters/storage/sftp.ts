@@ -52,6 +52,159 @@ export const connectSFTP = async (config: SFTPConfig): Promise<Client> => {
     return sftp;
 };
 
+/** How many sibling names to name in a diagnostic - enough to recognise the place, short enough to read. */
+const ROOT_HINT_ENTRIES = 12;
+
+/**
+ * Rewrites a path that failed because SFTP starts somewhere below the filesystem root.
+ *
+ * A chrooted SFTP service shows the confinement directory as "/", so a path written from the
+ * real filesystem's point of view carries leading segments that do not exist inside it -
+ * /volume1/Transfer/restore on a Synology whose SFTP root is /volume1. The give-away is that
+ * one of the later segments *is* one of the folders visible at the login directory, which makes
+ * the correction computable rather than something for the user to deduce.
+ *
+ * The outermost match wins, so as much of the original path as possible is kept, and every
+ * candidate is confirmed against the server before being offered. A name matching by coincidence
+ * would otherwise send the user off to try a path that fails the same way - the check costs one
+ * stat and turns the guess into something known to exist.
+ */
+async function suggestRelativePath(
+    sftp: Client,
+    prefix: string,
+    visibleFolders: readonly string[]
+): Promise<string | undefined> {
+    const segments = prefix.split('/').filter(Boolean);
+    // Only leading segments can be the surplus - a match at 0 means the path was already correct
+    // and something else is wrong, so there is nothing to suggest.
+    for (let i = 1; i < segments.length; i++) {
+        if (!visibleFolders.some((f) => f.toLowerCase() === segments[i].toLowerCase())) continue;
+        const candidate = `/${segments.slice(i).join('/')}`;
+        if (await sftp.exists(candidate) === 'd') return candidate;
+    }
+    return undefined;
+}
+
+/**
+ * Explains where an unreachable path went wrong, from the server's own point of view.
+ *
+ * "Path not reachable" leaves two very different causes indistinguishable: SFTP may be confined
+ * to a directory below the filesystem root (so an absolute path cannot resolve at all), or the
+ * account may simply lack access to one segment. Walking the prefix top-down finds the exact
+ * segment that stops being visible, and the login directory plus its contents show what the
+ * account can see - which is the difference between "type a shorter path" and "grant access to
+ * that folder". Where those two halves line up, the corrected path is named outright.
+ *
+ * Best-effort throughout: a server that refuses these probes must not replace the real error
+ * with a diagnostic failure.
+ */
+async function describeSftpRoot(sftp: Client, prefix: string): Promise<string> {
+    const parts: string[] = [];
+
+    try {
+        const segments = prefix.split('/').filter(Boolean);
+        let walked = prefix.startsWith('/') ? '' : '.';
+        let deepest = '';
+        let missing = '';
+        for (const segment of segments) {
+            walked = `${walked}/${segment}`;
+            if (await sftp.exists(walked) === 'd') { deepest = walked; continue; }
+            missing = walked;
+            break;
+        }
+        if (missing && deepest) {
+            parts.push(`"${deepest}" is reachable, but "${missing}" inside it is not.`);
+        } else if (missing) {
+            parts.push(`The path is already unreachable at "${missing}".`);
+        }
+    } catch { /* Probing is optional - fall through to the login directory hint. */ }
+
+    try {
+        const root = await sftp.cwd();
+        const entries = await sftp.list(root);
+        const folders = entries.filter((e) => e.type === 'd').map((e) => e.name);
+        const suggestion = await suggestRelativePath(sftp, prefix, folders);
+
+        if (suggestion) {
+            // The whole diagnosis collapses into one actionable sentence - the folder listing
+            // would only be material for a deduction that has already been made here.
+            parts.push(
+                `This account starts at "${root}", where "${suggestion}" does exist, `
+                + `so SFTP appears to be confined to a directory below the filesystem root. `
+                + `Use "${suggestion}" as the path instead.`
+            );
+        } else {
+            const names = folders.slice(0, ROOT_HINT_ENTRIES);
+            // A truncated list reads as a complete one, and then a folder that is simply below
+            // the cut-off looks like a folder that is not there - say how many were left out.
+            const omitted = folders.length - names.length;
+            const listed = omitted > 0 ? `${names.join(', ')} (and ${omitted} more)` : names.join(', ');
+            parts.push(
+                `This account starts at "${root}"`
+                + (names.length ? ` and sees these folders there: ${listed}.` : ' and sees no folders there.')
+            );
+            parts.push(
+                `If SFTP is confined to that directory, give the path relative to it instead of as an absolute filesystem path.`
+            );
+        }
+    } catch { /* No cwd/list either - the leading sentence already says enough. */ }
+
+    return parts.length ? ` ${parts.join(' ')}` : '';
+}
+
+/**
+ * Creates a remote directory, never reaching above the adapter's configured path.
+ *
+ * ssh2-sftp-client's recursive mkdir walks *upwards* until it finds a directory that exists,
+ * and it decides that by calling exists() - which reports false for a directory the account
+ * may use but not stat. On a NAS that is the normal case: an account can write inside
+ * /volume1/Transfer but cannot stat /volume1 itself, so the recursion climbed to the top and
+ * tried to create /volume1, failing with "Permission denied /volume1" - a message pointing at
+ * a path nobody asked for.
+ *
+ * The configured prefix is a precondition, not something to create: if it is missing, that is
+ * reported as what it is. Only the segments below it are created, one at a time, so the walk
+ * can never leave the area the account was given.
+ */
+async function ensureRemoteDir(
+    sftp: Client,
+    dir: string,
+    pathPrefix: string | undefined,
+    onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
+): Promise<void> {
+    if (await sftp.exists(dir) === 'd') return;
+
+    const prefix = pathPrefix ? pathPrefix.replace(/\\/g, '/') : '';
+    if (!prefix) {
+        // No configured root to anchor to - the whole path is ours to create.
+        if (onLog) onLog(`Creating remote directory: ${dir}`, 'info', 'storage');
+        await sftp.mkdir(dir, true);
+        return;
+    }
+
+    if (await sftp.exists(prefix) !== 'd') {
+        throw new Error(
+            `The configured path "${prefix}" does not exist or is not reachable for this account over SFTP.`
+            + await describeSftpRoot(sftp, prefix)
+        );
+    }
+
+    const relative = path.posix.relative(prefix, dir);
+    // Outside the prefix entirely - refuse rather than climb out of the configured area.
+    if (relative.startsWith('..')) {
+        throw new Error(`Refusing to create '${dir}': it lies outside the configured path "${prefix}".`);
+    }
+
+    let current = prefix;
+    for (const segment of relative.split('/').filter(Boolean)) {
+        current = path.posix.join(current, segment);
+        if (await sftp.exists(current) !== 'd') {
+            if (onLog) onLog(`Creating remote directory: ${current}`, 'info', 'storage');
+            await sftp.mkdir(current);
+        }
+    }
+}
+
 /**
  * Performs a single upload on an already-connected SFTP client. The directory
  * cache prevents redundant mkdir calls when reused across multiple uploads
@@ -73,10 +226,7 @@ async function performSftpUpload(
 
         const remoteDir = path.posix.dirname(destination);
         if (!dirCache.has(remoteDir)) {
-            if (await sftp.exists(remoteDir) !== 'd') {
-                if (onLog) onLog(`Creating remote directory: ${remoteDir}`, 'info', 'storage');
-                await sftp.mkdir(remoteDir, true);
-            }
+            await ensureRemoteDir(sftp, remoteDir, config.pathPrefix, onLog);
             dirCache.add(remoteDir);
         }
 
@@ -360,9 +510,7 @@ export const SFTPAdapter: StorageAdapter = {
         try {
             sftp = await connectSFTP(config);
 
-            if (await sftp.exists(subdir) !== 'd') {
-                await sftp.mkdir(subdir, true);
-            }
+            await ensureRemoteDir(sftp, subdir, config.pathPrefix);
 
             // 1. Write Test
             await sftp.put(Buffer.from("Connection Test"), destination);

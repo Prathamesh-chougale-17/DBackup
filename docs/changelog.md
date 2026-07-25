@@ -27,6 +27,7 @@ All notable changes to DBackup are documented here.
 
 ### 🐛 Bug Fixes
 
+- **sftp**: Fixed a destination with a configured path failing with a permission error on a path nobody entered (`Permission denied /volume1` for a configured `/volume1/Transfer/restore`). Creating a directory walked *upwards* until it found one that exists, which on a NAS means climbing to the filesystem root, since an account can usually write inside its share without being able to stat the volume above it. The configured path is now treated as a precondition and only folders below it are created. When it is unreachable, the error names that path, says which segment of it stops being visible, and - where SFTP is confined below the filesystem root, which is what `ChrootDirectory` in `sshd_config` and most NAS and hosted SFTP setups do - names a rewritten path after confirming that the server actually has it.
 - **webdav**: Fixed uploads reading the whole backup into memory before sending it, which made a backup larger than the machine's RAM fail on this destination alone. Uploads now stream, as every other destination already did.
 - **local-filesystem**: Fixed restore targets written with a leading slash (such as the suggested `/restore`) being rejected as path traversal - a leading slash means the adapter's own root, as it already did for every other adapter.
 - **backup**: Fixed the storage listing cache update after an upload being fired without awaiting it, which left its failures unhandled and could let it outlive the backup run that produced it.
