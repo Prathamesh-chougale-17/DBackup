@@ -75,8 +75,14 @@ async function writeTempKey(privateKey: string): Promise<string> {
 /**
  * Builds the SSH command string for rsync's -e flag (never contains passwords).
  */
-function buildSshCommand(config: RsyncConfig, keyFile?: string): string {
+function buildSshCommand(config: RsyncConfig, keyFile?: string, controlPath?: string): string {
     const parts = ["ssh", `-p ${config.port}`, "-o StrictHostKeyChecking=no"];
+
+    // Every rsync invocation is its own SSH login. Multiplexing over one shared connection turns
+    // a 129-file restore from 129 logins into one - see openSession() for why that matters.
+    if (controlPath) {
+        parts.push("-o ControlMaster=auto", `-o ControlPath=${controlPath}`, "-o ControlPersist=60");
+    }
 
     if (config.authType === "password") {
         // Force password-only auth: disable pubkey to prevent SSH agent from
@@ -103,8 +109,13 @@ function buildSshCommand(config: RsyncConfig, keyFile?: string): string {
  * Builds SSH arguments as an array for execFile (no shell interpretation).
  * This is the safe equivalent of buildSshCommand for non-shell execution.
  */
-function buildSshArgArray(config: RsyncConfig, keyFile?: string): string[] {
+function buildSshArgArray(config: RsyncConfig, keyFile?: string, controlPath?: string): string[] {
     const args = ["-p", String(config.port), "-o", "StrictHostKeyChecking=no"];
+
+    // See buildSshCommand() - the remote `mkdir` shares the session's connection too.
+    if (controlPath) {
+        args.push("-o", "ControlMaster=auto", "-o", `ControlPath=${controlPath}`, "-o", "ControlPersist=60");
+    }
 
     if (config.authType === "password") {
         args.push("-o", "PreferredAuthentications=password");
@@ -169,8 +180,8 @@ async function checkSshpass(): Promise<boolean> {
  * Uses execFile (no shell) to prevent command injection via config values.
  * Uses SSHPASS env var for password auth (never passes password on command line).
  */
-async function execSSH(config: RsyncConfig, command: string, keyFile?: string): Promise<string> {
-    const sshArgs = buildSshArgArray(config, keyFile);
+async function execSSH(config: RsyncConfig, command: string, keyFile?: string, controlPath?: string): Promise<string> {
+    const sshArgs = buildSshArgArray(config, keyFile, controlPath);
     const target = `${config.username}@${config.host}`;
     const env = getPasswordEnv(config) ?? process.env;
 
@@ -196,6 +207,18 @@ async function execSSH(config: RsyncConfig, command: string, keyFile?: string): 
         // Re-throw with sanitized message (strips raw command from exec errors)
         throw new Error(sanitizeError(error));
     }
+}
+
+/**
+ * Shuts down a multiplexed SSH master connection.
+ *
+ * `ssh -O exit` is the only way to end it: deleting the socket file just orphans the master,
+ * which then keeps an authenticated connection open until ControlPersist runs out. No password
+ * is needed - the request travels over the existing socket rather than opening a new session.
+ */
+async function closeSshMaster(config: RsyncConfig, keyFile: string | undefined, controlPath: string): Promise<void> {
+    const args = [...buildSshArgArray(config, keyFile, controlPath), "-O", "exit", `${config.username}@${config.host}`];
+    await execFileAsync("ssh", args, { timeout: 10000 }).catch(() => { });
 }
 
 /**
@@ -233,13 +256,13 @@ function executeRsync(rsync: Rsync, onLog?: (msg: string, level?: LogLevel, type
  * For password auth, uses SSHPASS env var via sshpass -e.
  * Must be called after checkSshpass() for password auth.
  */
-async function createRsyncInstance(config: RsyncConfig, keyFile?: string): Promise<Rsync> {
+async function createRsyncInstance(config: RsyncConfig, keyFile?: string, controlPath?: string): Promise<Rsync> {
     const rsync = new Rsync()
         .flags("az")
         .set("partial")
         .set("progress");
 
-    const sshCmd = buildSshCommand(config, keyFile);
+    const sshCmd = buildSshCommand(config, keyFile, controlPath);
 
     // For password auth, prepend sshpass -e (reads password from SSHPASS env var)
     if (config.authType === "password" && config.password) {
@@ -286,7 +309,8 @@ async function performRsyncUpload(
     remotePath: string,
     onProgress: ((percent: number) => void) | undefined,
     onLog: ((msg: string, level?: LogLevel, type?: LogType, details?: string) => void) | undefined,
-    dirCache: Set<string>
+    dirCache: Set<string>,
+    controlPath?: string
 ): Promise<boolean> {
     try {
         const destination = buildRemotePath(config, remotePath);
@@ -295,7 +319,7 @@ async function performRsyncUpload(
         if (!dirCache.has(remoteDir)) {
             if (onLog) onLog(`Ensuring remote directory: ${remoteDir}`, "info", "storage");
             try {
-                await execSSH(config, `mkdir -p '${shellEscapeSingleQuote(remoteDir)}'`, keyFile);
+                await execSSH(config, `mkdir -p '${shellEscapeSingleQuote(remoteDir)}'`, keyFile, controlPath);
             } catch (e) {
                 log.warn("Could not create remote directory via SSH, rsync may handle it", {}, wrapError(e));
             }
@@ -304,7 +328,7 @@ async function performRsyncUpload(
 
         if (onLog) onLog(`Starting rsync upload to: ${config.host}:${remotePath}`, "info", "storage");
 
-        const rsync = await createRsyncInstance(config, keyFile);
+        const rsync = await createRsyncInstance(config, keyFile, controlPath);
         rsync.source(localPath);
         rsync.destination(destination);
 
@@ -343,11 +367,53 @@ export const RsyncAdapter: StorageAdapter = {
         if (config.authType === "privateKey" && config.privateKey) {
             keyFile = await writeTempKey(config.privateKey);
         }
+
+        // rsync has no persistent connection of its own: every file is a separate process that
+        // logs in over SSH again, and the remote mkdir is another login on top. A 129-file
+        // restore therefore made well over 129 logins in under a minute, which is slow and is
+        // what an SSH server's connection-rate limiting is meant to stop - OpenSSH's MaxStartups
+        // drops a share of them at random, and rsync reports that as a bare exit code 255.
+        //
+        // OpenSSH's own answer is connection multiplexing: the first login leaves a control
+        // socket behind and every later one rides through it instead of authenticating again.
+        // That is the same thing the pooled adapters do, expressed the way rsync can use it.
+        const controlPath = path.join(os.tmpdir(), `dbackup-rsync-${Math.random().toString(36).slice(2, 10)}`);
+
+        // Established once here rather than by whichever transfer happens to run first: several
+        // starting at the same moment would each find no socket and open a master of their own,
+        // which is the situation this exists to avoid. It also surfaces bad credentials as one
+        // clear failure instead of one per file.
+        try {
+            await execSSH(config, "true", keyFile, controlPath);
+            if (onLog) onLog(`Connected to ${config.host}:${config.port} (shared SSH connection)`, "info", "storage");
+        } catch (error) {
+            // Multiplexing is an optimisation, not a requirement: a server that refuses it (or a
+            // socket path the platform rejects) must still be able to run the transfers, one
+            // login at a time, exactly as before.
+            log.warn("Could not establish a shared SSH connection, falling back to one per transfer", { host: config.host }, wrapError(error));
+            if (keyFile) {
+                return {
+                    upload: (localPath, remotePath, onProgress, uploadLog) =>
+                        performRsyncUpload(config, keyFile, localPath, remotePath, onProgress, uploadLog ?? onLog, new Set()),
+                    close: async () => { await fs.unlink(keyFile!).catch(() => { }); },
+                };
+            }
+            return {
+                upload: (localPath, remotePath, onProgress, uploadLog) =>
+                    performRsyncUpload(config, undefined, localPath, remotePath, onProgress, uploadLog ?? onLog, new Set()),
+                close: async () => { },
+            };
+        }
+
         const dirCache = new Set<string>();
         return {
             upload: (localPath, remotePath, onProgress, uploadLog) =>
-                performRsyncUpload(config, keyFile, localPath, remotePath, onProgress, uploadLog ?? onLog, dirCache),
+                performRsyncUpload(config, keyFile, localPath, remotePath, onProgress, uploadLog ?? onLog, dirCache, controlPath),
             close: async () => {
+                // Tell the master to exit rather than waiting out ControlPersist, so the run does
+                // not leave an authenticated connection open behind it.
+                await closeSshMaster(config, keyFile, controlPath);
+                await fs.unlink(controlPath).catch(() => { });
                 if (keyFile) await fs.unlink(keyFile).catch(() => { });
             },
         };

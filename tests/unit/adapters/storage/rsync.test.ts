@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // --- Hoisted mocks ---
 // child_process functions use callbacks, so promisify works when the mock calls its callback
-const { mockExecCb, mockExecFileCb, mockRsyncExecute, mockFsWriteFile, mockFsUnlink, mockFsMkdir, mockFsReadFile } = vi.hoisted(() => ({
+const { mockExecCb, mockExecFileCb, mockRsyncExecute, mockFsWriteFile, mockFsUnlink, mockFsMkdir, mockFsReadFile, mockRsyncShell } = vi.hoisted(() => ({
     mockExecCb: vi.fn(),
     mockExecFileCb: vi.fn(),
     mockRsyncExecute: vi.fn(),
@@ -10,6 +10,9 @@ const { mockExecCb, mockExecFileCb, mockRsyncExecute, mockFsWriteFile, mockFsUnl
     mockFsUnlink: vi.fn().mockResolvedValue(undefined),
     mockFsMkdir: vi.fn().mockResolvedValue(undefined),
     mockFsReadFile: vi.fn().mockResolvedValue("file content"),
+    // The `--rsh` command rsync is told to use. This is where the bulk of the SSH logins happen,
+    // so a test that only inspects execFile calls would miss the transfers entirely.
+    mockRsyncShell: vi.fn(),
 }));
 
 // child_process mock - exec/execFile call their last-arg callback so promisify works
@@ -24,7 +27,7 @@ vi.mock("rsync", () => {
     class MockRsync {
         flags() { return this; }
         set() { return this; }
-        shell() { return this; }
+        shell(cmd: string) { mockRsyncShell(cmd); return this; }
         env() { return this; }
         source() { return this; }
         destination() { return this; }
@@ -618,4 +621,84 @@ describe("RsyncAdapter", () => {
             await expect(RsyncAdapter.downloadDirectory!(agentConfig, "Job", "/local/job")).rejects.toThrow();
         });
     });
+
+    // ===== openSession() =====
+
+    describe("openSession() connection reuse", () => {
+        /** The `-o ControlPath=...` value shared by every SSH invocation of a session. */
+        function controlPathsUsed(): string[] {
+            return mockExecFileCb.mock.calls
+                .flatMap((call) => (Array.isArray(call[1]) ? (call[1] as string[]) : []))
+                .filter((arg) => typeof arg === "string" && arg.startsWith("ControlPath="));
+        }
+
+        it("routes every transfer through one shared SSH connection", async () => {
+            // rsync starts a process per file, each authenticating over SSH again - a 129-file
+            // restore made well over 129 logins in under a minute. That is slow, and it is what
+            // an SSH server's connection-rate limiting exists to stop: OpenSSH's MaxStartups
+            // drops a share at random, which rsync reports as a bare exit code 255.
+            sshSucceeds();
+            rsyncSucceeds();
+            const session = await RsyncAdapter.openSession!(agentConfig);
+
+            await session.upload("/tmp/a", "Job/a");
+            await session.upload("/tmp/b", "Job/b");
+
+            // The transfers themselves, not just the remote mkdir: rsync is told to reuse the
+            // socket via its --rsh command, which is where the per-file logins would otherwise be.
+            const shellCommands = mockRsyncShell.mock.calls.map((c) => String(c[0]));
+            expect(shellCommands.length).toBe(2);
+            for (const cmd of shellCommands) {
+                expect(cmd).toContain("ControlMaster=auto");
+                expect(cmd).toContain("ControlPath=");
+            }
+
+            const sockets = new Set([
+                ...controlPathsUsed().map((p) => p.replace("ControlPath=", "")),
+                ...shellCommands.map((c) => c.match(/ControlPath=(\S+)/)?.[1] ?? ""),
+            ]);
+            expect(sockets.size).toBe(1);
+        });
+
+        it("opens the shared connection once, before any transfer runs", async () => {
+            // Left to whichever transfer starts first, several beginning at the same moment would
+            // each find no socket and open a master of their own - the very thing this avoids.
+            sshSucceeds();
+            rsyncSucceeds();
+
+            await RsyncAdapter.openSession!(agentConfig);
+
+            expect(mockExecFileCb).toHaveBeenCalled();
+            expect(controlPathsUsed().length).toBeGreaterThan(0);
+        });
+
+        it("shuts the shared connection down instead of leaving it authenticated", async () => {
+            // Deleting the socket file alone would orphan the master, which then holds an open
+            // authenticated connection until ControlPersist runs out.
+            sshSucceeds();
+            rsyncSucceeds();
+            const session = await RsyncAdapter.openSession!(agentConfig);
+            mockExecFileCb.mockClear();
+
+            await session.close();
+
+            const exitCall = mockExecFileCb.mock.calls.find((call) =>
+                Array.isArray(call[1]) && (call[1] as string[]).includes("-O") && (call[1] as string[]).includes("exit"));
+            expect(exitCall, "expected an `ssh -O exit`").toBeTruthy();
+        });
+
+        it("still transfers when the server refuses a shared connection", async () => {
+            // Multiplexing is an optimisation, not a requirement. A server that rejects it must
+            // not take the whole restore with it - the transfers just pay a login each, as before.
+            sshFails("multiplexing not supported");
+            rsyncSucceeds();
+
+            const session = await RsyncAdapter.openSession!(agentConfig);
+            const ok = await session.upload("/tmp/a", "Job/a");
+            await session.close();
+
+            expect(ok).toBe(true);
+        });
+    });
+
 });
