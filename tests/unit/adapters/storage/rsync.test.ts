@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // --- Hoisted mocks ---
 // child_process functions use callbacks, so promisify works when the mock calls its callback
-const { mockExecCb, mockExecFileCb, mockRsyncExecute, mockFsWriteFile, mockFsUnlink, mockFsMkdir, mockFsReadFile, mockRsyncShell, mockRsyncSet } = vi.hoisted(() => ({
+const { mockExecCb, mockExecFileCb, mockRsyncExecute, mockFsWriteFile, mockFsUnlink, mockFsMkdir, mockFsReadFile, mockRsyncShell, mockRsyncSet, mockRsyncFlags } = vi.hoisted(() => ({
     mockExecCb: vi.fn(),
     mockExecFileCb: vi.fn(),
     mockRsyncExecute: vi.fn(),
@@ -14,6 +14,7 @@ const { mockExecCb, mockExecFileCb, mockRsyncExecute, mockFsWriteFile, mockFsUnl
     // so a test that only inspects execFile calls would miss the transfers entirely.
     mockRsyncShell: vi.fn(),
     mockRsyncSet: vi.fn(),
+    mockRsyncFlags: vi.fn(),
 }));
 
 // child_process mock - exec/execFile call their last-arg callback so promisify works
@@ -26,7 +27,7 @@ vi.mock("child_process", () => ({
 // rsync npm package mock - fluent API that chains, execute calls its first callback
 vi.mock("rsync", () => {
     class MockRsync {
-        flags() { return this; }
+        flags(...args: unknown[]) { mockRsyncFlags(...args); return this; }
         set(...args: unknown[]) { mockRsyncSet(...args); return this; }
         shell(cmd: string) { mockRsyncShell(cmd); return this; }
         env() { return this; }
@@ -868,6 +869,36 @@ describe("RsyncAdapter", () => {
             expect(byteValues).toContain(1234567);
         });
     });
+
+    // ===== transfer flags =====
+
+    describe("transfer flags", () => {
+        it("does not compress in transit", async () => {
+            // `-z` costs CPU on both ends and changes nothing about what is stored: each archive
+            // entry is compressed in the packing stage afterwards, so it is the same work twice.
+            // It only pays off on compressible data, and a backup source is mostly the opposite.
+            sshSucceeds("/backups/Job/a.txt\t100\t1700000000.0\n");
+            rsyncSucceeds();
+
+            await RsyncAdapter.upload!(agentConfig, "/tmp/a", "Job/a");
+
+            const flags = mockRsyncFlags.mock.calls.map((c) => String(c[0]));
+            expect(flags).toContain("a");
+            expect(flags.some((f) => f.includes("z"))).toBe(false);
+        });
+
+        it("still lets a connection ask for compression explicitly", async () => {
+            // The guard for the test above: dropping it from the defaults must not put it out of
+            // reach, because on a slow link with compressible data it genuinely helps.
+            sshSucceeds("/backups/Job/a.txt\t100\t1700000000.0\n");
+            rsyncSucceeds();
+
+            await RsyncAdapter.upload!({ ...agentConfig, options: "-z" }, "/tmp/a", "Job/a");
+
+            expect(mockRsyncFlags.mock.calls.map((c) => String(c[0]))).toContain("z");
+        });
+    });
+
 
 
 

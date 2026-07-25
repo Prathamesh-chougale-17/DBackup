@@ -291,8 +291,14 @@ function executeRsync(rsync: Rsync, onLog?: (msg: string, level?: LogLevel, type
  * Must be called after checkSshpass() for password auth.
  */
 async function createRsyncInstance(config: RsyncConfig, keyFile?: string, controlPath?: string): Promise<Rsync> {
+    // Archive mode, but deliberately without `-z`. Compressing in transit costs CPU on both ends
+    // and changes nothing about what gets stored: DBackup compresses each archive entry itself in
+    // the packing stage afterwards, so `-z` is the same work done twice. It also only pays off at
+    // all on data that compresses, and a backup source is mostly the opposite - archives, images,
+    // video, installers. On a slow link with genuinely compressible data it can still be worth it,
+    // which is what the connection's "Additional rsync options" field is for.
     const rsync = new Rsync()
-        .flags("az")
+        .flags("a")
         .set("partial")
         .set("progress");
 
