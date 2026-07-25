@@ -47,13 +47,23 @@ const prismaClientSingleton = () => {
   // forever until something explicitly switches it back - so the "false" branch
   // must actively set journal_mode=DELETE, otherwise the -wal/-shm files keep
   // reappearing from a previous run even with SQLITE_WAL_MODE=false.
+  // Reported once per process, and only at debug level. The journal mode is a fixed property
+  // of the setup - repeating it on every request says nothing new, and in development the dev
+  // server builds several module graphs, so this ran again for each of them. A failure still
+  // warns every time, because that is the case worth noticing.
+  const announce = (message: string) => {
+    if (globalThis.prismaJournalModeLogged) return
+    globalThis.prismaJournalModeLogged = true
+    log.debug(message)
+  }
+
   if (isWalModeEnabled) {
     baseClient.$queryRawUnsafe('PRAGMA journal_mode = WAL;')
-      .then(() => log.info('SQLite WAL mode enabled'))
+      .then(() => announce('SQLite WAL mode enabled'))
       .catch((err) => log.warn('Failed to enable SQLite WAL mode', {}, wrapError(err)))
   } else {
     baseClient.$queryRawUnsafe('PRAGMA journal_mode = DELETE;')
-      .then(() => log.info('SQLite WAL mode disabled via SQLITE_WAL_MODE=false'))
+      .then(() => announce('SQLite WAL mode disabled via SQLITE_WAL_MODE=false'))
       .catch((err) => log.warn('Failed to disable SQLite WAL mode', {}, wrapError(err)))
   }
 
@@ -110,6 +120,8 @@ const prismaClientSingleton = () => {
 
 declare global {
   var prisma: undefined | ReturnType<typeof prismaClientSingleton>
+  /** Set once the journal mode has been reported, so repeated module loads stay quiet. */
+  var prismaJournalModeLogged: undefined | boolean
 }
 
 const prisma = globalThis.prisma ?? prismaClientSingleton()
