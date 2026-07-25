@@ -165,11 +165,35 @@ Prefer a `Badge` variant or `HealthStatusBadge` (`@/components/ui/health-status-
 
 ## 8. Dates and numbers
 
-**Forbidden**: `.toLocaleDateString()`, `.toLocaleTimeString()`, and `.toLocaleString()` on a `Date`, plus any other direct locale formatting. These sneak into chart tooltips, table cells, and preview components and quietly ignore the user's timezone setting.
+Every user carries **three** display preferences on their session: `timezone`, `dateFormat`, and `timeFormat`. Timestamps are stored in UTC and only become a wall-clock time at render, so every place a date or time reaches the screen must go through the shared formatter. There is no exception for "just a tooltip" or "just a preview".
 
-**Use** the `useDateFormatter` hook from `@/hooks/use-date-formatter`, or the `DateDisplay` component in `src/components/utils/date-display.tsx`.
+**Forbidden**: `.toLocaleDateString()`, `.toLocaleTimeString()`, and `.toLocaleString()` on a `Date`, plus any other direct locale formatting. These read the browser locale instead of the user's settings and look correct on your own machine, which is why they keep reappearing in chart tooltips, table cells, and preview components.
 
-Numbers may use `.toLocaleString()` for thousands separators when there is genuinely no timezone concern - but check `formatBytes` and `formatDuration` in `@/lib/utils` first, they likely already cover it.
+### The two entry points
+
+| Use | When |
+| :--- | :--- |
+| `<DateDisplay date={x} />` from `@/components/utils/date-display` | Rendering a timestamp as its own element. Emits semantic `<time dateTime={iso}>` and handles the SSR hydration mismatch. |
+| `useDateFormatter()` from `@/hooks/use-date-formatter` | You need the string itself - inside a template, a chart tooltip, a table `cell`, an aria-label. Returns `{ formatDate }`. |
+
+### The format tokens are the trap
+
+Both take a `date-fns` format string defaulting to `"Pp"`, but the localized tokens are **substituted with the user's preference**, not passed through:
+
+| Format you pass | What is actually used |
+| :--- | :--- |
+| `"P"`, `"PP"`, `"PPP"` | the user's `dateFormat` |
+| `"p"`, `"pp"` | the user's `timeFormat` |
+| `"Pp"`, `"PP pp"` | `dateFormat` + `timeFormat` |
+| `"dd.MM.yyyy"` or any other literal | **used verbatim - the user's format preference is ignored** |
+
+So `formatDate(x, "dd.MM.yyyy")` still converts into the user's timezone but overrides the format they chose. Only reach for a literal pattern when the format is genuinely fixed by context (a log line, a filename, an axis label that must stay compact), and treat it as a deliberate choice rather than a default.
+
+`DateDisplay` also takes an explicit `timezone` prop that overrides the user's - used where a value is defined by the server's clock rather than the viewer's.
+
+### Numbers
+
+`.toLocaleString()` for thousands separators is fine - there is no timezone in a row count. Check `formatBytes` and `formatDuration` in `@/lib/utils` first, they likely already cover the case.
 
 ---
 

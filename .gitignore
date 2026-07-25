@@ -61,9 +61,10 @@ storage/avatars/*
 # Jetbrains
 .idea
 
-# Claude Code - share agents and launch config, keep personal settings local
+# Claude Code - share agents, skills and launch config, keep personal settings local
 .claude/*
 !.claude/agents/
+!.claude/skills/
 !.claude/launch.json
 
 # VSCode
