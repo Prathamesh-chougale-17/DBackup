@@ -1,19 +1,10 @@
 import fs from "fs/promises";
 import path from "path";
-import { minimatch } from "minimatch";
 import { StorageAdapter, AdapterConfig, DirectoryDownloadOptions, DirectoryDownloadResult, DirectoryFileEntry } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { mapWithConcurrency } from "@/lib/concurrency";
-
-/**
- * Returns true if relativePath matches any of the given glob patterns.
- * matchBase lets a slash-free pattern (e.g. "*.tmp") match against the basename at any
- * depth, while a pattern containing a slash (e.g. "cache/**") matches the full relative path.
- */
-export function matchesAnyExcludePattern(relativePath: string, patterns?: string[]): boolean {
-    if (!patterns || patterns.length === 0) return false;
-    return patterns.some((pattern) => pattern.trim().length > 0 && minimatch(relativePath, pattern, { dot: true, matchBase: true }));
-}
+import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
+import { summariseExcluded, formatExcludeSummary } from "@/lib/exclude-summary";
 
 /** Strips a queried remotePath prefix from a FileInfo.path (which list() returns relative to the adapter root). */
 export function toRelativePath(filePath: string, remotePath: string): string {
@@ -67,10 +58,23 @@ export async function downloadDirectoryGeneric(
     const allFiles = await adapter.list(config, remotePath);
 
     const entries: { relativePath: string; sourcePath: string; size: number; lastModified: Date }[] = [];
+    const excluded: { path: string; size: number }[] = [];
     for (const file of allFiles) {
         const relativePath = toRelativePath(file.path, remotePath);
-        if (matchesAnyExcludePattern(relativePath, excludePatterns)) continue;
+        if (matchesAnyExcludePattern(relativePath, excludePatterns)) {
+            excluded.push({ path: relativePath, size: file.size });
+            continue;
+        }
         entries.push({ relativePath, sourcePath: file.path, size: file.size, lastModified: file.lastModified });
+    }
+
+    // Excluding files silently is the one thing a backup must not do: what is missing from a
+    // backup is exactly what nobody notices until they need it. Reported per pattern rather
+    // than per file - a source with a node_modules in it would otherwise write tens of
+    // thousands of paths into the execution log, on every run.
+    if (excluded.length > 0 && onLog) {
+        const { message, details } = formatExcludeSummary(summariseExcluded(excluded, excludePatterns ?? []));
+        onLog(message, "info", "storage", details);
     }
 
     const totalBytes = entries.reduce((sum, e) => sum + e.size, 0);

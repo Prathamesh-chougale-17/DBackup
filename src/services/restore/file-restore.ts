@@ -25,7 +25,7 @@ import { readArchiveManifest, readArchiveIndex } from "@/lib/archive/reader";
 import { forEachSnapshotFile, hashingStream, ChainReaderOptions } from "@/lib/archive/chain-source";
 import { checkChainCompleteness } from "@/lib/archive/chain";
 import { resolveSelection, totalSize } from "@/lib/archive/browse";
-import { matchesAnyExcludePattern } from "@/lib/adapters/storage/common/download-directory";
+import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
 import { getProfileMasterKey } from "@/services/backup/encryption-service";
 import { getMaxConcurrentFiles } from "@/lib/settings/file-concurrency";
 import { archiveIndexService } from "@/services/backup/archive-index-service";

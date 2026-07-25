@@ -12,9 +12,9 @@ vi.mock("fs/promises", () => ({
 import {
     downloadDirectory,
     downloadDirectoryGeneric,
-    matchesAnyExcludePattern,
     toRelativePath,
 } from "@/lib/adapters/storage/common/download-directory";
+import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
 import type { StorageAdapter, FileInfo } from "@/lib/core/interfaces";
 
 function makeFile(path: string, size: number): FileInfo {
@@ -107,6 +107,38 @@ describe("downloadDirectoryGeneric", () => {
         expect(result.files).toBe(1);
         expect(result.entries[0].relativePath).toBe("keep.txt");
         expect(adapter.download).toHaveBeenCalledTimes(1);
+    });
+
+    it("reports what the exclude patterns kept out, grouped per pattern", async () => {
+        // Excluding files silently is the failure mode that only shows up when the backup is
+        // needed. Reported per pattern, not per file, so a node_modules does not write
+        // thousands of lines into the execution log.
+        const files = [
+            makeFile("Job/keep.txt", 100),
+            makeFile("Job/node_modules/a.js", 500),
+            makeFile("Job/node_modules/b.js", 700),
+            makeFile("Job/cache.tmp", 50),
+        ];
+        const adapter = makeAdapter(files);
+        const onLog = vi.fn();
+
+        await downloadDirectoryGeneric(adapter, {}, "Job", "/local/job", ["node_modules/**", "*.tmp"], undefined, onLog);
+
+        const summary = onLog.mock.calls.find(([msg]) => (msg as string).includes("skipped by exclude patterns"));
+        expect(summary, "expected a summary line").toBeTruthy();
+        expect(summary![0]).toContain("3 file(s)");
+        // The per-pattern breakdown rides along as details, which the log viewer expands.
+        expect(summary![3]).toContain("node_modules/**");
+        expect(summary![3]).toContain("*.tmp");
+    });
+
+    it("says nothing about exclusions when no file was excluded", async () => {
+        const adapter = makeAdapter([makeFile("Job/keep.txt", 100)]);
+        const onLog = vi.fn();
+
+        await downloadDirectoryGeneric(adapter, {}, "Job", "/local/job", ["*.tmp"], undefined, onLog);
+
+        expect(onLog.mock.calls.some(([msg]) => (msg as string).includes("skipped by exclude"))).toBe(false);
     });
 
     it("skips (without throwing) a file whose download fails", async () => {

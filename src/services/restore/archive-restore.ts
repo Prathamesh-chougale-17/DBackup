@@ -29,7 +29,8 @@ import { openArchiveEntry } from "@/lib/archive/reader";
 import { forEachSnapshotFile, hashingStream } from "@/lib/archive/chain-source";
 import { getMaxConcurrentFiles } from "@/lib/settings/file-concurrency";
 import { resolveSelection } from "@/lib/archive/browse";
-import { matchesAnyExcludePattern } from "@/lib/adapters/storage/common/download-directory";
+import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
+import { summariseExcluded, formatExcludeSummary } from "@/lib/exclude-summary";
 import { entryKey, IndexFileLine } from "@/lib/archive/types";
 import { getTempDir } from "@/lib/temp-dir";
 import { openArchiveForRestore } from "./file-restore";
@@ -189,19 +190,31 @@ export async function restoreArchiveSnapshot(
 
                 // Excluded files are dropped here rather than counted as failures: they were
                 // never meant to be written, so they must not colour the run's status.
-                const files = excludePatterns.length > 0
-                    ? selectedFiles.filter((f) => !matchesAnyExcludePattern(f.p, excludePatterns))
-                    : selectedFiles;
-                const excludedHere = selectedFiles.length - files.length;
+                const files: IndexFileLine[] = [];
+                const excluded: { path: string; size: number }[] = [];
+                for (const file of selectedFiles) {
+                    if (excludePatterns.length > 0 && matchesAnyExcludePattern(file.p, excludePatterns)) {
+                        excluded.push({ path: file.p, size: file.s });
+                    } else {
+                        files.push(file);
+                    }
+                }
 
                 perSourceTotals.set(dir.src, files.length);
                 for (const file of files) workItems.push({ src: dir.src, file });
 
                 log(
-                    `Directory '${dir.label}': restoring ${files.length} of ${dir.fileCount} file(s) to ${targets.get(dir.src)!.label}`
-                    + (excludedHere > 0 ? ` (${excludedHere} skipped by exclude patterns)` : ''),
+                    `Directory '${dir.label}': restoring ${files.length} of ${dir.fileCount} file(s) to ${targets.get(dir.src)!.label}`,
                     'info', 'storage'
                 );
+
+                // Which patterns took what, expandable in the log viewer. Grouped per pattern
+                // rather than listed per file, so a source with thousands of matches does not
+                // put thousands of lines into the execution record.
+                if (excluded.length > 0) {
+                    const { message, details } = formatExcludeSummary(summariseExcluded(excluded, excludePatterns));
+                    log(`${dir.label}: ${message}`, 'info', 'storage', details);
+                }
             }
 
             const perSourceDone = new Map<string, number>();

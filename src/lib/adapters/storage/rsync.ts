@@ -11,7 +11,8 @@ import os from "os";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
-import { matchesAnyExcludePattern, toRelativePath } from "./common/download-directory";
+import { toRelativePath } from "./common/download-directory";
+import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
