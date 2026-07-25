@@ -4,6 +4,46 @@ A backup job can collect **files and folders**, not only database dumps. Both ca
 the same job: one run produces one archive holding the databases and the directory trees
 side by side.
 
+## What this is for
+
+The point is the word **alongside**: the configuration, the uploads directory, the certificates
+and the database of one application, in one job - same schedule, same retention, same encryption
+key, same restore screen. Backing an application up as a whole rather than in two tools with two
+schedules is the reason this exists.
+
+That covers config directories, an application's data folder, `wp-content`, a Grafana data
+directory, a few gigabytes of user uploads.
+
+### When to reach for something else
+
+DBackup is **agentless**: it connects to the source, pulls the files, and writes the archive on
+the DBackup host. Two consequences follow, and both scale with the size of the source:
+
+- **A full run needs roughly twice the source size in temporary space.** The tree is staged to
+  disk first, then the archive is written next to it, and neither is removed until the archive is
+  complete. A 100 GB source therefore wants ~200 GB free on the DBackup host.
+- **Every byte crosses the network twice** - source → DBackup → destination - because nothing runs
+  on the source machine.
+
+Incremental mode softens the first run's cost on later runs (unchanged files are not fetched at
+all and are carried into the new archive by reference), but the first full run pays it in full,
+and so does every scheduled full backup after it.
+
+There is also no content-level deduplication. Changes are tracked per file, so a large file that
+changes often is stored again in full each time.
+
+For a bulk media library, a dataset larger than the DBackup host's free disk, or anything where
+deduplication is the point, use a tool built for it - [Restic](https://restic.net) and
+[BorgBackup](https://www.borgbackup.org) run on the machine itself and deduplicate at block level.
+They are the better answer there, and DBackup will happily keep handling the databases.
+
+::: tip This is a deliberate trade
+DBackup stores plain TAR archives so a backup can be opened without DBackup - see
+[No Vendor Lock-In](/user-guide/security/recovery-kit). Restic's and Borg's repositories need
+Restic and Borg. Transparency is what is bought here, and deduplication and scale are what is
+paid for it.
+:::
+
 ## Setting one up
 
 1. Configure the storage adapter as a **Directory Source** under **Connections → Directory
@@ -129,7 +169,7 @@ own numbers will differ; the ranking above is the part that carries over.
 
 Directory backups use the seekable archive format: each file is compressed and encrypted
 on its own, and an index sidecar lists every path, size, timestamp and checksum. That is
-what makes browsing a backup cheap - listing a 100 GB archive reads a few megabytes - and
+what makes browsing a backup cheap - listing an archive reads a few megabytes whatever its size - and
 what makes restoring one file out of it possible.
 
 An unencrypted archive is a plain TAR: `tar -xf backup.tar` works with no DBackup involved.

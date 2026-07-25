@@ -23,7 +23,7 @@ export const FEATURES = [
   {
     title: "File & Folder Backup",
     description:
-      "Back up directories from any storage adapter alongside your databases in one job, with a folder tree picker, reusable exclude presets, incremental chains, and VSS shadow copies on SMB.",
+      "Back up an application's config and data directories alongside its database, in one job with one schedule, one retention policy and one key. Folder tree picker, reusable exclude presets, incremental chains, and VSS shadow copies on SMB.",
   },
   {
     title: "Storage & Destinations",
@@ -33,7 +33,7 @@ export const FEATURES = [
   {
     title: "Restore & Recovery",
     description:
-      "Restore a whole backup, a single database, or one file out of a 100 GB archive without downloading it, plus integrity verification and a Recovery Kit for restoring without DBackup itself.",
+      "Restore a whole backup, a single database, or a single file - fetching just that file's bytes instead of the whole archive - plus integrity verification and a Recovery Kit for restoring without DBackup itself.",
   },
   {
     title: "Monitoring & Visibility",
@@ -142,7 +142,7 @@ export const FAQS = [
   {
     question: "Can DBackup back up files and folders, not just databases?",
     answer:
-      "Yes. Any storage adapter can serve as a directory source - local paths, SFTP, SMB, FTP, WebDAV, S3, Google Drive, Dropbox, OneDrive, or rsync over SSH. Files and databases can share one job, so the dump and the data directory that belongs to it land in the same archive and the same restore point. There is no agent to install: DBackup reads whatever those protocols reach.",
+      "Yes. Any storage adapter can serve as a directory source - local paths, SFTP, SMB, FTP, WebDAV, S3, Google Drive, Dropbox, OneDrive, or rsync over SSH. Files and databases can share one job, so the dump and the data directory that belongs to it land in the same archive and the same restore point. There is no agent to install: DBackup reads whatever those protocols reach. That agentless design is also its limit - a full run pulls the tree to the DBackup host and stages it there before packing, so it wants roughly twice the source size in free space and every byte crosses the network twice. It is built for the files that belong to the applications you already back up databases for, not for bulk media libraries; for those, restic or Borg run on the machine itself and are the better tool.",
   },
   {
     question: "Does DBackup deduplicate like restic or Borg?",

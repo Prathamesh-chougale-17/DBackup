@@ -126,7 +126,7 @@ Backups with only one kind of content skip the menu and open their restore page 
 The choice only narrows what the page offers - you can always go back and pick again.
 
 Listing the backup's contents reads only a small index file stored next to it, so browsing
-a 100 GB backup transfers a few megabytes rather than the whole thing. Destinations that
+a backup transfers a few megabytes whatever its size. Destinations that
 support ranged reads restore with a handful of small requests instead of transferring the
 archive:
 

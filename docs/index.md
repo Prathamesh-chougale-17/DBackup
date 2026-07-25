@@ -22,7 +22,7 @@ features:
     details: Supports MySQL, MariaDB, PostgreSQL, MongoDB, SQLite, Redis, Valkey, Microsoft SQL Server, and Firebird (beta).
   - icon: 📁
     title: File & Folder Backups
-    details: Back up directories from any storage adapter alongside your databases in one job. Folder tree picker, reusable exclude presets, and VSS shadow copies on SMB sources.
+    details: Back up an application's config and data directories alongside its database, in one job with one schedule and one retention policy. Folder tree picker, reusable exclude presets, and VSS shadow copies on SMB sources.
   - icon: 🧩
     title: Incremental Backups
     details: Directory sources can store only what changed since the last run. Each chain lives in its own folder and is retained and deleted as a unit, so a snapshot can never lose the archives it depends on.
@@ -49,7 +49,7 @@ features:
     details: 9 notification adapters including Discord, Slack, Teams, Telegram, Gotify, ntfy, Webhook, SMS, and Email (SMTP).
   - icon: 🔄
     title: Restore
-    details: Restore a whole backup, a single database, a folder, or one file out of a 100 GB archive without downloading it. Supports database remapping and standalone offline recovery.
+    details: Restore a whole backup, a single database, a folder, or a single file - fetching just that file's bytes instead of the whole archive. Supports database remapping and standalone offline recovery.
   - icon: 👥
     title: Multi-User & RBAC
     details: Granular permission system with user groups, SSO/OIDC support (Authentik, PocketID, Keycloak, Generic), and audit logging.

@@ -70,10 +70,12 @@ That promise shapes the architecture: incremental backups store whole changed fi
 
 ### 📁 File & Folder Backup
 
+Meant for the files that belong to the applications you already back up databases for - config, uploads, certificates - collected in the same job, on the same schedule, under the same retention and key. DBackup is agentless, so a full run stages the tree on the DBackup host before packing it and needs roughly twice the source size in free space; for bulk media libraries or anything needing block-level deduplication, restic or Borg are the better tool.
+
 - **Directory Sources** - Any storage adapter can serve as a source: back up local paths, SFTP, SMB, FTP, WebDAV, S3, Google Drive, Dropbox, OneDrive, or rsync over SSH, with folders picked from a checkbox tree
 - **Databases and Files in One Job** - One run produces one archive holding the dumps and the directory trees side by side, so an app's database and its data directory share a restore point
 - **Incremental Backups** - Store only what changed since the last run, with a configurable full-backup interval and chains that are retained and deleted as a unit
-- **Single-File Restore** - Browse a backup's file tree without downloading it and restore one file out of a 100 GB archive, transferring only that file on destinations that serve byte ranges
+- **Single-File Restore** - Browse a backup's file tree without downloading it and restore a single file, transferring only that file's bytes on destinations that serve byte ranges
 - **Exclude Pattern Presets** - Reusable glob lists for caches, logs, and anything else you don't want stored - edit the preset, every source using it follows
 - **SMB Shadow Copies** - Read from a VSS snapshot instead of the live share, so open files are readable and the backup reflects a single point in time, with no agent on the file server
 
