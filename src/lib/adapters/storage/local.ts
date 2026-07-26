@@ -179,8 +179,8 @@ export const LocalFileSystemAdapter: StorageAdapter = {
 
             for (const entry of entries) {
                 if (entry.isFile()) {
-                    // With recursive: true, entry.name is just the filename, entry.path is the directory
-                    const fullPath = path.join(entry.parentPath || entry.path, entry.name); // Node 20+ uses parentPath
+                    // With recursive: true, entry.name is just the filename and parentPath is its directory.
+                    const fullPath = path.join(entry.parentPath, entry.name);
                     const relativePath = path.relative(config.basePath, fullPath);
                     const stats = await fs.stat(fullPath);
 

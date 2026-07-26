@@ -36,7 +36,7 @@
     "@eslint/compat": "^2.1.0",
     "@tailwindcss/postcss": "^4.3.3",
     "@tailwindcss/typography": "^0.5.16",
-    "@types/node": "^20.19.37",
+    "@types/node": "^24.13.3",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",
     "eslint": "^10.8.0",

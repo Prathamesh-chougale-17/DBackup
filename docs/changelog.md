@@ -88,6 +88,8 @@ All notable changes to DBackup are documented here.
 ### 🔧 CI/CD
 
 - **lint**: Upgraded ESLint from 9 to 10 in the app and the website, ahead of the v9 end of life on August 6, 2026. The rule set and its findings are unchanged.
+- **types**: Updated `@types/mssql` from 9 to 12, which had been three majors behind the installed `mssql` 12.7 and was type checking the adapter against an API that no longer exists.
+- **types**: Updated `@types/node` from 20 to 24, matching the Node version the container and CI actually run. The local filesystem adapter dropped a `Dirent.path` fallback that no supported Node version reaches.
 
 ### 🐳 Docker
 

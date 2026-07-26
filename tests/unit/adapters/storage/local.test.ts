@@ -397,27 +397,6 @@ describe("LocalFileSystemAdapter", () => {
         });
     });
 
-    // ===== Branch coverage: entry.parentPath fallback (|| entry.path) =====
-
-    describe("list() entry.parentPath fallback", () => {
-        it("uses entry.path when parentPath is undefined (Node < 21 compat)", async () => {
-            mockFsReaddir.mockResolvedValue([
-                {
-                    name: "backup.sql",
-                    isFile: () => true,
-                    parentPath: undefined,
-                    path: "/data/backups/Job",
-                },
-            ]);
-            mockFsStat.mockResolvedValue({ size: 512, mtime: new Date() });
-
-            const result = await LocalFileSystemAdapter.list!(config, "Job");
-
-            expect(result).toHaveLength(1);
-            expect(result[0].name).toBe("backup.sql");
-        });
-    });
-
     // ===== Branch coverage: Access denied rethrow in list/delete =====
 
     describe("list() rethrows Access denied security errors", () => {
