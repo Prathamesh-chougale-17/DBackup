@@ -85,6 +85,10 @@ All notable changes to DBackup are documented here.
 - **lint-guards**: New design system guards covering raw overflow containers, locale date formatting, ScrollArea max-height placement and palette colors without a dark mode variant. The last two carry a baseline count that may only go down, so the existing backlog is tolerated but nothing new is added.
 - **lint-guards**: The no-console guard no longer exempts Client Components. The exemption assumed the logger needed Node APIs, which it never did, and it was hiding 21 console calls.
 
+### 🔧 CI/CD
+
+- **lint**: Upgraded ESLint from 9 to 10 in the app and the website, ahead of the v9 end of life on August 6, 2026. The rule set and its findings are unchanged.
+
 ### 🐳 Docker
 
 - **Image**: `skyfay/dbackup:vNEXT`
