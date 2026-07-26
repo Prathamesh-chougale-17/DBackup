@@ -545,7 +545,7 @@ function matchesAny(filePath, patterns) {
  *
  * @returns Absolute paths of everything written.
  */
-async function restoreWholeFile(inputPath, hexKey, outputDir) {
+async function restoreWholeFile(inputPath, hexKey, outputDir, databases) {
     const metaPath = `${inputPath}.meta.json`;
     if (!fs.existsSync(metaPath)) {
         throw new Error(
@@ -596,15 +596,24 @@ async function restoreWholeFile(inputPath, hexKey, outputDir) {
         throw error;
     }
 
-    const unpacked = await unpackMultiDbTar(partial, root);
-    if (unpacked) {
-        fs.rmSync(partial, { force: true });
-        return unpacked;
-    }
+    try {
+        const unpacked = await unpackMultiDbTar(partial, root, databases);
+        if (unpacked) return unpacked;
 
-    const target = path.join(root, plainName);
-    fs.renameSync(partial, target);
-    return [target];
+        if (databases && databases.length > 0) {
+            throw new Error(
+                "This backup holds a single database, so there is nothing to pick from. Restore it without naming one."
+            );
+        }
+
+        const target = path.join(root, plainName);
+        fs.renameSync(partial, target);
+        return [target];
+    } finally {
+        // The decrypted archive is a means, not a result. A no-op when the single-file path
+        // renamed it away, and the cleanup everywhere else.
+        fs.rmSync(partial, { force: true });
+    }
 }
 
 /**
@@ -616,9 +625,10 @@ async function restoreWholeFile(inputPath, hexKey, outputDir) {
  *
  * @returns Paths written, or null when the file is not a multi-database archive.
  */
-async function unpackMultiDbTar(tarPath, outputDir) {
+async function unpackMultiDbTar(tarPath, outputDir, selection) {
     let fd;
     let members;
+    let manifest;
     try {
         fd = fs.openSync(tarPath, "r");
         const size = fs.fstatSync(fd).size;
@@ -632,7 +642,7 @@ async function unpackMultiDbTar(tarPath, outputDir) {
         const manifestMember = members.find((m) => m.name === MANIFEST_MEMBER);
         if (!manifestMember || manifestMember.size > 1024 * 1024) return null;
 
-        const manifest = JSON.parse(readAt(fd, manifestMember.offset, manifestMember.size).toString("utf-8"));
+        manifest = JSON.parse(readAt(fd, manifestMember.offset, manifestMember.size).toString("utf-8"));
         if (manifest.version !== 1 || !Array.isArray(manifest.databases)) return null;
     } catch {
         return null;
@@ -640,9 +650,24 @@ async function unpackMultiDbTar(tarPath, outputDir) {
         if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already gone */ } }
     }
 
+    // The manifest is what maps a database name to the member holding its dump, so a
+    // selection is resolved through it rather than by guessing at filenames.
+    let wanted = null;
+    if (selection && selection.length > 0) {
+        const available = manifest.databases.map((db) => db.name);
+        const unknown = selection.filter((name) => !available.includes(name));
+        if (unknown.length > 0) {
+            throw new Error(
+                `This backup has no database called ${unknown.join(", ")}. It contains: ${available.join(", ")}`
+            );
+        }
+        wanted = new Set(manifest.databases.filter((db) => selection.includes(db.name)).map((db) => db.filename));
+    }
+
     const written = [];
     for (const member of members) {
         if (member.name === MANIFEST_MEMBER || member.size === 0) continue;
+        if (wanted && !wanted.has(member.name)) continue;
 
         // Refuse anything that would escape the output directory.
         const target = path.resolve(outputDir, member.name);
@@ -771,6 +796,7 @@ function groupBackups(archives, wholeFiles) {
                 encrypted: Boolean(archive.manifest.encryption),
                 size: archive.size,
                 manifest: archive.manifest,
+                ...contentCounts(archive.manifest),
             });
             continue;
         }
@@ -793,10 +819,16 @@ function groupBackups(archives, wholeFiles) {
             size: members.reduce((sum, m) => sum + m.size, 0),
             manifest: newest.manifest,
             members,
+            ...contentCounts(newest.manifest),
         });
     }
 
     for (const file of wholeFiles) {
+        // Names, not just a count: a whole-file backup cannot be looked into without
+        // decrypting it, so the sidecar's list is the only way to offer a choice up front.
+        const names = file.meta.multiDb?.databases
+            ?? (Array.isArray(file.meta.databases) ? file.meta.databases : file.meta.databases?.names)
+            ?? [];
         found.push({
             kind: "file",
             label: path.basename(file.path),
@@ -805,10 +837,26 @@ function groupBackups(archives, wholeFiles) {
             encrypted: Boolean(file.meta.encryption?.enabled),
             size: file.size,
             meta: file.meta,
+            databaseNames: names,
+            databases: names.length,
+            directorySources: 0,
         });
     }
 
     return found.sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
+}
+
+/**
+ * What a v2 archive holds, from its manifest alone.
+ *
+ * Read during the scan so the menu can offer database selection only where there are
+ * databases, without opening anything or asking for a key first.
+ */
+function contentCounts(manifest) {
+    return {
+        databases: manifest.counts?.databases ?? 0,
+        directorySources: manifest.counts?.directorySources ?? 0,
+    };
 }
 
 function statOrNull(target) {
@@ -857,6 +905,8 @@ function formatDate(iso) {
 function describeBackup(backup) {
     const parts = [formatDate(backup.createdAt), formatBytes(backup.size)];
     parts.push(backup.encrypted ? "encrypted" : "not encrypted");
+    if (backup.databases > 0) parts.push(`${backup.databases} database(s)`);
+    if (backup.directorySources > 0) parts.push(`${backup.directorySources} directory source(s)`);
     if (backup.kind === "chain") {
         parts.push(`incremental chain, ${backup.members.length} archive(s)`);
     }
@@ -1039,6 +1089,72 @@ async function runWizard(startPath, initialKey, keySource) {
     }
 }
 
+/** A whole-file backup: one dump, or a TAR holding one per database. */
+async function handleWholeFileBackup(backup, hexKey) {
+    console.log();
+    console.log(`  ${c.bold(backup.label)}  ${c.dim(describeBackup(backup))}`);
+
+    let databases;
+    if (backup.databaseNames.length > 1) {
+        const action = await select("  What do you want?", [
+            { label: "Restore everything", value: "all" },
+            { label: "Only certain databases", value: "some" },
+            { label: c.dim("Back"), value: null },
+        ]);
+        if (!action) return;
+        if (action === "some") {
+            databases = await selectMany("  Which databases?", backup.databaseNames);
+            if (databases.length === 0) return;
+        }
+    }
+
+    const outputDir = await askOutputDir();
+    try {
+        const written = await restoreWholeFile(backup.path, hexKey, outputDir, databases);
+        console.log(c.green(`  Restored ${written.length} file(s) to ${outputDir}`));
+        for (const file of written) console.log(c.dim(`    ${path.basename(file)}`));
+    } catch (error) {
+        console.log(c.red(`  ${error.message}`));
+    }
+}
+
+/** The database names inside a v2 archive. Needs the key, since the index is sealed. */
+function listArchiveDatabases(archivePath, hexKey) {
+    const archive = openArchive(archivePath, hexKey);
+    try {
+        return archive.index.databases.map((db) => db.name);
+    } finally {
+        fs.closeSync(archive.fd);
+    }
+}
+
+/**
+ * Picks several out of a list by number.
+ *
+ * Not the arrow-key menu: that one returns a single choice, and a checkbox variant needs
+ * raw mode, which is exactly what is missing over a pipe. Numbers work everywhere and read
+ * the same in both.
+ */
+async function selectMany(title, options) {
+    console.log();
+    console.log(c.bold(title));
+    options.forEach((option, i) => console.log(`  ${i + 1}) ${option}`));
+
+    const answer = await ask("  Numbers, comma separated (empty for all): ");
+    if (!answer) return [...options];
+
+    const chosen = [];
+    for (const part of answer.split(",").map((p) => p.trim()).filter(Boolean)) {
+        const index = Number.parseInt(part, 10) - 1;
+        if (Number.isNaN(index) || !options[index]) {
+            console.log(c.red(`  '${part}' is not one of the options.`));
+            return selectMany(title, options);
+        }
+        if (!chosen.includes(options[index])) chosen.push(options[index]);
+    }
+    return chosen;
+}
+
 /**
  * Where a restore lands, asked the same way for every kind of backup.
  *
@@ -1065,25 +1181,14 @@ async function promptForKey() {
 
 /** Asks what to do with the chosen backup and does it. */
 async function handleBackup(backup, hexKey) {
-    if (backup.kind === "file") {
-        console.log();
-        console.log(`  ${c.bold(backup.label)}  ${c.dim(describeBackup(backup))}`);
-        const outputDir = await askOutputDir();
-        try {
-            const written = await restoreWholeFile(backup.path, hexKey, outputDir);
-            console.log(c.green(`  Restored ${written.length} file(s) to ${outputDir}`));
-            for (const file of written) console.log(c.dim(`    ${path.basename(file)}`));
-        } catch (error) {
-            console.log(c.red(`  ${error.message}`));
-        }
-        return;
-    }
+    if (backup.kind === "file") return handleWholeFileBackup(backup, hexKey);
 
     const action = await select(`  ${backup.label}`, [
         { label: "Restore everything (latest state)", value: "all" },
         { label: "Show what is inside", value: "list" },
         ...(backup.kind === "chain" ? [{ label: "Pick an older state", value: "older" }] : []),
-        { label: "Only certain files", value: "some" },
+        ...(backup.databases > 0 ? [{ label: "Only certain databases", value: "databases" }] : []),
+        ...(backup.directorySources > 0 ? [{ label: "Only certain files", value: "some" }] : []),
         { label: c.dim("Back"), value: null },
     ]);
     if (!action) return;
@@ -1106,6 +1211,21 @@ async function handleBackup(backup, hexKey) {
     }
 
     let patterns = [];
+    if (action === "databases") {
+        let names;
+        try {
+            names = listArchiveDatabases(archivePath, hexKey);
+        } catch (error) {
+            console.log(c.red(`  ${error.message}`));
+            return;
+        }
+        const chosen = await selectMany("  Which databases?", names);
+        if (chosen.length === 0) return;
+        // The extract matches databases under this prefix, so a choice is just a pattern -
+        // and naming any of them keeps the archive's files out of the restore by itself.
+        patterns = chosen.map((name) => `databases/${name}`);
+    }
+
     if (action === "some") {
         console.log();
         console.log(c.dim("  Patterns accept * and **, and naming a folder takes everything in it."));
@@ -1318,10 +1438,16 @@ Or drive it directly:
 
   node dbackup-recover.js --list    <archive|folder> [<hex_key>]
   node dbackup-recover.js --extract <archive|folder> <output_dir> [<hex_key>] [pattern...]
-  node dbackup-recover.js --decrypt <backup.enc> [<hex_key>] [<output_dir>]
+  node dbackup-recover.js --decrypt <backup.enc> [<hex_key>] [<output_dir>] [database...]
 
 Everything is restored into ./restored unless another folder is named. A database backup
-holding several databases is unpacked into one dump per database, not left as a .tar.
+holding several databases is unpacked into one dump per database, not left as a .tar - name
+the ones you want to restore just those:
+
+  node dbackup-recover.js --decrypt AllDbs.tar.enc ./restored shop
+  node dbackup-recover.js --extract backup.tar ./restored databases/shop
+
+Run --list first to see which databases a backup contains.
 
 The key is read from master.key next to this file when it is there, so it usually does not
 need to be passed at all. Unencrypted backups need no key either.
@@ -1366,8 +1492,10 @@ async function main() {
         if (!args[1]) throw new Error("Missing backup path");
         const rest = args.slice(2);
         const hexKey = isHexKey(rest[0]) ? rest.shift().trim() : defaultKey;
-        const outputDir = rest[0] ? path.resolve(rest[0]) : DEFAULT_OUTPUT_DIR;
-        const written = await restoreWholeFile(args[1], hexKey, outputDir);
+        const outputDir = rest.length > 0 ? path.resolve(rest.shift()) : DEFAULT_OUTPUT_DIR;
+        // Anything further names the databases to restore, mirroring how --extract takes
+        // patterns after its output directory.
+        const written = await restoreWholeFile(args[1], hexKey, outputDir, rest);
         console.log(`Restored ${written.length} file(s) to ${outputDir}`);
         for (const file of written) console.log(`  ${path.basename(file)}`);
         return;

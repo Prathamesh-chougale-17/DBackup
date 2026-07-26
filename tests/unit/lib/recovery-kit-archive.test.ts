@@ -130,6 +130,19 @@ describe("recovery kit: dbackup-recover.js", () => {
         await expect(fs.access(path.join(outDir, "src-1", "docs/notes.txt"))).rejects.toThrow();
     });
 
+    it("restores a single database out of an archive, and nothing else", async () => {
+        // Databases are addressed under a `databases/` prefix, so picking one keeps the
+        // archive's directory sources out of the restore by itself.
+        const archivePath = await buildArchive(true);
+        const outDir = path.join(workDir, "out");
+
+        const { code } = await runScript(["--extract", archivePath, outDir, KEY_HEX, "databases/appdb"]);
+
+        expect(code).toBe(0);
+        expect(await fs.readFile(path.join(outDir, "databases", "appdb.sql"), "utf-8")).toContain("CREATE TABLE t");
+        await expect(fs.access(path.join(outDir, "src-1"))).rejects.toThrow();
+    });
+
     it("treats a folder name as everything inside it", async () => {
         const archivePath = await buildArchive(true);
         const outDir = path.join(workDir, "out");
@@ -282,16 +295,16 @@ describe("recovery kit: whole-file backups", () => {
         expect(await fs.readFile(path.join(outDir, "MyDb_2026-07-20.sql"))).toEqual(plain);
     });
 
-    it("unpacks a multi-database backup into one dump per database", async () => {
-        // These are a TAR of dumps. Handing back the .tar was one step short of the job,
-        // and left the database half of the tool behaving unlike the file half.
+    const DUMPS = { "shop.sql": "CREATE TABLE orders (id INT);\n", "blog.sql": "CREATE TABLE posts (id INT);\n" };
+
+    /** A backup of several databases: one encrypted TAR holding a dump each. */
+    async function buildMultiDb() {
         const { createMultiDbTar } = await import("@/lib/adapters/database/common/tar-utils");
-        const dumps = { "shop.sql": "CREATE TABLE orders (id INT);\n", "blog.sql": "CREATE TABLE posts (id INT);\n" };
-        for (const [name, body] of Object.entries(dumps)) await fs.writeFile(path.join(workDir, name), body);
+        for (const [name, body] of Object.entries(DUMPS)) await fs.writeFile(path.join(workDir, name), body);
 
         const tarPath = path.join(workDir, "AllDbs_2026-07-20.tar");
         await createMultiDbTar(
-            Object.keys(dumps).map((name) => ({ name, path: path.join(workDir, name), dbName: name.replace(".sql", ""), format: "sql" as const })),
+            Object.keys(DUMPS).map((name) => ({ name, path: path.join(workDir, name), dbName: name.replace(".sql", ""), format: "sql" as const })),
             tarPath,
             { sourceType: "mysql" }
         );
@@ -302,20 +315,48 @@ describe("recovery kit: whole-file backups", () => {
         const encPath = path.join(workDir, "AllDbs_2026-07-20.tar.enc");
         await fs.writeFile(encPath, Buffer.concat([cipher.update(plain), cipher.final()]));
         await fs.writeFile(`${encPath}.meta.json`, JSON.stringify({
-            compression: "NONE",
+            compression: "NONE", multiDb: { format: "tar", databases: ["shop", "blog"] },
             encryption: { enabled: true, profileId: "p1", algorithm: "aes-256-gcm",
                 iv: iv.toString("hex"), authTag: cipher.getAuthTag().toString("hex") },
         }));
+        return encPath;
+    }
 
+    it("unpacks a multi-database backup into one dump per database", async () => {
+        // These are a TAR of dumps. Handing back the .tar was one step short of the job,
+        // and left the database half of the tool behaving unlike the file half.
+        const encPath = await buildMultiDb();
         const outDir = path.join(workDir, "out");
+
         const { code } = await runScript(["--decrypt", encPath, KEY_HEX, outDir]);
 
         expect(code).toBe(0);
-        for (const [name, body] of Object.entries(dumps)) {
+        for (const [name, body] of Object.entries(DUMPS)) {
             expect(await fs.readFile(path.join(outDir, name), "utf-8")).toBe(body);
         }
         // The archive it came out of is not left lying next to the dumps.
         await expect(fs.access(path.join(outDir, "AllDbs_2026-07-20.tar"))).rejects.toThrow();
+    });
+
+    it("restores a single named database out of a multi-database backup", async () => {
+        const encPath = await buildMultiDb();
+        const outDir = path.join(workDir, "out");
+
+        const { code } = await runScript(["--decrypt", encPath, KEY_HEX, outDir, "shop"]);
+
+        expect(code).toBe(0);
+        expect(await fs.readFile(path.join(outDir, "shop.sql"), "utf-8")).toBe(DUMPS["shop.sql"]);
+        await expect(fs.access(path.join(outDir, "blog.sql"))).rejects.toThrow();
+    });
+
+    it("names the databases it does have when asked for one it does not", async () => {
+        const encPath = await buildMultiDb();
+
+        const { stderr, code } = await runScript(["--decrypt", encPath, KEY_HEX, path.join(workDir, "out"), "payments"]);
+
+        expect(code).toBe(1);
+        expect(stderr).toContain("shop");
+        expect(stderr).toContain("blog");
     });
 
     it("defaults to the same restore folder the file backups use", async () => {

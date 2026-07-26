@@ -98,7 +98,7 @@ DBackup server, no database.
 ```
 
 Choosing a backup offers restoring everything, looking inside first, picking an older state
-of a chain, or pulling out only certain files.
+of a chain, or restoring only part of it - certain files, or certain databases by name.
 
 You never have to type the key: the tool reads `master.key` from its own folder. If the key
 is somewhere else, it asks for it.
@@ -117,7 +117,7 @@ an archive.
 ```bash
 node dbackup-recover.js --list    <archive or folder>
 node dbackup-recover.js --extract <archive or folder> <output_dir> [pattern...]
-node dbackup-recover.js --decrypt <backup.enc> [output_dir]
+node dbackup-recover.js --decrypt <backup.enc> [output_dir] [database...]
 ```
 
 Everything lands in `./restored` unless another folder is named.
@@ -140,6 +140,22 @@ mismatch is reported and the command exits non-zero.
 same pass, and a backup holding several databases is unpacked into one dump per database -
 the output is always ready to feed to `mysql`, `psql` or `mongorestore`, never a `.gz` or a
 `.tar` to take apart first.
+
+### Restoring a single database
+
+Name it, and nothing else is written. Which form you use depends on where the database
+lives, and `--list` tells you which databases a backup contains:
+
+```bash
+# A database-only backup (a .tar of dumps)
+node dbackup-recover.js --decrypt AllDbs.tar.enc ./restored shop
+
+# A database inside a file backup, addressed under the databases/ prefix
+node dbackup-recover.js --extract backup.tar ./restored databases/shop
+```
+
+Naming a database in the second form also keeps the archive's directory sources out of the
+restore, so you get the dump on its own.
 
 The key is read from `master.key` next to the tool. Pass it as an extra argument to override,
 or leave it out entirely for unencrypted backups.
