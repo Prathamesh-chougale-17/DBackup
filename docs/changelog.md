@@ -11,9 +11,14 @@ All notable changes to DBackup are documented here.
 > fetching the rest - and it carries a `<backup>.index` sidecar next to the usual `.meta.json`. An
 > incremental job stores its snapshots in `<job>/chain-<timestamp>/` instead of flat. Tooling that
 > walks a destination and expects two files per backup will meet a third one next to these.
->
 > Nothing existing changes: database-only backups keep their format, their layout and their restore
 > path. Only the reverse matters - a backup written by this version cannot be read by an older one.
+
+> **Download your Recovery Kits again.** The kit was rebuilt from scratch for this release: one
+> tool instead of two scripts, a menu that finds your backups and asks what to do with them,
+> launchers for all three systems, and support for the new file-backup and incremental formats.
+> An older kit cannot read a file backup at all. Your key has not changed, so the new kit is a drop-in
+> replacement - Vault > Encryption > view the profile > Download Recovery Kit.
 
 ### ✨ Features
 
@@ -51,6 +56,7 @@ All notable changes to DBackup are documented here.
 - **vault**: Fixed the Recovery Kit refusing the folder an incremental backup is stored in. Pointing it at a `chain-...` folder - which is what "copy the backup" produces - answered `Not a DBackup v2 archive: no manifest.json found`, and the only way through was to know that the newest `.tar` inside was the one to name. A folder is now the expected input: it finds the chain, takes the newest snapshot and says which one it took.
 - **vault**: Fixed the Recovery Kit shipping a `master.key` that nothing read. Every documented command told the user to paste the key instead, which put it in shell history and in the process list. The tool reads the file itself now, and no launcher carries the key.
 - **vault**: Fixed the Recovery Kit's Linux and macOS helper arriving without its executable bit and only ever starting the database half of the kit. There are working launchers for all three systems now, and they start the whole tool.
+- **vault**: Fixed every executable file in the Recovery Kit arriving with no permissions at all, which macOS reported as "You do not have permission to open the document". The zip stored a pre-shifted mode where a plain one was expected, so the bits were masked away to zero.
 - **vault**: Fixed a decrypted database backup being left compressed when it was not encrypted to begin with. It came out named `.gz.decrypted`, which described neither what it was nor what had happened to it.
 - **storage**: Fixed "Download Decrypted" handing back the still-encrypted archive for a file backup. Its entries are encrypted individually, so there is no single stream to decrypt, and the code that only knew the older whole-file format passed the archive through untouched and reported success. File backups now offer "Download Decrypted Contents" instead, which unpacks the archive - and the rest of its chain, for an incremental - into a `.tar.gz`. Asking for a decrypted download of one through the API now fails with an explanation rather than quietly returning ciphertext.
 
@@ -109,6 +115,7 @@ All notable changes to DBackup are documented here.
 - **restore**: New coverage for key resolution: the order it tries things in, that a key you supplied is reported as wrong rather than quietly replaced by another, and that an archive index seals against every key but the right one. Plus a regression test that a backup with no usable key asks for one instead of reporting an empty archive.
 - **vault**: New coverage for key recovery, including that a key which does not open the backup is never stored, that an existing profile is reused rather than duplicated, and that a generated profile name steps around one already taken.
 - **restore**: New coverage for the key prompt's own state machine: that a retry running into the same prompt keeps the dialog open with a reason instead of closing as though it had worked, that the answer is remembered for the rest of the page, and that a raw key never travels with an ordinary request.
+- **vault**: New coverage for the generated kit itself: that it ships the tool rather than a placeholder, that the launchers arrive executable, and that the README gives the terminal command and the macOS workaround.
 - **vault**: New coverage for restoring one named database out of both backup formats, and for an unknown name being answered with the list of databases the backup does contain.
 - **vault**: New coverage for a multi-database backup coming out as one dump per database with no archive left behind, and for every kind of restore defaulting to the same output folder.
 - **vault**: New coverage for the Recovery Kit's new entry points: that a chain folder is accepted directly and resolves to its newest snapshot, encrypted or not, that a folder holding several backups names them instead of guessing, that the key is read from `master.key` rather than handed over, and that a whole-file database backup comes out decrypted and decompressed in one pass with nothing written when the key is wrong.

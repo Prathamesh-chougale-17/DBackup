@@ -1,0 +1,238 @@
+/**
+ * Builds the Recovery Kit: the zip a user keeps so their backups outlive DBackup.
+ *
+ * Everything here is written for someone who is having a bad day and has never read this
+ * documentation before. That is why the kit is one tool rather than a choice of scripts,
+ * why the launchers exist, and why every instruction also gives the plain terminal command
+ * that works when a launcher does not.
+ */
+
+import AdmZip from "adm-zip";
+import fs from "fs/promises";
+import path from "path";
+import { logger } from "@/lib/logging/logger";
+import { wrapError } from "@/lib/logging/errors";
+
+const log = logger.child({ service: "RecoveryKitService" });
+
+/** The single standalone tool shipped in the kit. Lives in scripts/ and is tested there. */
+export const RECOVERY_TOOL = "dbackup-recover.js";
+
+/**
+ * Unix mode for the files that need to be runnable, so they arrive that way.
+ *
+ * A plain mode, not a pre-shifted external-attributes value: AdmZip masks what it is given
+ * with `0xfff` and does the shifting and the file-type bit itself. Handing it an already
+ * shifted value silently produces mode 000 - a file macOS refuses to open at all, with a
+ * permissions error that reads like a broken machine rather than a broken archive.
+ */
+export const EXECUTABLE_MODE = 0o755;
+
+/**
+ * Starts the tool from wherever the kit was unpacked.
+ *
+ * `cd` first, because a double-click on macOS opens Terminal in the home directory, and the
+ * tool looks for master.key and for backups next to itself.
+ */
+function unixLauncher(): string {
+    return `#!/bin/sh
+cd "$(dirname "$0")" || exit 1
+
+if ! command -v node >/dev/null 2>&1; then
+    echo "Node.js is required but was not found."
+    echo "Install it from https://nodejs.org/ (version 18 or newer), then run this again."
+    printf "Press Enter to close..."
+    read -r _
+    exit 1
+fi
+
+node ${RECOVERY_TOOL}
+
+printf "\\nPress Enter to close..."
+read -r _
+`;
+}
+
+function windowsLauncher(): string {
+    return `@echo off
+cd /d "%~dp0"
+
+where node >nul 2>nul
+if errorlevel 1 (
+    echo Node.js is required but was not found.
+    echo Install it from https://nodejs.org/ ^(version 18 or newer^), then run this again.
+    pause
+    exit /b 1
+)
+
+node ${RECOVERY_TOOL}
+
+pause
+`;
+}
+
+function readme(profileName: string, generatedAt: string): string {
+    return `# Recovery Kit for Profile: ${profileName}
+Generated at: ${generatedAt}
+
+This kit restores your backups WITHOUT DBackup. Keep it somewhere safe, and NOT next to
+your backups - it contains the key that opens them.
+
+
+## HOW TO USE IT
+
+1. Unzip this kit into a folder.
+
+2. Copy the backup into that same folder. If the backup is a FOLDER (an incremental
+   chain), copy the whole folder.
+
+3. Start the tool. Two ways, both fine - use the second if the first is blocked:
+
+   THE EASY WAY - double-click a launcher
+
+       Windows      START-Windows.bat
+       macOS        START-macOS.command
+       Linux        START-Linux.sh
+
+       On macOS the first double-click may be refused because the file came from the
+       internet. Right-click it, choose Open, then confirm. After that it just works.
+
+   THE WAY THAT ALWAYS WORKS - a terminal
+
+       Open a terminal:
+         Windows    Start menu -> type "cmd" -> Command Prompt
+         macOS      Applications -> Utilities -> Terminal
+         Linux      your terminal application, or Ctrl+Alt+T
+
+       Go to this folder. Type "cd " (with the space) and then drag this folder from
+       your file manager onto the terminal window - it fills in the path for you.
+       Press Enter. Or type it out:
+
+         cd /path/to/this/folder
+
+       Then run:
+
+         node ${RECOVERY_TOOL}
+
+4. It shows what it found and asks what to do with it. That is all.
+
+You do not need to know which kind of backup you have, and you do not need to type the
+key anywhere: the tool reads master.key from this folder by itself.
+
+
+## PREREQUISITES
+
+Node.js 18 or newer, from https://nodejs.org/
+Nothing else - no npm install, no DBackup server, no database.
+
+To check whether you already have it, run "node --version" in a terminal.
+
+
+## CONTENTS
+
+  master.key            Your raw 64-character key. Anyone holding it can read your backups.
+  ${RECOVERY_TOOL}   The recovery tool. Reads every backup format DBackup writes.
+  START-Windows.bat     Double-click launcher for Windows.
+  START-macOS.command   Double-click launcher for macOS.
+  START-Linux.sh        Launcher for Linux.
+  README.txt            This file.
+
+
+## INCREMENTAL BACKUPS
+
+A job with incremental backups stores each chain in its own folder:
+
+    MyJob/chain-2026-07-24T03-00-00-000/
+        ..._full-000.tar     the full backup the chain is built on
+        ..._inc-001.tar      what changed after it
+        ..._inc-002.tar      what changed after that
+
+Copy that whole folder. The tool picks the newest snapshot on its own and rebuilds the
+current state from all of them, every file at its latest version. Pick "an older state" in
+the menu to go back to an earlier point instead.
+
+If an archive of the chain is missing, the tool names it and stops rather than writing an
+incomplete restore.
+
+
+## COMMAND LINE
+
+The same tool, for scripting or over SSH. Everything lands in ./restored unless another
+folder is named.
+
+    node ${RECOVERY_TOOL} --list    <archive or folder>
+    node ${RECOVERY_TOOL} --extract <archive or folder> <output_dir> [pattern...]
+    node ${RECOVERY_TOOL} --decrypt <backup.enc> [output_dir] [database...]
+
+Patterns accept * and **, and naming a folder takes everything inside it:
+
+    node ${RECOVERY_TOOL} --extract backup.tar ./restored 'www/**'
+    node ${RECOVERY_TOOL} --extract backup.tar ./restored docs
+
+To restore a single database out of a backup that holds several, name it. Run --list first
+to see which ones there are:
+
+    node ${RECOVERY_TOOL} --decrypt AllDbs.tar.enc ./restored shop
+    node ${RECOVERY_TOOL} --extract backup.tar ./restored databases/shop
+
+Every extracted file is checked against the checksum recorded when the backup was made.
+A key can be passed as an extra argument if master.key is not in this folder.
+
+
+## WITHOUT THIS KIT AT ALL
+
+An UNENCRYPTED file backup is a plain TAR:
+
+    tar -xf backup.tar
+
+If the job used compression, the extracted files are gzip or brotli streams - run 'gunzip'
+or 'brotli -d' on them afterwards. Encrypted backups always need this kit.
+`;
+}
+
+export interface RecoveryKitInput {
+    profileName: string;
+    /** The profile's raw 64-character master key. */
+    masterKeyHex: string;
+    /** Stamped into the README. Injected so the output is reproducible in tests. */
+    generatedAt?: string;
+}
+
+/** Assembles the kit. Returns the zip bytes, ready to send. */
+export async function buildRecoveryKit({
+    profileName,
+    masterKeyHex,
+    generatedAt = new Date().toISOString(),
+}: RecoveryKitInput): Promise<Buffer> {
+    const zip = new AdmZip();
+
+    // The tool reads this itself, which is why no launcher carries the key: a key passed as
+    // an argument shows up in shell history and in the process list.
+    zip.addFile("master.key", Buffer.from(masterKeyHex, "utf8"));
+
+    // One file, deliberately. It is unzipped into a strange folder in the worst week of
+    // someone's year, and anything that can be separated from it by a careless copy
+    // eventually will be. It recognises every backup format DBackup writes, so nobody has
+    // to work out which one they are holding before they can start.
+    try {
+        const toolContent = await fs.readFile(path.join(process.cwd(), "scripts", RECOVERY_TOOL), "utf8");
+        zip.addFile(RECOVERY_TOOL, Buffer.from(toolContent, "utf8"), "", EXECUTABLE_MODE);
+    } catch (e: unknown) {
+        log.error("Failed to read the recovery tool", { script: RECOVERY_TOOL }, wrapError(e));
+        zip.addFile(
+            `ERROR_MISSING_${RECOVERY_TOOL}.txt`,
+            Buffer.from(`Could not find scripts/${RECOVERY_TOOL} on server.`, "utf8")
+        );
+    }
+
+    // One launcher per platform, so the tool can be started by double-clicking. None takes
+    // an argument and none carries the key - they only start it, and it asks the rest.
+    zip.addFile("START-Windows.bat", Buffer.from(windowsLauncher(), "utf8"));
+    // A .command file is what macOS opens in Terminal on a double-click.
+    zip.addFile("START-macOS.command", Buffer.from(unixLauncher(), "utf8"), "", EXECUTABLE_MODE);
+    zip.addFile("START-Linux.sh", Buffer.from(unixLauncher(), "utf8"), "", EXECUTABLE_MODE);
+
+    zip.addFile("README.txt", Buffer.from(readme(profileName, generatedAt), "utf8"));
+
+    return zip.toBuffer();
+}

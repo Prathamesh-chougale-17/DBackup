@@ -76,13 +76,26 @@ DBackup server, no database.
 1. Unzip the Recovery Kit.
 2. Copy the backup next to the unzipped files. If the backup is a **folder** - which is how
    an incremental chain is stored - copy the whole folder.
-3. Start the tool:
+3. Start the tool. Double-clicking a launcher is the quick way:
 
-   | System | How |
+   | System | Launcher |
    | :--- | :--- |
-   | Windows | Double-click `START-Windows.bat` |
-   | macOS | Double-click `START-macOS.command` |
-   | Linux | `./START-Linux.sh`, or `node dbackup-recover.js` |
+   | Windows | `START-Windows.bat` |
+   | macOS | `START-macOS.command` |
+   | Linux | `START-Linux.sh` |
+
+   If a launcher is blocked or does nothing, open a terminal instead - this always works,
+   on every system:
+
+   ```bash
+   cd /path/to/the/unzipped/kit
+   node dbackup-recover.js
+   ```
+
+   To open a terminal: **Windows** Start menu, type `cmd`. **macOS** Applications →
+   Utilities → Terminal. **Linux** your terminal application, or <kbd>Ctrl</kbd> +
+   <kbd>Alt</kbd> + <kbd>T</kbd>. Instead of typing the path, type `cd ` and then drag the
+   kit's folder onto the terminal window.
 
 4. It shows what it found and asks what to do with it:
 
@@ -104,9 +117,9 @@ You never have to type the key: the tool reads `master.key` from its own folder.
 is somewhere else, it asks for it.
 
 ::: tip macOS may refuse to open the launcher
-`START-macOS.command` is downloaded from the internet, so Gatekeeper blocks the first
-double-click. Right-click it and choose **Open**, or run `node dbackup-recover.js` in
-Terminal instead.
+`START-macOS.command` arrives from the internet, so Gatekeeper blocks the first
+double-click. Right-click it, choose **Open**, and confirm - after that it starts normally.
+The terminal command above works either way.
 :::
 
 ## Command line
@@ -201,43 +214,39 @@ encrypted.
 
 ## How It Works
 
-### Decryption Process
+There are two shapes of backup, and the tool tells them apart on its own. What follows is
+only needed if you want to write your own recovery code.
 
-```javascript
-// 1. Read metadata
-const meta = JSON.parse(fs.readFileSync(file + '.meta.json'));
+### Database-only backups
 
-// 2. Extract encryption parameters
-const { iv, authTag, profileId } = meta.encryption;
-
-// 3. Create decipher
-const decipher = crypto.createDecipheriv(
-  'aes-256-gcm',
-  Buffer.from(KEY, 'hex'),
-  Buffer.from(iv, 'hex')
-);
-decipher.setAuthTag(Buffer.from(authTag, 'hex'));
-
-// 4. Decrypt file
-fs.createReadStream(encryptedFile)
-  .pipe(decipher)
-  .pipe(fs.createWriteStream(outputFile));
-```
-
-### Required Metadata
-
-The `.meta.json` file must contain:
+One stream: the dump, optionally compressed, optionally encrypted with AES-256-GCM as a
+whole. Everything needed to open it apart from the key is in the `.meta.json` next to it.
 
 ```json
 {
+  "compression": "GZIP",
   "encryption": {
     "enabled": true,
     "iv": "hex-encoded-initialization-vector",
     "authTag": "hex-encoded-authentication-tag"
-  },
-  "compression": "GZIP"
+  }
 }
 ```
+
+Decrypt with the IV and authentication tag from that file, then decompress. A job backing
+up several databases produces a TAR of dumps, so unpack that afterwards as well.
+
+### File backups
+
+A seekable archive that encrypts each entry separately, which is what makes it possible to
+pull one file out of a large backup. It is a different job entirely, specified byte by byte
+in the [Archive Format reference](/developer-guide/reference/archive-format).
+
+::: warning
+The single-stream approach below does **not** work on a file backup. Decrypting it as one
+blob produces nothing usable - use the Recovery Kit, or implement the format from that
+reference.
+:::
 
 ## Best Practices
 
@@ -259,9 +268,11 @@ Store Recovery Kit in:
 
 ### Test Regularly
 
-1. Download fresh Recovery Kit quarterly
-2. Test decryption with recent backup
-3. Verify key matches current profile
+1. Download a fresh Recovery Kit quarterly
+2. Actually run it against a recent backup - unzip it somewhere, copy a backup next to it,
+   start it and check the restored files. It takes a minute, and it is the only way to know
+   the kit, the key and the backup all still line up.
+3. Re-download after any change to the profile
 
 ### Update After Key Rotation
 
@@ -272,86 +283,86 @@ When creating new encryption profile:
 
 ## Troubleshooting
 
-### "Invalid key length"
+### macOS: "You do not have permission to open the document"
 
-**Cause**: Key is not 64 hex characters
+The launcher lost its executable bit. Kits generated before v3 all have this. Download the
+kit again, or run it from a terminal instead:
 
-**Solution**: Verify `master.key` contains exactly 64 characters and nothing else
+```bash
+cd /path/to/the/kit
+node dbackup-recover.js
+```
 
-### "Unable to authenticate data"
+### macOS: the launcher will not open at all
 
-**Cause**: Wrong key or corrupted file
+Gatekeeper blocks a file that came from the internet on its first launch. Right-click
+`START-macOS.command`, choose **Open**, and confirm.
 
-**Solutions**:
-1. Verify correct Recovery Kit for this backup
-2. Check `.meta.json` matches the `.enc` file
-3. Re-download backup file
+### "Decryption failed. Either the key is wrong or the backup is damaged."
 
-### "Metadata file not found"
+The `master.key` in this folder does not open this backup. Each encryption profile has its
+own key, so check you have the kit for the profile the job used - the backup's `.meta.json`
+names it under `encryption.profileId`. If the key is right, the backup file itself is
+damaged and needs downloading again.
 
-**Cause**: Missing `.meta.json`
+The same cause reads as `Authentication failed for entry N` on a file backup, which
+verifies each entry separately.
 
-**Solution**:
-- Download both files from storage
-- They must be in same directory
+### "No metadata found at ...meta.json"
 
-### "Unsupported Node.js version"
+The `.meta.json` sidecar holds the IV and authentication tag, so a backup cannot be
+decrypted without it. Copy it from the backup destination alongside the backup itself - it
+sits right next to it.
 
-**Cause**: Old Node.js
+### "This backup is part of an incremental chain and N archive(s) it needs are missing"
 
-**Solution**: Update to Node.js 18+
+An incremental snapshot reads files out of the earlier archives of its chain. Copy the
+whole `chain-...` folder rather than a single `.tar` from inside it. The message names the
+archives it could not find, and `--list` shows the full set a snapshot depends on.
 
-## Creating Custom Decryption
+## Decrypting Without Node.js
 
-If you need to decrypt in another language:
+Only for **database-only** backups - a file backup needs the archive format, see above.
 
-### Python Example
+### Python
 
 ```python
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-import json
+import gzip, json
 
-# Read key
 key = bytes.fromhex(open('master.key').read().strip())
-
-# Read metadata
 meta = json.load(open('backup.sql.gz.enc.meta.json'))
+
 iv = bytes.fromhex(meta['encryption']['iv'])
 tag = bytes.fromhex(meta['encryption']['authTag'])
-
-# Read encrypted data
 encrypted = open('backup.sql.gz.enc', 'rb').read()
 
-# Decrypt
-aesgcm = AESGCM(key)
-decrypted = aesgcm.decrypt(iv, encrypted + tag, None)
+# The tag is appended to the ciphertext for AESGCM.decrypt()
+plain = AESGCM(key).decrypt(iv, encrypted + tag, None)
 
-# Write output
-open('backup.sql.gz', 'wb').write(decrypted)
+if meta.get('compression') == 'GZIP':
+    plain = gzip.decompress(plain)
+
+open('backup.sql', 'wb').write(plain)
 ```
 
-### OpenSSL (Command Line)
-
-```bash
-# Note: OpenSSL GCM support varies
-openssl enc -d -aes-256-gcm \
-  -K $(cat master.key) \
-  -iv $(cat meta.json | jq -r '.encryption.iv') \
-  -in backup.sql.gz.enc \
-  -out backup.sql.gz
-```
+::: warning Not with the `openssl` command line
+`openssl enc` cannot verify a GCM authentication tag, so it either refuses these files or
+produces unverified output. Use a real AES-GCM implementation - the Python snippet above,
+or the Recovery Kit.
+:::
 
 ## Emergency Checklist
 
 When you need to use Recovery Kit:
 
-- [ ] Locate Recovery Kit
-- [ ] Download backup files (.enc + .meta.json)
+- [ ] Locate the Recovery Kit
+- [ ] Download the backup, including its `.meta.json` - and the whole folder if it is an incremental chain
 - [ ] Install Node.js if needed
 - [ ] Unzip the Recovery Kit
-- [ ] Copy the backup (or its whole folder) next to it
-- [ ] Start the launcher for your system and follow the prompts
-- [ ] Verify the restored files
+- [ ] Copy the backup into the same folder
+- [ ] Start the launcher, or `node dbackup-recover.js` in a terminal there
+- [ ] Follow the prompts, then check the files under `restored/`
 - [ ] Restore to database
 
 ## Next Steps
