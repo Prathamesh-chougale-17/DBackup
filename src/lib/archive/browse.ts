@@ -9,6 +9,19 @@
 
 import { ArchiveIndex, IndexFileLine } from "./types";
 
+/**
+ * Strips leading and trailing "/" characters without regex backtracking, since the
+ * previous `/^\/+/` / `/\/+$/` pair ran in polynomial time on attacker-controlled paths
+ * (an unanchored trailing quantifier re-tries backtracking at every start position).
+ */
+function stripSlashes(value: string): string {
+    let start = 0;
+    while (start < value.length && value.charCodeAt(start) === 47) start++;
+    let end = value.length;
+    while (end > start && value.charCodeAt(end - 1) === 47) end--;
+    return value.slice(start, end);
+}
+
 export interface BrowseEntry {
     name: string;
     /** Full path relative to the directory source root, POSIX separators. */
@@ -27,7 +40,7 @@ export interface BrowseEntry {
 /** Normalizes a browse prefix to "" or "some/dir/". */
 function normalizePrefix(prefix?: string): string {
     if (!prefix) return "";
-    const trimmed = prefix.replace(/^\/+/, "").replace(/\/+$/, "");
+    const trimmed = stripSlashes(prefix);
     return trimmed.length === 0 ? "" : `${trimmed}/`;
 }
 
@@ -99,7 +112,7 @@ export function browseLevel(index: ArchiveIndex, jobSourceId: string, prefix?: s
  * @param paths - Selected paths, relative to the source root
  */
 export function resolveSelection(index: ArchiveIndex, jobSourceId: string, paths: string[]): IndexFileLine[] {
-    const exact = new Set(paths.map((p) => p.replace(/^\/+/, "").replace(/\/+$/, "")));
+    const exact = new Set(paths.map(stripSlashes));
     const prefixes = [...exact].map((p) => `${p}/`);
 
     return index.files.filter((file) => {
