@@ -14,6 +14,7 @@ DBackup supports SSO authentication via OIDC (OpenID Connect):
 
 | Provider | Type | Adapter |
 | :--- | :--- | :--- |
+| **Authelia** | Self-hosted | Pre-configured |
 | **Authentik** | Self-hosted | Pre-configured |
 | **Keycloak** | Self-hosted | Pre-configured |
 | **PocketID** | Self-hosted | Pre-configured |
@@ -40,12 +41,52 @@ Create an OIDC application in your identity provider:
 
 1. Go to **Settings** → **SSO Providers**
 2. Click **Add Provider**
-3. Select adapter type (Authentik, PocketID, Keycloak or Generic)
+3. Select adapter type (Authelia, Authentik, PocketID, Keycloak or Generic)
 4. Fill in configuration
 5. Click **Test** to verify
 6. Save
 
 ## Provider Configuration
+
+### Authelia
+
+[Authelia](https://www.authelia.com/) is a self-hosted authentication and authorization server.
+
+**Configuration**:
+| Field | Description | Example |
+| :--- | :--- | :--- |
+| **Name** | Display name | "Authelia" |
+| **Authelia URL** | Authelia instance URL | `https://auth.example.com` |
+| **Client ID** | From your Authelia client | `dbackup` |
+| **Client Secret** | The plaintext secret | `secret-key` |
+
+Endpoints are discovered via `{baseUrl}/.well-known/openid-configuration`.
+
+::: warning The client secret is stored hashed in Authelia
+Since Authelia 4.38 the `client_secret` in `configuration.yml` has to be a **hash**, while DBackup needs the **plaintext** value. Generate a pair with:
+
+```bash
+authelia crypto hash generate pbkdf2 --variant sha512 --random --random.length 72
+```
+
+Put the `Digest` in Authelia's config and the `Random Password` into DBackup. Pasting the hash into DBackup produces an `invalid_client` error at sign-in.
+:::
+
+Client registration in Authelia's `configuration.yml`:
+
+```yaml
+identity_providers:
+  oidc:
+    clients:
+      - client_id: dbackup
+        client_name: DBackup
+        client_secret: '$pbkdf2-sha512$...'  # the Digest, not the plaintext
+        redirect_uris:
+          - 'https://dbackup.example.com/api/auth/sso/callback/{provider-id}'
+        scopes: [openid, profile, email]
+```
+
+Replace `{provider-id}` with the provider ID DBackup shows on the provider card.
 
 ### Authentik
 

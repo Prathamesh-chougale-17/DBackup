@@ -41,6 +41,7 @@ All notable changes to DBackup are documented here.
 - **vault**: A backup whose encryption profile was deleted can be reopened by pasting the key itself. The key is checked against that specific backup before anything is stored - for a file backup the check is exact, since its index carries an authentication tag - and is then saved as a new vault profile. That is what makes it work everywhere afterwards, including for restores that run unattended and have nobody to ask. Pasting a key that is already in the vault points at the existing profile instead of creating a second one. Requires permission to manage the vault.
 - **auth**: New `DISABLE_EMAIL_LOGIN` environment variable switches off password sign-in, leaving SSO and passkeys. The endpoints are rejected server-side rather than only hidden, and administrators keep creating users and resetting passwords from the Users page. Set it only after the first administrator and an SSO provider exist, since there is no bootstrap exception.
 - **SSO**: New `OIDC_AUTO_REDIRECT` environment variable takes a provider ID and sends visitors straight to that provider instead of showing the login page. It is skipped after a failed sign-in and right after signing out, and an ID matching no enabled provider logs an error at startup rather than stopping the application.
+- **Authelia**: New pre-configured SSO adapter. Enter the Authelia URL and the endpoints are discovered automatically, no manual entry through the generic adapter.
 
 ### 🐛 Bug Fixes
 
@@ -79,6 +80,7 @@ All notable changes to DBackup are documented here.
 - **restore**: Reading the file index of a backup no longer downloads it several times over. The restore page asks for the same index once per directory source plus once for the dry run, and each request used to fetch and decrypt the index sidecar separately - including logging the same failure once per request.
 - **backup**: Files already in a compressed format are no longer recompressed. Video, audio, images, archives, ZIP containers such as `.docx` and `.apk`, web fonts and encrypted files are stored as-is even when the job has compression enabled, because a second pass gains a fraction of a percent while costing the CPU time plus a complete extra write and read through a temporary file. Nothing is left out of the backup, and restore, download and the Recovery Kit read a mixed archive without any change - including kits downloaded earlier.
 - **backup**: Brotli now compresses at quality 10 instead of its maximum of 11, which more than halves the time it takes for 2.5% larger output. Existing archives stay readable, since the level is recorded in the compressed stream itself.
+- **SSO**: Provider icons now come from one shared map instead of four copies that had drifted apart. Keycloak showed a generic globe everywhere except the add dialog.
 
 ### 🔄 Changed
 

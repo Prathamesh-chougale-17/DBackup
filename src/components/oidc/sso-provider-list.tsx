@@ -5,7 +5,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter }
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { Trash2, ShieldCheck, Box, Settings2, Globe, CheckCircle2, UserPlus, UserX, Copy, Loader2, AlertTriangle } from "lucide-react";
+import { Trash2, Globe, CheckCircle2, UserPlus, UserX, Copy, Loader2, AlertTriangle } from "lucide-react";
+import { getOidcProviderIcon } from "@/components/oidc/provider-icon";
 import { deleteSsoProvider, toggleSsoProvider, getSsoProviderDeletionImpact } from "@/app/actions/auth/oidc";
 import { toast } from "sonner";
 import { EditSsoProviderDialog } from "./edit-sso-provider-dialog";
@@ -103,16 +104,7 @@ function ProviderCard({ provider }: { provider: SsoProvider }) {
         }
     };
 
-    const getIcon = () => {
-        switch (provider.adapterId) {
-            case "authentik": return ShieldCheck;
-            case "pocket-id": return Box;
-            case "generic": return Settings2;
-            default: return Globe;
-        }
-    };
-
-    const Icon = getIcon();
+    const Icon = getOidcProviderIcon(provider.adapterId);
 
     return (
         <Card className="flex flex-col">

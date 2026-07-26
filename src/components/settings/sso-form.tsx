@@ -13,7 +13,8 @@ import {
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Loader2, Trash2, ShieldCheck, Box, Settings2, Globe, PlugZap } from "lucide-react"
+import { Loader2, Trash2, PlugZap } from "lucide-react"
+import { getOidcProviderIcon as getProviderIcon } from "@/components/oidc/provider-icon"
 import { toast } from "sonner"
 import { DateDisplay } from "@/components/utils/date-display"
 import {
@@ -31,17 +32,6 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
-
-// Same mapping used in the admin SSO provider list and on the login page -
-// keeps the OIDC adapter icon consistent everywhere it's rendered.
-function getProviderIcon(adapterId: string | null) {
-    switch (adapterId) {
-        case "authentik": return ShieldCheck
-        case "pocket-id": return Box
-        case "generic": return Settings2
-        default: return Globe
-    }
-}
 
 interface SsoFormProps {
     canManageSso: boolean;

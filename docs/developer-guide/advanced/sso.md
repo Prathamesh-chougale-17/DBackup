@@ -4,7 +4,7 @@ This document describes the OpenID Connect (OIDC) implementation for Single Sign
 
 ## Architecture
 
-We leverage the **`better-auth` SSO Plugin** to handle the protocol complexity, while implementing an **Adapter Pattern** to support various providers (Authentik, PocketID, Keycloak, Generic).
+We leverage the **`better-auth` SSO Plugin** to handle the protocol complexity, while implementing an **Adapter Pattern** to support various providers (Authelia, Authentik, PocketID, Keycloak, Generic).
 
 ### The Adapter Concept
 
@@ -27,6 +27,7 @@ An adapter (e.g., `AuthentikAdapter`) provides:
 
 | Provider | Adapter ID | Auto-Discovery |
 |----------|-----------|----------------|
+| Authelia | `authelia` | Yes (from Base URL) |
 | Authentik | `authentik` | Yes (from Base URL) |
 | PocketID | `pocket-id` | Yes (from Base URL) |
 | Keycloak | `keycloak` | Yes (from Realm URL) |

@@ -122,7 +122,7 @@ Meant for the files that belong to the applications you already back up database
 
 ### 👥 Access Control & Security
 
-- **SSO / OIDC** - OpenID Connect with pre-built adapters for Authentik, PocketID, Keycloak, and a generic OIDC option
+- **SSO / OIDC** - OpenID Connect with pre-built adapters for Authelia, Authentik, PocketID, Keycloak, and a generic OIDC option
 - **RBAC** - User groups with granular permissions, protected SuperAdmin group, and audit logging
 - **2FA / Passkeys** - Two-factor authentication and WebAuthn passkey support
 - **Credential Vault** - Centralized encrypted storage for SSH keys, API tokens, OAuth credentials, SMTP accounts, and username/password pairs - reusable across all adapters without re-entering secrets per job

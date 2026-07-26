@@ -97,7 +97,7 @@ export function EditSsoProviderDialog({ provider }: EditSsoProviderDialogProps) 
                         newConfig.baseUrl = parts[0];
                         newConfig.slug = parts[1].replace(/\/$/, "");
                     }
-                } else if (adp.id === "pocket-id") {
+                } else if (adp.id === "pocket-id" || adp.id === "authelia") {
                     // Issuer: {baseUrl} (usually)
                     newConfig.baseUrl = issuer;
                 } else if (adp.id === "generic") {

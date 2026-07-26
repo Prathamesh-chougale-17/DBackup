@@ -21,7 +21,7 @@ import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 import { Loader2, Fingerprint, AlertCircle } from "lucide-react"
 import { formatTwoFactorCode } from "@/lib/utils"
-import { ShieldCheck, Box, Settings2, Globe } from "lucide-react"
+import { getOidcProviderIcon } from "@/components/oidc/provider-icon"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { logLoginSuccess } from "@/app/actions/audit/audit-log"
 import { logger } from "@/lib/logging/logger"
@@ -154,14 +154,7 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
           })
   }, [autoRedirectProvider, errorCode])
 
-  const getSsoIcon = (adapterId: string) => {
-        switch (adapterId) {
-            case "authentik": return ShieldCheck;
-            case "pocket-id": return Box;
-            case "generic": return Settings2;
-            default: return Globe;
-        }
-    };
+  const getSsoIcon = getOidcProviderIcon;
 
   const handlePasskeyLogin = async () => {
         setLoading(true)
