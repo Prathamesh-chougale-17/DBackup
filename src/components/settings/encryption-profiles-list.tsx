@@ -323,14 +323,13 @@ export function EncryptionProfilesList() {
 
             {/* Recovery Kit Export Dialog */}
             <Dialog open={isKitOpen} onOpenChange={setIsKitOpen}>
-                <DialogContent className="sm:max-w-md max-h-[90vh] p-0 flex flex-col">
+                <DialogContent className="sm:max-w-md max-h-[90vh] p-0">
                     <div className="px-6 pt-6 pb-4 shrink-0">
                         <DialogHeader>
                             <DialogTitle>Download Recovery Kit</DialogTitle>
                             <DialogDescription>
-                                A standalone tool that restores your backups without DBackup. Pick which
-                                keys it should carry - one kit can hold several, and it works out which
-                                one each backup needs by itself.
+                                A standalone tool that restores your backups without DBackup. One kit
+                                can carry several keys and picks the right one per backup.
                             </DialogDescription>
                         </DialogHeader>
                     </div>
@@ -354,7 +353,11 @@ export function EncryptionProfilesList() {
                     {/* flex-1 min-h-0 rather than a max-height: the header wraps to a
                         different number of lines depending on the viewport, and any fixed
                         subtraction pushed the footer off the bottom of the dialog. */}
-                    <ScrollArea className="flex-1 min-h-0">
+                    {/* Two measured budgets, because the footer stacks its buttons below sm:
+                        and the chrome is genuinely taller there. The nested !block undoes
+                        Radix's display:table wrapper, which sizes to the widest unbroken
+                        text and pushes the right-hand padding out of view. */}
+                    <ScrollArea className="*:data-[slot=scroll-area-viewport]:max-h-[calc(90vh-26rem)] sm:*:data-[slot=scroll-area-viewport]:max-h-[calc(90vh-21rem)] [&>[data-slot=scroll-area-viewport]>div]:!block">
                         {/* pr-8 rather than pr-6: the scrollbar is drawn over the last 10px
                             of the gutter, so matching the header's px-6 exactly leaves the
                             cards visibly closer to the right edge than to the left. */}
@@ -385,15 +388,15 @@ export function EncryptionProfilesList() {
                         </div>
                     </ScrollArea>
 
-                    <div className="px-6 pt-2 pb-6 space-y-3 shrink-0">
-                        <Alert variant="destructive">
-                            <AlertTriangle className="h-4 w-4" />
-                            <AlertDescription className="text-xs">
+                    <div className="px-6 pt-3 pb-6 space-y-3 shrink-0">
+                        <p className="flex items-start gap-2 text-xs text-destructive">
+                            <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-px" />
+                            <span>
                                 {selectedForKit.size > 1
-                                    ? `This kit opens every backup made with any of these ${selectedForKit.size} profiles. Store it somewhere safe, and not next to your backups.`
-                                    : "The kit contains the raw key. Store it somewhere safe, and not next to your backups."}
-                            </AlertDescription>
-                        </Alert>
+                                    ? `Opens every backup made with any of these ${selectedForKit.size} profiles. Store it away from your backups.`
+                                    : "Contains the raw key. Store it away from your backups."}
+                            </span>
+                        </p>
                         <DialogFooter>
                             <Button variant="outline" onClick={() => setIsKitOpen(false)}>Cancel</Button>
                             <Button
