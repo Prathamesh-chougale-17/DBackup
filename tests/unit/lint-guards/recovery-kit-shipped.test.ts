@@ -51,4 +51,15 @@ describe("lint guard: recovery kit ships its tool", () => {
             ).toBe(true);
         }
     });
+
+    // .dockerignore excludes the whole scripts/ folder and re-includes only the recovery
+    // tool by exact name. A rename of RECOVERY_TOOL that forgets to update this negation
+    // silently drops the file from the build context, and COPY --from=builder then fails
+    // (or, worse, would succeed against a stale cached layer) with no signal at review time.
+    it.each(scripts)("is exempted from .dockerignore's scripts/ exclusion", (script) => {
+        const dockerignore = fs.readFileSync(path.join(ROOT, ".dockerignore"), "utf-8");
+        const lines = dockerignore.split("\n").map((l) => l.trim());
+        expect(lines).toContain("scripts");
+        expect(lines).toContain(`!scripts/${script}`);
+    });
 });
