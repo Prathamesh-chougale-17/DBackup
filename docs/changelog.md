@@ -2,8 +2,8 @@
 
 All notable changes to DBackup are documented here.
 
-## vNEXT
-*Release: In Progress*
+## v3.0.0 - File & Folder Backups, Incremental Chains, and General Improvements & Fixes
+*Released: July 26, 2026*
 
 > **Note:** File backups introduce artefacts that did not exist before. A combined (database +
 > directory source) backup is a seekable archive - compression and encryption are applied per entry
@@ -146,8 +146,8 @@ All notable changes to DBackup are documented here.
 
 ### 🐳 Docker
 
-- **Image**: `skyfay/dbackup:vNEXT`
-- **Also tagged as**: `latest`, `vNEXT`
+- **Image**: `skyfay/dbackup:v3.0.0`
+- **Also tagged as**: `latest`, `v3`
 - **CI Image**: `skyfay/dbackup:ci`
 - **Platforms**: linux/amd64, linux/arm64
 
