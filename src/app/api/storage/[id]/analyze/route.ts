@@ -12,6 +12,8 @@ import { headers } from "next/headers";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
 import { archiveIndexService } from "@/services/backup/archive-index-service";
+import { keyRequiredResponse } from "@/lib/server/key-required-response";
+import { EncryptionKeyRequiredError } from "@/lib/logging/errors";
 import type { BackupMetadata } from "@/lib/core/interfaces";
 
 registerAdapters();
@@ -108,8 +110,14 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
                         }
                     }
                 }
-            } catch (_e) {
-                // Fallthrough
+            } catch (e: unknown) {
+                // A missing key has to escape this catch. It is the one failure here that is
+                // answerable, and the fallbacks below cannot help anyway: reading the
+                // archive's embedded index needs exactly the key the sidecar already
+                // refused. Swallowing it downloaded the whole archive to fail again, then
+                // reported the backup as containing nothing.
+                if (e instanceof EncryptionKeyRequiredError) throw e;
+                // Anything else falls through to the download and the embedded index.
             }
         }
 
@@ -152,6 +160,11 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
         return NextResponse.json({ databases });
 
     } catch (e: unknown) {
+        // A backup nobody holds the key for is answerable, so it is reported rather than
+        // rendered as an archive with nothing in it.
+        const keyRequired = keyRequiredResponse(e);
+        if (keyRequired) return keyRequired;
+
         const message = e instanceof Error ? e.message : "Unknown error";
         return NextResponse.json({ error: message }, { status: 500 });
     } finally {

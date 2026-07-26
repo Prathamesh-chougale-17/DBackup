@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ConfigService } from '../../../src/services/config/config-service';
 import { PassThrough } from 'stream';
 import * as fs from 'fs';
+import { EncryptionKeyRequiredError } from '@/lib/logging/errors';
 
 // -- MOCKS --
 
@@ -42,6 +43,8 @@ vi.mock('@/lib/crypto/stream', () => ({
 // 4. Mock Encryption Service
 vi.mock('@/services/backup/encryption-service', () => ({
     getProfileMasterKey: vi.fn().mockResolvedValue(Buffer.from('mock-key')),
+    // The vault walk belongs to the real resolver, which runs unmocked here.
+    getEncryptionProfiles: vi.fn().mockResolvedValue([]),
 }));
 
 // 5. Mock Prisma
@@ -186,8 +189,8 @@ describe('ConfigService Parsing (Offline Restore)', () => {
         expect(createDecryptionStream).not.toHaveBeenCalled();
     });
 
-    it('should throw when the encryption profile key cannot be resolved (line 80)', async () => {
-        // Arrange: encrypted file whose profile lookup throws
+    it('should ask for a key when the encryption profile cannot be resolved (line 80)', async () => {
+        // Arrange: encrypted file whose profile lookup throws, with an empty vault behind it
         const { getProfileMasterKey } = await import('@/services/backup/encryption-service');
         (getProfileMasterKey as any).mockRejectedValue(new Error('Profile not found in DB'));
 
@@ -195,10 +198,13 @@ describe('ConfigService Parsing (Offline Restore)', () => {
             encryption: { enabled: true, profileId: 'missing-profile', iv: 'aabbccdd', authTag: 'eeff0011' },
         }));
 
-        // Act & Assert
-        await expect(service.parseBackupFile('backup.enc', 'backup.enc.meta.json'))
-            .rejects
-            .toThrow('ENCRYPTION_KEY_REQUIRED:missing-profile');
+        // Act & Assert: the caller turns this into a prompt for a key, so it must carry the
+        // profile that was looked for rather than being a generic failure.
+        const error = await service.parseBackupFile('backup.enc', 'backup.enc.meta.json')
+            .catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(EncryptionKeyRequiredError);
+        expect((error as EncryptionKeyRequiredError).profileId).toBe('missing-profile');
     });
 
     it('should wrap pipeline errors in a descriptive message (lines 105-106)', async () => {
@@ -295,116 +301,5 @@ describe('ConfigService Parsing (Offline Restore)', () => {
         const result = await service.parseBackupFile('backup.enc', 'backup.enc.meta.json');
         expect(result).toBeDefined();
         expect(createDecryptionStream).toHaveBeenCalled();
-    });
-});
-
-// ---------------------------------------------------------------------------
-// tryDecryptFile – exported helper (lines 125-157)
-// ---------------------------------------------------------------------------
-import { tryDecryptFile } from '@/services/config/parse';
-
-describe('tryDecryptFile', () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-    });
-
-    it('returns null when meta has no IV or authTag', async () => {
-        const result = await tryDecryptFile('/tmp/file.enc', Buffer.alloc(32), {}, false);
-        expect(result).toBeNull();
-    });
-
-    it('returns null when meta has IV but no authTag', async () => {
-        const result = await tryDecryptFile('/tmp/file.enc', Buffer.alloc(32), { iv: 'aabb' }, false);
-        expect(result).toBeNull();
-    });
-
-    it('returns decrypted JSON content when decryption succeeds', async () => {
-        const jsonContent = JSON.stringify({ metadata: { sourceType: 'SYSTEM', version: '1.0' } });
-        const stream = new PassThrough();
-        stream.write(jsonContent);
-        stream.end();
-        (createReadStream as any).mockReturnValue(stream);
-
-        const result = await tryDecryptFile(
-            '/tmp/file.enc',
-            Buffer.alloc(32),
-            { encryption: { iv: 'aabb', authTag: 'ccdd' } },
-            false,
-        );
-
-        expect(result).toBe(jsonContent.trim());
-    });
-
-    it('uses flat meta format (iv / authTag at root)', async () => {
-        const jsonContent = JSON.stringify({ test: true });
-        const stream = new PassThrough();
-        stream.write(jsonContent);
-        stream.end();
-        (createReadStream as any).mockReturnValue(stream);
-
-        const result = await tryDecryptFile(
-            '/tmp/file.enc',
-            Buffer.alloc(32),
-            { iv: 'aabb', authTag: 'ccdd' },
-            false,
-        );
-
-        expect(result).not.toBeNull();
-    });
-
-    it('attaches gunzip when isCompressed=true', async () => {
-        const jsonContent = JSON.stringify({ test: true });
-        const stream = new PassThrough();
-        stream.write(jsonContent);
-        stream.end();
-        (createReadStream as any).mockReturnValue(stream);
-
-        await tryDecryptFile(
-            '/tmp/file.enc.gz',
-            Buffer.alloc(32),
-            { iv: 'aabb', authTag: 'ccdd' },
-            true,
-        );
-
-        expect(createGunzip).toHaveBeenCalled();
-    });
-
-    it('returns null when content does not look like JSON', async () => {
-        const stream = new PassThrough();
-        stream.write('BINARY_DATA_NOT_JSON');
-        stream.end();
-        (createReadStream as any).mockReturnValue(stream);
-
-        const result = await tryDecryptFile(
-            '/tmp/file.enc',
-            Buffer.alloc(32),
-            { iv: 'aabb', authTag: 'ccdd' },
-            false,
-        );
-
-        expect(result).toBeNull();
-    });
-
-    it('returns null when the decryption stream throws (catches error)', async () => {
-        const { createDecryptionStream } = await import('@/lib/crypto/stream');
-        (createDecryptionStream as any).mockImplementationOnce(() => {
-            const pt = new PassThrough();
-            process.nextTick(() => pt.destroy(new Error('Bad auth tag')));
-            return pt;
-        });
-
-        const stream = new PassThrough();
-        stream.write('data');
-        stream.end();
-        (createReadStream as any).mockReturnValue(stream);
-
-        const result = await tryDecryptFile(
-            '/tmp/file.enc',
-            Buffer.alloc(32),
-            { iv: 'aabb', authTag: 'ccdd' },
-            false,
-        );
-
-        expect(result).toBeNull();
     });
 });

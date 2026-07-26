@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
+import { EncryptionKeyRequiredError } from "@/lib/logging/errors";
 
 vi.mock("@/lib/adapters", () => ({
     registerAdapters: vi.fn(),
@@ -168,5 +169,24 @@ describe("POST /api/storage/[id]/analyze - combined (manifest v2) archives", () 
 
         expect(body.databases).toEqual(["legacy_db"]);
         expect(body.directories).toBeUndefined();
+    });
+
+    it("asks for a key instead of reporting an archive nobody can open as empty", async () => {
+        // The regression: the metadata block's own catch swallowed this, so the route
+        // downloaded the whole archive to fail again on the same key, then answered 200
+        // with no databases and no directories - which the page rendered as a blank form.
+        mockRead.mockResolvedValue(JSON.stringify({
+            archive: { formatVersion: 2, indexFile: ".index", encrypted: true, profileId: "gone", kdfSalt: "00", noncePrefix: "01" },
+            sourceType: "directory-only",
+        }));
+        mockSummarize.mockRejectedValue(new EncryptionKeyRequiredError("no key fits", "gone"));
+
+        const res = await POST(createRequest({ file: "backups/job1/archive.tar" }), createProps());
+        const body = await res.json();
+
+        expect(res.status).toBe(422);
+        expect(body.code).toBe("ENCRYPTION_KEY_REQUIRED");
+        expect(body.profileId).toBe("gone");
+        expect(mockDownload).not.toHaveBeenCalled();
     });
 });

@@ -132,14 +132,20 @@ export function ActionsCell({
                                 <FileLock2 className="mr-2 h-4 w-4" />
                                 <span>Download Encrypted (.enc)</span>
                             </DropdownMenuItem>
-                            <DropdownMenuItem onClick={() => onDownload(file, true)}>
-                                <FileCheck className="mr-2 h-4 w-4" />
-                                <span>Download Decrypted</span>
-                            </DropdownMenuItem>
-                            {onDownloadSnapshot && file.chain && (
+                            {/* A file archive encrypts each entry on its own, so there is no
+                                decrypted form of the archive as a file. Its contents come out
+                                through the snapshot download instead, which unpacks it - and
+                                its chain - into a .tar.gz. */}
+                            {!file.hasFileIndex && (
+                                <DropdownMenuItem onClick={() => onDownload(file, true)}>
+                                    <FileCheck className="mr-2 h-4 w-4" />
+                                    <span>Download Decrypted</span>
+                                </DropdownMenuItem>
+                            )}
+                            {onDownloadSnapshot && (file.hasFileIndex || file.chain) && (
                                 <DropdownMenuItem onClick={() => onDownloadSnapshot(file)}>
                                     <PackageOpen className="mr-2 h-4 w-4" />
-                                    <span>Download Complete Snapshot</span>
+                                    <span>{file.hasFileIndex ? 'Download Decrypted Contents' : 'Download Complete Snapshot'}</span>
                                 </DropdownMenuItem>
                             )}
                             {onGenerateLink && (
@@ -172,10 +178,10 @@ export function ActionsCell({
                                 <Download className="mr-2 h-4 w-4" />
                                 <span>Download</span>
                             </DropdownMenuItem>
-                            {onDownloadSnapshot && file.chain && (
+                            {onDownloadSnapshot && (file.hasFileIndex || file.chain) && (
                                 <DropdownMenuItem onClick={() => onDownloadSnapshot(file)}>
                                     <PackageOpen className="mr-2 h-4 w-4" />
-                                    <span>Download Complete Snapshot</span>
+                                    <span>{file.hasFileIndex && !file.chain ? 'Download Contents' : 'Download Complete Snapshot'}</span>
                                 </DropdownMenuItem>
                             )}
                             {onGenerateLink && (

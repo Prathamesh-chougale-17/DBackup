@@ -9,6 +9,7 @@ import prisma from "@/lib/prisma";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
 import { archiveIndexService } from "@/services/backup/archive-index-service";
+import { keyRequiredResponse } from "@/lib/server/key-required-response";
 import { logger } from "@/lib/logging/logger";
 import { wrapError, getErrorMessage } from "@/lib/logging/errors";
 
@@ -87,6 +88,9 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
 
         return NextResponse.json({ success: true, data: { sources: [], entries } });
     } catch (e: unknown) {
+        const keyRequired = keyRequiredResponse(e);
+        if (keyRequired) return keyRequired;
+
         log.error("Failed to browse archive", { configId: id }, wrapError(e));
         return NextResponse.json({ success: false, error: getErrorMessage(e) }, { status: 500 });
     }

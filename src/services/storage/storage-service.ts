@@ -4,15 +4,15 @@ import { StorageAdapter, FileInfo, BackupMetadata } from "@/lib/core/interfaces"
 import { resolveAdapterConfig } from "@/lib/adapters/config-resolver";
 import { pipeline } from "stream/promises";
 import { createReadStream, createWriteStream, promises as fs } from "fs";
-import { getProfileMasterKey } from "@/services/backup/encryption-service";
 import { resolveDecryptionKey } from "@/services/restore/smart-recovery";
 import { createDecryptionStream } from "@/lib/crypto/stream";
+import { CompressionType } from "@/lib/crypto/compression";
 import { getTempDir } from "@/lib/temp-dir";
 import path from "path";
 import AdmZip from "adm-zip";
 import { registerAdapters } from "@/lib/adapters";
 import { logger } from "@/lib/logging/logger";
-import { wrapError } from "@/lib/logging/errors";
+import { EncryptionKeyRequiredError, ValidationError, getErrorMessage, wrapError } from "@/lib/logging/errors";
 import { isBackupFile, sidecarPathsFor, METADATA_SIDECAR_SUFFIX } from "@/lib/core/backup-files";
 
 const log = logger.child({ service: "StorageService" });
@@ -624,6 +624,37 @@ export class StorageService {
     }
 
     /**
+     * Reads a backup's `.meta.json`, preferring the adapter's `read()` over a download.
+     *
+     * @returns The parsed sidecar, or null when there is none or it is unreadable - a
+     * backup predating sidecars is still downloadable, so this is never fatal.
+     */
+    private async readBackupMetaSidecar(
+        adapter: StorageAdapter,
+        config: unknown,
+        remotePath: string
+    ): Promise<BackupMetadata | null> {
+        const metaRemotePath = remotePath + METADATA_SIDECAR_SUFFIX;
+
+        if (adapter.read) {
+            try {
+                const content = await adapter.read(config, metaRemotePath);
+                if (content) return JSON.parse(content) as BackupMetadata;
+            } catch { /* fall through to the download below */ }
+        }
+
+        const tempMetaPath = path.join(getTempDir(), "dlmeta_" + Date.now() + ".json");
+        try {
+            if (!(await adapter.download(config, metaRemotePath, tempMetaPath).catch(() => false))) return null;
+            return JSON.parse(await fs.readFile(tempMetaPath, 'utf-8')) as BackupMetadata;
+        } catch {
+            return null;
+        } finally {
+            await fs.unlink(tempMetaPath).catch(() => { });
+        }
+    }
+
+    /**
      * Downloads a file from storage to a local path.
      */
     async downloadFile(adapterConfigId: string, remotePath: string, localDestination: string, decrypt: boolean = false, options?: { profileIdOverride?: string; rawKeyHex?: string }): Promise<{ success: boolean; isZip?: boolean }> {
@@ -652,31 +683,26 @@ export class StorageService {
        }
 
        if (decrypt) {
+            // Metadata before bytes: it is what says whether this file has a decrypted form
+            // at all, and finding out afterwards would mean having moved a gigabyte for
+            // nothing.
+            const meta = await this.readBackupMetaSidecar(adapter, config, remotePath);
+
+            // A seekable (v2) archive encrypts each entry on its own, so there is no single
+            // stream to run through a decipher and no decrypted form of the archive itself.
+            // This used to fall through every branch below and return the untouched archive,
+            // which presented an encrypted download as a successful decrypted one.
+            if (meta?.archive?.formatVersion === 2) {
+                throw new ValidationError(
+                    "This backup is a file archive - its entries are encrypted individually, so the archive itself has no decrypted form. Use 'Download Complete Snapshot' to get its contents as a .tar.gz.",
+                    { field: "decrypt" }
+                );
+            }
+
             const success = await adapter.download(config, remotePath, localDestination);
             if (!success) return { success: false };
 
-            const metaRemotePath = remotePath + ".meta.json";
-            const tempMetaPath = path.join(getTempDir(), "dlmeta_" + Date.now() + ".json");
-
             try {
-                let meta: any = null;
-
-                if (adapter.read) {
-                    try {
-                        const content = await adapter.read(config, metaRemotePath);
-                        if (content) meta = JSON.parse(content);
-                    } catch {}
-                }
-
-                if (!meta) {
-                     const metaSuccess = await adapter.download(config, metaRemotePath, tempMetaPath).catch(() => false);
-                     if (metaSuccess) {
-                         const content = await fs.readFile(tempMetaPath, 'utf-8');
-                         meta = JSON.parse(content);
-                         await fs.unlink(tempMetaPath).catch(() => {});
-                     }
-                }
-
                 let encryptionParams: { profileId: string, iv: string, authTag: string } | null = null;
 
                 if (meta && meta.encryption && typeof meta.encryption === 'object' && meta.encryption.enabled) {
@@ -686,44 +712,39 @@ export class StorageService {
                         authTag: meta.encryption.authTag
                     };
                 } else if (meta && meta.encryptionProfileId && meta.iv && meta.authTag) {
-                     encryptionParams = {
-                        profileId: meta.encryptionProfileId,
-                        iv: meta.iv,
-                        authTag: meta.authTag
+                    // Flat metadata, written before the nested `encryption` object existed.
+                    // These keys reach BackupMetadata only through its index signature, so
+                    // their shape has to be asserted here.
+                    const flat = meta as unknown as { encryptionProfileId: string; iv: string; authTag: string };
+                    encryptionParams = {
+                        profileId: flat.encryptionProfileId,
+                        iv: flat.iv,
+                        authTag: flat.authTag
                     };
                 }
 
                 if (encryptionParams) {
-                    let masterKey: Buffer;
-
-                    if (options?.rawKeyHex) {
-                        masterKey = Buffer.from(options.rawKeyHex, 'hex');
-                    } else if (options?.profileIdOverride) {
-                        masterKey = await getProfileMasterKey(options.profileIdOverride);
-                    } else {
-                        const encryptionMeta = {
+                    // One resolution path for all three cases - a key the user typed, a
+                    // profile they picked, or whatever the vault can offer. A supplied key
+                    // is tested here too, so a wrong one is reported as such rather than
+                    // producing a file that looks corrupt.
+                    const masterKey = await resolveDecryptionKey(
+                        {
                             enabled: true as const,
                             profileId: encryptionParams.profileId,
                             algorithm: 'aes-256-gcm' as const,
                             iv: encryptionParams.iv,
                             authTag: encryptionParams.authTag,
-                        };
-                        const compression = meta?.compression as 'GZIP' | 'BROTLI' | 'NONE' | undefined;
-                        try {
-                            masterKey = await resolveDecryptionKey(
-                                encryptionMeta,
-                                localDestination,
-                                compression,
-                                (msg, level) => {
-                                    if (level === 'error') log.error(msg, {});
-                                    else if (level === 'warning') log.warn(msg, {});
-                                    else log.info(msg, {});
-                                },
-                            );
-                        } catch {
-                            throw new Error(`ENCRYPTION_KEY_REQUIRED:${encryptionParams.profileId}`);
-                        }
-                    }
+                        },
+                        localDestination,
+                        meta?.compression as CompressionType | undefined,
+                        (msg, level) => {
+                            if (level === 'error') log.error(msg, {});
+                            else if (level === 'warning') log.warn(msg, {});
+                            else log.info(msg, {});
+                        },
+                        { rawKeyHex: options?.rawKeyHex, profileId: options?.profileIdOverride },
+                    );
 
                     const iv = Buffer.from(encryptionParams.iv, 'hex');
                     const authTag = Buffer.from(encryptionParams.authTag, 'hex');
@@ -743,11 +764,10 @@ export class StorageService {
 
                 return { success: true, isZip: false };
             } catch (e: unknown) {
-                if (e instanceof Error && e.message.startsWith("ENCRYPTION_KEY_REQUIRED:")) {
-                    throw e;
-                }
-                const message = e instanceof Error ? e.message : String(e);
-                throw new Error("Decryption failed: " + message);
+                // A missing key is a question for the user, not a decryption failure -
+                // relabelling it would hide the one error the UI knows how to answer.
+                if (e instanceof EncryptionKeyRequiredError) throw e;
+                throw new Error("Decryption failed: " + getErrorMessage(e));
             }
        }
 

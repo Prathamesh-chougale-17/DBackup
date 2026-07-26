@@ -11,6 +11,7 @@ import { PERMISSIONS } from "@/lib/auth/permissions";
 import { logger } from "@/lib/logging/logger";
 import { wrapError, getErrorMessage } from "@/lib/logging/errors";
 import { generateFileDownloadToken, consumeFileDownloadToken, markTokenUsed } from "@/lib/auth/download-tokens";
+import { keyRequiredResponse } from "@/lib/server/key-required-response";
 import { z } from "zod";
 
 const log = logger.child({ route: "storage/download" });
@@ -146,17 +147,11 @@ export async function GET(req: NextRequest, props: { params: Promise<{ id: strin
              await fsPromises.unlink(tempFile).catch(() => {});
         }
 
+        const keyRequired = keyRequiredResponse(error);
+        if (keyRequired) return keyRequired;
+
         log.error("Download error", { storageId: params.id }, wrapError(error));
         const errorMessage = getErrorMessage(error) || "An unknown error occurred";
-
-        if (errorMessage.startsWith("ENCRYPTION_KEY_REQUIRED:")) {
-            const profileId = errorMessage.split(":").slice(1).join(":") || "unknown";
-            return NextResponse.json({
-                error: "Encryption key not found. Smart Recovery could not find a matching key. Please provide a decryption key.",
-                code: "ENCRYPTION_KEY_REQUIRED",
-                profileId,
-            }, { status: 422 });
-        }
 
         if (errorMessage.includes("not found")) {
             return NextResponse.json({ error: errorMessage }, { status: 404 });
@@ -240,19 +235,11 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
             await fsPromises.unlink(tempFile).catch(() => {});
         }
 
-        log.error("Decrypt-download (POST) error", { storageId: params.id }, wrapError(error));
-        const errorMessage = getErrorMessage(error) || "An unknown error occurred";
-
         // Same contract as the GET path, so the key dialog opens for a prepare too.
-        if (errorMessage.startsWith("ENCRYPTION_KEY_REQUIRED:")) {
-            const profileId = errorMessage.split(":").slice(1).join(":") || "unknown";
-            return NextResponse.json({
-                error: "Encryption key not found. Smart Recovery could not find a matching key. Please provide a decryption key.",
-                code: "ENCRYPTION_KEY_REQUIRED",
-                profileId,
-            }, { status: 422 });
-        }
+        const keyRequired = keyRequiredResponse(error);
+        if (keyRequired) return keyRequired;
 
-        return NextResponse.json({ error: errorMessage }, { status: 500 });
+        log.error("Decrypt-download (POST) error", { storageId: params.id }, wrapError(error));
+        return NextResponse.json({ error: getErrorMessage(error) || "An unknown error occurred" }, { status: 500 });
     }
 }

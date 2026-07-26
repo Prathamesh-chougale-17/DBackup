@@ -33,6 +33,8 @@ import type { ExcludePatternPreset } from "@prisma/client";
 import { resolveExcludePatterns, parseJsonStringArray } from "@/lib/exclude-groups";
 import { computeRestoreValidity } from "./restore-validation";
 import { parseRestoreScope, normalizeRestoreScope } from "@/components/dashboard/storage/restore-scope";
+import { EncryptionKeyResolutionDialog } from "@/components/common/encryption-key-resolution-dialog";
+import { useEncryptionKeyRecovery } from "@/hooks/use-encryption-key-recovery";
 
 interface DatabaseInfo {
     name: string;
@@ -93,7 +95,12 @@ interface RestorePlan {
     fullDownload: boolean;
 }
 
-export function RestoreClient() {
+interface RestoreClientProps {
+    /** Whether this user may create vault profiles, which key recovery does. */
+    canManageVault?: boolean;
+}
+
+export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
     const router = useRouter();
     const searchParams = useSearchParams();
     const { autoRedirectOnJobStart } = useUserPreferences();
@@ -129,6 +136,15 @@ export function RestoreClient() {
     const [analyzedDbs, setAnalyzedDbs] = useState<string[]>([]);
     const [dbConfig, setDbConfig] = useState<DbConfig[]>([]);
     const [backupSourceType, setBackupSourceType] = useState<string>("");
+    /** Why the backup could not be read, so the page explains itself instead of staying blank. */
+    const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+
+    // Opens the key dialog whenever a request reports that no available key fits this backup.
+    const keyRecovery = useEncryptionKeyRecovery();
+    // Pulled out because the hook's return value is a fresh object each render, and
+    // analyzeBackup - which the mount effect depends on - must stay stable. `intercept`
+    // itself does not change.
+    const { intercept: interceptKeyRequest } = keyRecovery;
 
     // Directory Restore State (combined manifest v2 archives)
     const [directories, setDirectories] = useState<DirectoryAnalysis[]>([]);
@@ -354,7 +370,18 @@ export function RestoreClient() {
                 body: JSON.stringify({ file: file.path, type: file.sourceType })
             });
 
-            if (res.ok) {
+            // No key for this backup means no file index, and no file index means an empty
+            // page. Asking for one here is what turns that into something answerable.
+            if (await interceptKeyRequest(res, () => analyzeBackup(file))) return;
+
+            if (!res.ok) {
+                const data: { error?: string } = await res.json().catch(() => ({}));
+                setAnalyzeError(data.error ?? 'This backup could not be read.');
+                return;
+            }
+
+            setAnalyzeError(null);
+            {
                 const data = await res.json();
                 if (data.sourceType) {
                     setBackupSourceType(data.sourceType);
@@ -385,12 +412,12 @@ export function RestoreClient() {
                 }
                 setChainInfo(data.chain ?? null);
             }
-        } catch {
-            // Analysis failed silently
+        } catch (e: unknown) {
+            setAnalyzeError(e instanceof Error ? e.message : 'This backup could not be read.');
         } finally {
             setIsAnalyzing(false);
         }
-    }, [destinationId, wantsDatabases, wantsFiles]);
+    }, [destinationId, wantsDatabases, wantsFiles, interceptKeyRequest]);
 
     // Analyze backup on mount
     useEffect(() => {
@@ -747,6 +774,21 @@ export function RestoreClient() {
                     </div>
                 </div>
             </div>
+
+            {/* Why the page below is empty. Without this, a backup that cannot be opened
+                simply renders as one containing nothing. */}
+            {analyzeError && (
+                <Alert variant="destructive">
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertTitle>This backup could not be read</AlertTitle>
+                    <AlertDescription className="space-y-2">
+                        <p>{analyzeError}</p>
+                        <Button variant="outline" size="sm" onClick={() => analyzeBackup(file)}>
+                            Try again
+                        </Button>
+                    </AlertDescription>
+                </Alert>
+            )}
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* Left Column: Main Restore Config */}
@@ -1546,6 +1588,17 @@ export function RestoreClient() {
                     )}
                 </div>
             </div>
+
+            {/* Opens whenever a request reports that no available key opens this backup. */}
+            <EncryptionKeyResolutionDialog
+                open={keyRecovery.open}
+                onOpenChange={keyRecovery.onOpenChange}
+                profileIdHint={keyRecovery.profileIdHint}
+                backup={{ storageConfigId: destinationId, file: file.path }}
+                canManageVault={canManageVault}
+                onConfirm={keyRecovery.onConfirm}
+                loading={keyRecovery.loading}
+            />
         </div>
     );
 }

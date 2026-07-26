@@ -42,6 +42,7 @@ import { StorageHistoryTab } from "@/components/dashboard/storage/storage-histor
 import { StorageSettingsTab } from "@/components/dashboard/storage/storage-settings-tab";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EncryptionKeyResolutionDialog, type KeyResolutionResult } from "@/components/common/encryption-key-resolution-dialog";
+import { useEncryptionKeyRecovery } from "@/hooks/use-encryption-key-recovery";
 import type { StorageHistoryTabRef } from "@/components/dashboard/storage/storage-history-tab";
 import type { StorageSettingsTabRef } from "@/components/dashboard/storage/storage-settings-tab";
 import { logger } from "@/lib/logging/logger";
@@ -61,9 +62,11 @@ interface StorageClientProps {
     canDownload: boolean;
     canRestore: boolean;
     canDelete: boolean;
+    /** Whether this user may create vault profiles, which key recovery does. */
+    canManageVault?: boolean;
 }
 
-export function StorageClient({ canDownload, canRestore, canDelete }: StorageClientProps) {
+export function StorageClient({ canDownload, canRestore, canDelete, canManageVault = false }: StorageClientProps) {
     const [destinations, setDestinations] = useState<AdapterConfig[]>([]);
     const [selectedDestination, setSelectedDestination] = useState<string>("");
     const [open, setOpen] = useState(false);
@@ -91,11 +94,10 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
     const [verifyModalFile, setVerifyModalFile] = useState<FileInfo | null>(null);
 
 
-    // Encryption Key Resolution Dialog State (decrypted download fallback)
-    const [decryptKeyDialogOpen, setDecryptKeyDialogOpen] = useState(false);
-    const [pendingDecryptFile, setPendingDecryptFile] = useState<FileInfo | null>(null);
-    const [pendingDecryptProfileId, setPendingDecryptProfileId] = useState<string>("");
-    const [decryptDialogLoading, setDecryptDialogLoading] = useState(false);
+    // Opens whenever a download reports that no available key opens the backup.
+    const keyRecovery = useEncryptionKeyRecovery();
+    /** Which backup the open dialog is about, so a typed key can be checked against it. */
+    const [pendingKeyFile, setPendingKeyFile] = useState<FileInfo | null>(null);
 
     const fetchAdapters = useCallback(async () => {
         try {
@@ -191,6 +193,11 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
                 }),
             });
 
+            if (await keyRecovery.intercept(response, (result) => performDecryptedDownload(file, result))) {
+                setPendingKeyFile(file);
+                return;
+            }
+
             if (response.ok) {
                 const payload = await response.json().catch(() => ({}));
                 if (!payload?.data?.token) throw new Error(payload.error ?? "Download failed");
@@ -198,32 +205,14 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
                 const anchor = document.createElement("a");
                 anchor.href = `${baseUrl}?token=${encodeURIComponent(payload.data.token)}`;
                 anchor.click();
-                setDecryptKeyDialogOpen(false);
-            } else if (response.status === 422) {
-                const data: { code?: string; profileId?: string; error?: string } = await response.json().catch(() => ({}));
-                if (data.code === "ENCRYPTION_KEY_REQUIRED") {
-                    setPendingDecryptFile(file);
-                    setPendingDecryptProfileId(data.profileId ?? "");
-                    setDecryptKeyDialogOpen(true);
-                } else {
-                    toast.error(data.error ?? "Download failed");
-                }
             } else {
                 const data: { error?: string } = await response.json().catch(() => ({}));
                 toast.error(data.error ?? "Download failed");
             }
         } catch {
             toast.error("Download failed");
-        } finally {
-            setDecryptDialogLoading(false);
         }
-    }, [canDownload, selectedDestination]);
-
-    const handleKeyResolutionConfirm = useCallback(async (result: KeyResolutionResult) => {
-        if (!pendingDecryptFile) return;
-        setDecryptDialogLoading(true);
-        await performDecryptedDownload(pendingDecryptFile, result);
-    }, [pendingDecryptFile, performDecryptedDownload]);
+    }, [canDownload, selectedDestination]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleRestoreClick = useCallback((file: FileInfo, mode?: RestoreMode) => {
         if (!canRestore) {
@@ -321,6 +310,15 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ file: file.path, target: { kind: "download" }, prepare: true }),
             });
+
+            // Unpacking the archive needs its key, so this can ask for one just like a
+            // decrypted download can.
+            if (await keyRecovery.intercept(res, () => handleDownloadSnapshot(file))) {
+                setPendingKeyFile(file);
+                toast.dismiss(toastId);
+                return;
+            }
+
             const payload = await res.json().catch(() => ({ error: "Download failed" }));
             if (!res.ok || !payload?.data?.token) {
                 throw new Error(payload.error || "Download failed");
@@ -335,7 +333,7 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
         } catch (e: unknown) {
             toast.error(e instanceof Error ? e.message : String(e), { id: toastId });
         }
-    }, [canDownload, selectedDestination]);
+    }, [canDownload, selectedDestination]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const columns = useMemo(() => getColumns({
         onRestore: handleRestoreClick,
@@ -609,14 +607,16 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
 
             {/* Encryption Key Resolution Dialog (decrypted download fallback) */}
             <EncryptionKeyResolutionDialog
-                open={decryptKeyDialogOpen}
+                open={keyRecovery.open}
                 onOpenChange={(o) => {
-                    setDecryptKeyDialogOpen(o);
-                    if (!o) { setPendingDecryptFile(null); setPendingDecryptProfileId(""); }
+                    keyRecovery.onOpenChange(o);
+                    if (!o) setPendingKeyFile(null);
                 }}
-                profileIdHint={pendingDecryptProfileId}
-                onConfirm={handleKeyResolutionConfirm}
-                loading={decryptDialogLoading}
+                profileIdHint={keyRecovery.profileIdHint}
+                backup={pendingKeyFile ? { storageConfigId: selectedDestination, file: pendingKeyFile.path } : undefined}
+                canManageVault={canManageVault}
+                onConfirm={keyRecovery.onConfirm}
+                loading={keyRecovery.loading}
             />
         </div>
     );

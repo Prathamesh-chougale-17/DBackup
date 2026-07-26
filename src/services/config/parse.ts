@@ -69,33 +69,22 @@ export async function parseBackupFile(
       throw new Error("Encrypted backup detected but metadata (IV/AuthTag/Profile) is missing. Please upload the .meta.json file as well.");
     }
 
-    let key: Buffer;
-    if (rawKeyHex) {
-      // Caller-supplied raw key override (e.g. from manual key resolution UI)
-      if (!/^[0-9a-fA-F]{64}$/.test(rawKeyHex)) {
-        throw new Error("Invalid encryption key format. Must be a 64-character hex string.");
-      }
-      key = Buffer.from(rawKeyHex, 'hex');
-    } else {
-      // Auto-resolve: try vault profile first, then Smart Recovery (try all profiles)
-      const encryptionMeta = {
+    // A key the user typed takes precedence, then the profile the sidecar names, then every
+    // profile in the vault. Raising EncryptionKeyRequiredError is what makes the caller ask
+    // for one, so it is deliberately not caught here.
+    const key = await resolveDecryptionKey(
+      {
         enabled: true as const,
         profileId,
         algorithm: 'aes-256-gcm' as const,
         iv: iv.toString('hex'),
         authTag: authTag.toString('hex'),
-      };
-      try {
-        key = await resolveDecryptionKey(
-          encryptionMeta,
-          filePath,
-          isCompressed ? 'GZIP' : undefined,
-          (msg) => svcLog.info(msg, {}),
-        );
-      } catch {
-        throw new Error(`ENCRYPTION_KEY_REQUIRED:${profileId}`);
-      }
-    }
+      },
+      filePath,
+      isCompressed ? 'GZIP' : undefined,
+      (msg) => svcLog.info(msg, {}),
+      { rawKeyHex },
+    );
 
     streams.push(createDecryptionStream(key, iv, authTag));
   }
@@ -127,50 +116,4 @@ export async function parseBackupFile(
 // Helper (Placeholder for real detection if needed, mostly extension is enough)
 async function detectCompression(file: string): Promise<boolean> {
   return file.endsWith('.gz');
-}
-
-/**
- * Attempts to decrypt (and decompress) a downloaded config backup file with a candidate key.
- * Returns the decrypted JSON string on success, or null on failure.
- */
-export async function tryDecryptFile(
-  downloadPath: string,
-  candidateKey: Buffer,
-  meta: any,
-  isCompressed: boolean
-): Promise<string | null> {
-  const ivHex = meta?.encryption?.iv || meta?.iv;
-  const authTagHex = meta?.encryption?.authTag || meta?.authTag;
-
-  if (!ivHex || !authTagHex) return null;
-
-  try {
-    const iv = Buffer.from(ivHex, 'hex');
-    const authTag = Buffer.from(authTagHex, 'hex');
-
-    const streams: (Readable | Transform)[] = [createReadStream(downloadPath)];
-    streams.push(createDecryptionStream(candidateKey, iv, authTag));
-    if (isCompressed) streams.push(createGunzip());
-
-    const chunks: Buffer[] = [];
-    const collector = new Transform({
-      transform(chunk, _encoding, callback) {
-        chunks.push(chunk);
-        callback();
-      }
-    });
-    streams.push(collector);
-
-    // @ts-expect-error Pipeline argument spread issues
-    await pipeline(...streams);
-    const content = Buffer.concat(chunks).toString('utf8').trim();
-
-    // Validate: must be valid JSON
-    if (content.startsWith('{') || content.startsWith('[')) {
-      return content;
-    }
-    return null;
-  } catch {
-    return null;
-  }
 }

@@ -1,47 +1,65 @@
 import { createReadStream } from "fs";
 import crypto from "crypto";
 import { CompressionType } from "@/lib/crypto/compression";
-import { getProfileMasterKey, getEncryptionProfiles } from "@/services/backup/encryption-service";
+import {
+    KeyOverride,
+    KeyResolutionLog,
+    KeyVerifier,
+    resolveBackupKey,
+} from "@/services/backup/key-resolution";
 import { BackupMetadata } from "@/lib/core/interfaces";
 
-type LogFn = (msg: string, level?: 'info' | 'warning' | 'error' | 'success' | 'debug') => void;
+type LogFn = KeyResolutionLog;
+
+/** The two values needed to attempt a decryption. A backup's profile id is not one of them. */
+type StreamCipherParams = Pick<NonNullable<BackupMetadata['encryption']>, 'iv' | 'authTag'>;
 
 /**
- * Resolves the master key for a given encrypted backup, attempting Smart Recovery
- * (trying every available profile) when the originally-referenced profile is missing.
+ * Verifier for a backup encrypted as one stream - every database dump, and the config
+ * backup. See `checkKeyCandidate` for why this is a heuristic rather than a proof.
+ */
+export function legacyStreamVerifier(
+    encryptionMeta: StreamCipherParams,
+    tempFile: string,
+    compressionMeta: CompressionType | undefined,
+): KeyVerifier {
+    return (candidate: Buffer) => checkKeyCandidate(candidate, encryptionMeta, tempFile, compressionMeta);
+}
+
+/**
+ * Resolves the master key for a whole-file encrypted backup.
  *
- * Returns the matching key. Throws if no profile can decrypt the file.
+ * A thin binding of the shared resolver to this format's verifier - the ordering, the
+ * Smart Recovery walk and the error it raises all live in `resolveBackupKey`.
  */
 export async function resolveDecryptionKey(
     encryptionMeta: NonNullable<BackupMetadata['encryption']>,
     tempFile: string,
     compressionMeta: CompressionType | undefined,
     log: LogFn,
+    override?: KeyOverride,
 ): Promise<Buffer> {
-    try {
-        return await getProfileMasterKey(encryptionMeta.profileId);
-    } catch (_keyError) {
-        log(`Profile ${encryptionMeta.profileId} not found. Attempting Smart Recovery...`, 'warning');
+    return resolveBackupKey({
+        profileId: encryptionMeta.profileId,
+        override,
+        verify: legacyStreamVerifier(encryptionMeta, tempFile, compressionMeta),
+        log,
+    });
+}
 
-        const allProfiles = await getEncryptionProfiles();
-        log(`Smart Recovery: Found ${allProfiles.length} candidate profile(s).`, 'info');
+/** How many leading bytes of a backup are enough to judge a candidate key. */
+export const HEAD_PROBE_SIZE = 1024;
 
-        for (const profile of allProfiles) {
-            log(`Smart Recovery: Testing profile '${profile.name}' (${profile.id})...`, 'info');
-            try {
-                const candidateKey = await getProfileMasterKey(profile.id);
-                const isMatch = await checkKeyCandidate(candidateKey, encryptionMeta, tempFile, compressionMeta);
-                if (isMatch) {
-                    log(`Smart Recovery Successful: Matched key from profile '${profile.name}'.`, 'success');
-                    return candidateKey;
-                }
-            } catch (e) {
-                log(`Smart Recovery: Profile '${profile.name}' threw error: ${e instanceof Error ? e.message : String(e)}`, 'warning');
-            }
-        }
-
-        throw new Error(`Profile ${encryptionMeta.profileId} missing, and no other profile could decrypt this file.`);
-    }
+/**
+ * Same check against bytes already in hand, for callers that fetched the head themselves
+ * rather than having the whole backup on disk - a ranged read from a storage adapter, say.
+ */
+export function legacyHeadVerifier(
+    encryptionMeta: StreamCipherParams,
+    head: Buffer,
+    compressionMeta: CompressionType | undefined,
+): KeyVerifier {
+    return async (candidate: Buffer) => checkDecryptedHead(candidate, encryptionMeta, head, compressionMeta);
 }
 
 /**
@@ -57,40 +75,50 @@ export async function resolveDecryptionKey(
  */
 function checkKeyCandidate(
     candidateKey: Buffer,
-    encryptionMeta: NonNullable<BackupMetadata['encryption']>,
+    encryptionMeta: StreamCipherParams,
     tempFile: string,
     compressionMeta: CompressionType | undefined,
 ): Promise<boolean> {
     return new Promise((resolve) => {
         try {
-            const iv = Buffer.from(encryptionMeta.iv, 'hex');
-            const authTag = Buffer.from(encryptionMeta.authTag, 'hex');
             const chunks: Buffer[] = [];
-            const input = createReadStream(tempFile, { start: 0, end: 1023 });
+            const input = createReadStream(tempFile, { start: 0, end: HEAD_PROBE_SIZE - 1 });
 
             input.on('error', () => resolve(false));
             input.on('data', (chunk: Buffer | string) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
             input.on('end', () => {
-                try {
-                    const encrypted = Buffer.concat(chunks);
-                    if (encrypted.length === 0) { resolve(false); return; }
-
-                    // Use crypto.Decipher.update() directly.
-                    // We intentionally skip final() so that auth-tag verification is never
-                    // triggered on this partial 1 KB slice (the tag covers the full file).
-                    const decipher = crypto.createDecipheriv('aes-256-gcm', candidateKey, iv);
-                    decipher.setAuthTag(authTag);
-                    const decrypted = decipher.update(encrypted);
-
-                    resolve(isValidDecryptedContent(decrypted, compressionMeta));
-                } catch (_e) {
-                    resolve(false);
-                }
+                resolve(checkDecryptedHead(candidateKey, encryptionMeta, Buffer.concat(chunks), compressionMeta));
             });
         } catch (_e) {
             resolve(false);
         }
     });
+}
+
+/** The judgement itself, once the leading bytes are available. */
+function checkDecryptedHead(
+    candidateKey: Buffer,
+    encryptionMeta: StreamCipherParams,
+    head: Buffer,
+    compressionMeta: CompressionType | undefined,
+): boolean {
+    if (head.length === 0) return false;
+
+    try {
+        // Use crypto.Decipher.update() directly.
+        // We intentionally skip final() so that auth-tag verification is never
+        // triggered on this partial 1 KB slice (the tag covers the full file).
+        const decipher = crypto.createDecipheriv(
+            'aes-256-gcm',
+            candidateKey,
+            Buffer.from(encryptionMeta.iv, 'hex')
+        );
+        decipher.setAuthTag(Buffer.from(encryptionMeta.authTag, 'hex'));
+
+        return isValidDecryptedContent(decipher.update(head), compressionMeta);
+    } catch (_e) {
+        return false;
+    }
 }
 
 /**

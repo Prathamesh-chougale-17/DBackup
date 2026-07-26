@@ -21,13 +21,13 @@ import { pack } from "tar-stream";
 import crypto from "crypto";
 import { BackupMetadata, StorageAdapter, AdapterConfig } from "@/lib/core/interfaces";
 import { openStorageArchiveSource, resolveStorageAdapter, ManagedArchiveSource } from "@/lib/archive/storage-source";
-import { readArchiveManifest, readArchiveIndex } from "@/lib/archive/reader";
+import { parseArchiveIndex, readArchiveManifest, readEmbeddedIndexBytes } from "@/lib/archive/reader";
 import { createDestinationSessions } from "./destination-sessions";
 import { forEachSnapshotFile, hashingStream, ChainReaderOptions } from "@/lib/archive/chain-source";
 import { checkChainCompleteness } from "@/lib/archive/chain";
 import { resolveSelection, totalSize } from "@/lib/archive/browse";
 import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
-import { getProfileMasterKey } from "@/services/backup/encryption-service";
+import { archiveIndexVerifier, KeyOverride, resolveBackupKey } from "@/services/backup/key-resolution";
 import { resolveTransferConcurrency } from "@/lib/adapters/transfer-concurrency";
 import { archiveIndexService } from "@/services/backup/archive-index-service";
 import { getTempDir } from "@/lib/temp-dir";
@@ -137,7 +137,11 @@ async function assertChainComplete(
 }
 
 /** Opens a snapshot for reading: byte source, manifest, index, master key and chain access. */
-export async function openArchiveForRestore(storageConfigId: string, file: string): Promise<OpenedArchive> {
+export async function openArchiveForRestore(
+    storageConfigId: string,
+    file: string,
+    override?: KeyOverride
+): Promise<OpenedArchive> {
     const { adapter, config } = await resolveStorageAdapter(storageConfigId);
     const meta = await readBackupMetadata(adapter, config, file);
 
@@ -148,13 +152,6 @@ export async function openArchiveForRestore(storageConfigId: string, file: strin
         );
     }
 
-    const chain: ChainReaderOptions = {
-        adapter,
-        config,
-        snapshotPath: file,
-        resolveMasterKey: getProfileMasterKey,
-    };
-
     // The index sidecar is the primary path: it is small, and reading it means the archive
     // itself is only ever touched for the entries actually being restored.
     const sidecarBytes = await archiveIndexService.fetchSidecar(storageConfigId, file, meta.archive.indexFile);
@@ -162,9 +159,6 @@ export async function openArchiveForRestore(storageConfigId: string, file: strin
     let managed = await openStorageArchiveSource(adapter, config, file, undefined);
     try {
         const manifest = await readArchiveManifest(managed.source);
-        const masterKey = manifest.encryption
-            ? await getProfileMasterKey(manifest.encryption.profileId)
-            : undefined;
 
         if (!sidecarBytes) {
             // No sidecar. Every archive carries a copy of its index as its last member, but
@@ -177,11 +171,36 @@ export async function openArchiveForRestore(storageConfigId: string, file: strin
             );
         }
 
-        const index = await readArchiveIndex(managed.source, manifest, {
-            ...(sidecarBytes ? { sidecarBytes } : {}),
-            masterKey,
-        });
+        // Index bytes before key: the sealed index is what proves a candidate key fits, so
+        // Smart Recovery has nothing to test until they are read.
+        const indexBytes = sidecarBytes ?? await readEmbeddedIndexBytes(managed.source);
+
+        const masterKey = manifest.encryption
+            ? await resolveBackupKey({
+                profileId: manifest.encryption.profileId,
+                override,
+                verify: archiveIndexVerifier(indexBytes, manifest.encryption),
+                log: (msg, level) => level === "warning" ? log.warn(msg, { file }) : log.info(msg, { file }),
+            })
+            : undefined;
+
+        const index = await parseArchiveIndex(indexBytes, manifest, masterKey);
         await assertChainComplete(adapter, config, file, index);
+
+        const chain: ChainReaderOptions = {
+            adapter,
+            config,
+            snapshotPath: file,
+            // Every archive of a chain is written by the same job, so the key that opened
+            // this one opens its siblings - including when Smart Recovery had to find it
+            // under a profile other than the one the archive names. Only a sibling naming a
+            // different profile is resolved on its own, and it has no index in hand to test
+            // a candidate against, so that case gets no Smart Recovery.
+            resolveMasterKey: async (siblingProfileId: string) =>
+                masterKey && siblingProfileId === manifest.encryption?.profileId
+                    ? masterKey
+                    : resolveBackupKey({ profileId: siblingProfileId, override }),
+        };
 
         return { ...managed, manifest, index, masterKey, chain };
     } catch (e: unknown) {

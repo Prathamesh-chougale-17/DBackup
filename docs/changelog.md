@@ -28,6 +28,7 @@ All notable changes to DBackup are documented here.
 - **storage**: The folder browser used when configuring a directory source now works for **every** storage adapter. SMB, FTP, WebDAV and S3-compatible storage previously left the Browse button disabled and the path had to be typed by hand - not for any protocol reason, it had simply never been implemented for them. On object storage the tree lists key prefixes, matching what the provider's console shows.
 - **destinations**: New "Create as Directory Source" action (and its reverse) copies a storage adapter into the opposite role including its credentials, so one server can serve both purposes without being set up twice.
 - **jobs**: Creating and editing a backup job now opens a dedicated page instead of a modal, giving the folder tree room to work.
+- **vault**: A backup whose encryption profile was deleted can be reopened by pasting the key itself. The key is checked against that specific backup before anything is stored - for a file backup the check is exact, since its index carries an authentication tag - and is then saved as a new vault profile. That is what makes it work everywhere afterwards, including for restores that run unattended and have nobody to ask. Pasting a key that is already in the vault points at the existing profile instead of creating a second one. Requires permission to manage the vault.
 
 ### 🐛 Bug Fixes
 
@@ -39,12 +40,22 @@ All notable changes to DBackup are documented here.
 - **notifications**: Fixed the notification preview showing timestamps in the browser locale instead of the user's configured timezone and format.
 - **storage**: Fixed the download link dialog, the SSO provider editor and the adapter type picker scrolling with the native scrollbar instead of the styled one.
 - **auth**: Fixed two-factor authentication failing since v2.10.1 with an empty error in the UI and an `Unknown argument 'failedVerificationCount'` database error in the logs. The Better Auth update added lockout tracking to the two-factor record, but the matching columns were never added to the schema, so both enabling 2FA and verifying TOTP or backup codes failed. Failed attempts are now counted and the lockout works as intended. ([#130](https://github.com/Skyfay/DBackup/issues/130))
+- **restore**: Fixed a file backup whose encryption profile had been deleted being unrecoverable. Opening it needs its file index, and reading the index asked for that one profile and gave up when it was gone - so the restore page loaded and then showed nothing at all, with only a warning in the log to say why. Every profile in the vault is now tried against the index, which recovers the common case of a profile that was deleted and its key later imported again under a new id. The check is exact rather than a guess, because the index carries an authentication tag.
+- **restore**: Fixed the restore page downloading a whole archive to no purpose when its encryption key was missing. A file index that could not be read was indistinguishable from one that was not there, so the fallback of reading the copy stored inside the archive ran even when it was certain to fail for the same reason.
+- **restore**: Fixed the restore page rendering a backup it could not open as an empty one. Two things hid it: the page swallowed every analysis failure, and the analysis endpoint swallowed a missing key while reading the backup's metadata - so it downloaded the whole archive to fail again on the same key and then reported success with nothing in it. The key is now asked for before anything is transferred, and any other failure is shown with an option to try again.
+- **storage**: Fixed "Download Decrypted" handing back the still-encrypted archive for a file backup. Its entries are encrypted individually, so there is no single stream to decrypt, and the code that only knew the older whole-file format passed the archive through untouched and reported success. File backups now offer "Download Decrypted Contents" instead, which unpacks the archive - and the rest of its chain, for an incremental - into a `.tar.gz`. Asking for a decrypted download of one through the API now fails with an explanation rather than quietly returning ciphertext.
 
 ### 🔒 Security
 
 - **local-filesystem**: Tightened the path containment check, which accepted a sibling directory whose name merely started with the configured base path (a job pointed at `/srv/data` could reach `/srv/dataEVIL`).
 - **dependencies**: Updated Next.js to 16.2.12, closing eight advisories including a middleware bypass, server-side request forgery in Server Actions and in rewrites, and cache confusion of response bodies.
 - **dependencies**: Pinned `sharp`, `postcss` and `brace-expansion` to patched releases, resolving eleven further advisories inherited through transitive dependencies.
+
+### 🎨 Improvements
+
+- **restore**: Encryption keys are now resolved the same way everywhere. Database restores, file restores, storage downloads and config restores previously each had their own idea of what to try when the profile a backup names no longer exists, which meant the same backup could be recoverable in one place and a dead end in another. All of them now run the same sequence: a key you supplied, then the profile the backup names, then every profile in the vault tested against the backup. A key you supplied is verified rather than trusted, so a wrong one is reported as wrong instead of producing a file that looks corrupt.
+- **restore**: Every place that opens an encrypted backup now asks for a key the same way, through one dialog. Browsing, analysing, restoring and downloading each used to answer a missing key differently - a prompt in one place, a bare error in another, silence in a third.
+- **restore**: Reading the file index of a backup no longer downloads it several times over. The restore page asks for the same index once per directory source plus once for the dry run, and each request used to fetch and decrypt the index sidecar separately - including logging the same failure once per request.
 
 ### 🔄 Changed
 
@@ -86,6 +97,8 @@ All notable changes to DBackup are documented here.
 - **lint-guards**: New design system guards covering raw overflow containers, locale date formatting, ScrollArea max-height placement and palette colors without a dark mode variant. The last two carry a baseline count that may only go down, so the existing backlog is tolerated but nothing new is added.
 - **lint-guards**: The no-console guard no longer exempts Client Components. The exemption assumed the logger needed Node APIs, which it never did, and it was hiding 21 console calls.
 - **charts**: New render tests for the chart wrapper and all four chart types, asserting that the series, axes, grid, pie sectors and the legend's mapping back through the chart config actually reach the DOM. The chart components had no coverage at all, which made the Recharts 3 upgrade a change nothing could verify.
+- **restore**: New coverage for key resolution: the order it tries things in, that a key you supplied is reported as wrong rather than quietly replaced by another, and that an archive index seals against every key but the right one. Plus a regression test that a backup with no usable key asks for one instead of reporting an empty archive.
+- **vault**: New coverage for key recovery, including that a key which does not open the backup is never stored, that an existing profile is reused rather than duplicated, and that a generated profile name steps around one already taken.
 
 ### 🔧 CI/CD
 

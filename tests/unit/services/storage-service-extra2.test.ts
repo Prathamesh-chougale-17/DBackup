@@ -4,6 +4,7 @@ import { prismaMock } from '@/lib/testing/prisma-mock';
 import { StorageService } from '@/services/storage/storage-service';
 import { registry } from '@/lib/core/registry';
 import { StorageAdapter } from '@/lib/core/interfaces';
+import { EncryptionKeyRequiredError } from '@/lib/logging/errors';
 
 // ── Module Mocks ───────────────────────────────────────────────
 
@@ -96,7 +97,10 @@ vi.mock('@/lib/logging/logger', () => ({
         }),
     },
 }));
-vi.mock('@/lib/logging/errors', () => ({
+// Only wrapError is stubbed - the error classes have to stay real, since the service
+// distinguishes a missing key from a decryption failure by instanceof.
+vi.mock('@/lib/logging/errors', async (importOriginal) => ({
+    ...await importOriginal<typeof import('@/lib/logging/errors')>(),
     wrapError: vi.fn((e: any) => e),
 }));
 
@@ -217,7 +221,7 @@ describe('StorageService.downloadFile - encryption and .enc paths', () => {
             expect(mockCreateDecryptionStream).toHaveBeenCalled();
         });
 
-        it('uses rawKeyHex option instead of resolving the profile', async () => {
+        it('passes rawKeyHex to the resolver instead of looking up the profile itself', async () => {
             const rawKeyHex = 'aa'.repeat(32);
             const meta = JSON.stringify({
                 encryption: {
@@ -241,10 +245,12 @@ describe('StorageService.downloadFile - encryption and .enc paths', () => {
 
             expect(result.success).toBe(true);
             expect(mockGetProfileMasterKey).not.toHaveBeenCalled();
-            expect(mockResolveDecryptionKey).not.toHaveBeenCalled();
+            // One resolution path for every case - the supplied key is an override on it,
+            // which is what gets it verified against the backup before use.
+            expect(mockResolveDecryptionKey.mock.calls[0][4]).toMatchObject({ rawKeyHex });
         });
 
-        it('uses profileIdOverride when provided', async () => {
+        it('passes profileIdOverride to the resolver when provided', async () => {
             const meta = JSON.stringify({
                 encryption: {
                     enabled: true,
@@ -266,11 +272,13 @@ describe('StorageService.downloadFile - encryption and .enc paths', () => {
             const result = await service.downloadFile('conf-123', 'backup.sql', '/tmp/out.sql', true, { profileIdOverride: 'override-profile' });
 
             expect(result.success).toBe(true);
-            expect(mockGetProfileMasterKey).toHaveBeenCalledWith('override-profile');
+            expect(mockResolveDecryptionKey.mock.calls[0][4]).toMatchObject({ profileId: 'override-profile' });
         });
 
-        it('throws ENCRYPTION_KEY_REQUIRED when resolveDecryptionKey fails', async () => {
-            mockResolveDecryptionKey.mockRejectedValueOnce(new Error("No matching key"));
+        it('surfaces a missing key as such rather than as a decryption failure', async () => {
+            mockResolveDecryptionKey.mockRejectedValueOnce(
+                new EncryptionKeyRequiredError("no key fits", "profile-abc")
+            );
 
             const meta = JSON.stringify({
                 encryption: {
@@ -290,9 +298,10 @@ describe('StorageService.downloadFile - encryption and .enc paths', () => {
             prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());
             vi.mocked(registry.get).mockReturnValue(adapter);
 
+            // Relabelling it "Decryption failed" would hide the one error the UI can answer.
             await expect(
                 service.downloadFile('conf-123', 'backup.sql', '/tmp/out.sql', true)
-            ).rejects.toThrow('ENCRYPTION_KEY_REQUIRED:profile-abc');
+            ).rejects.toBeInstanceOf(EncryptionKeyRequiredError);
         });
 
         it('throws "Decryption failed" when createDecryptionStream throws', async () => {

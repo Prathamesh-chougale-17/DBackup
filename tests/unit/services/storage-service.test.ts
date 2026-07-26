@@ -4,6 +4,7 @@ import { prismaMock } from '@/lib/testing/prisma-mock';
 import { StorageService } from '@/services/storage/storage-service';
 import { registry } from '@/lib/core/registry';
 import { StorageAdapter, FileInfo } from '@/lib/core/interfaces';
+import { EncryptionKeyRequiredError } from '@/lib/logging/errors';
 
 // ── Module Mocks ───────────────────────────────────────────────
 
@@ -69,8 +70,12 @@ const fsMocks = {
 const mockPipeline = _mockPipeline as unknown as ReturnType<typeof vi.fn>;
 
 // Encryption
-const mockGetProfileMasterKey = vi.fn().mockResolvedValue(Buffer.alloc(32));vi.mock('@/services/backup/encryption-service', () => ({
+const mockGetProfileMasterKey = vi.fn().mockResolvedValue(Buffer.alloc(32));
+// The vault walk is part of the real resolver, which runs unmocked here.
+const mockGetEncryptionProfiles = vi.fn().mockResolvedValue([]);
+vi.mock('@/services/backup/encryption-service', () => ({
     getProfileMasterKey: (...args: any[]) => mockGetProfileMasterKey(...args),
+    getEncryptionProfiles: (...args: any[]) => mockGetEncryptionProfiles(...args),
 }));
 
 const mockCreateDecryptionStream = vi.fn().mockReturnValue({});
@@ -98,7 +103,10 @@ vi.mock('@/lib/logging/logger', () => ({
         }),
     },
 }));
-vi.mock('@/lib/logging/errors', () => ({
+// Only wrapError is stubbed - the error classes have to stay real, since the service
+// distinguishes a missing key from a decryption failure by instanceof.
+vi.mock('@/lib/logging/errors', async (importOriginal) => ({
+    ...await importOriginal<typeof import('@/lib/logging/errors')>(),
     wrapError: vi.fn((e: any) => e),
 }));
 
@@ -860,10 +868,12 @@ describe('StorageService', () => {
             });
 
             it('should return success without decrypting when no meta or encryption params found', async () => {
+                // Metadata is fetched before the backup itself, so that a file with no
+                // decrypted form is recognised without moving its bytes first.
                 const adapter = makeAdapter({
                     download: vi.fn()
-                        .mockResolvedValueOnce(true)   // main file
-                        .mockResolvedValueOnce(false),  // meta file not found
+                        .mockResolvedValueOnce(false)  // meta file not found
+                        .mockResolvedValueOnce(true),  // main file
                     read: vi.fn().mockResolvedValue(null), // read returns null
                 });
                 prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());
@@ -936,7 +946,7 @@ describe('StorageService', () => {
                 expect(fsMocks.readFile).toHaveBeenCalled();
             });
 
-            it('should throw "Decryption failed" when decryption setup throws', async () => {
+            it('should ask for a key when the profile is gone and the vault holds no match', async () => {
                 const meta = { encryptionProfileId: 'p', iv: 'aabb', authTag: 'ccdd' };
                 const adapter = makeAdapter({
                     download: vi.fn().mockResolvedValue(true),
@@ -945,9 +955,13 @@ describe('StorageService', () => {
                 prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());
                 vi.mocked(registry.get).mockReturnValue(adapter);
                 mockGetProfileMasterKey.mockRejectedValueOnce(new Error('Key not found'));
+                mockGetEncryptionProfiles.mockResolvedValueOnce([]);
 
-                await expect(service.downloadFile('conf-123', 'remote.enc', '/local/out.sql', true))
-                    .rejects.toThrow('ENCRYPTION_KEY_REQUIRED:p');
+                const error = await service.downloadFile('conf-123', 'remote.enc', '/local/out.sql', true)
+                    .catch((e: unknown) => e);
+
+                expect(error).toBeInstanceOf(EncryptionKeyRequiredError);
+                expect((error as EncryptionKeyRequiredError).profileId).toBe('p');
             });
 
             it('should fall through to download fallback when adapter.read throws', async () => {
@@ -971,8 +985,8 @@ describe('StorageService', () => {
                 // adapter.read returns null, then meta download rejects → .catch(() => false) fires
                 const adapter = makeAdapter({
                     download: vi.fn()
-                        .mockResolvedValueOnce(true)   // main file
-                        .mockRejectedValueOnce(new Error('meta not found')), // meta download rejects
+                        .mockRejectedValueOnce(new Error('meta not found')) // meta download rejects
+                        .mockResolvedValueOnce(true),  // main file
                     read: vi.fn().mockResolvedValue(null),
                 });
                 prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());

@@ -10,6 +10,7 @@ import { auditService } from "@/services/audit-service";
 import { AUDIT_ACTIONS, AUDIT_RESOURCES } from "@/lib/core/audit-types";
 import { planFileRestore, restoreFilesToStorage, streamFileRestore, FileRestoreInput } from "@/services/restore/file-restore";
 import { generateSelectionDownloadToken, consumeSelectionDownloadToken } from "@/lib/auth/download-tokens";
+import { keyRequiredResponse } from "@/lib/server/key-required-response";
 import { logger } from "@/lib/logging/logger";
 import { wrapError, getErrorMessage } from "@/lib/logging/errors";
 
@@ -121,6 +122,9 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
                 : `Restored ${result.restored} file(s), ${result.failed.length} failed`,
         });
     } catch (e: unknown) {
+        const keyRequired = keyRequiredResponse(e);
+        if (keyRequired) return keyRequired;
+
         log.error("File restore failed", { configId: id }, wrapError(e));
         return NextResponse.json({ success: false, error: getErrorMessage(e) }, { status: 500 });
     }

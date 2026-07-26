@@ -9,7 +9,7 @@ import { getTempDir } from "@/lib/temp-dir";
 import { promises as fs } from "fs";
 import path from "path";
 import { logger } from "@/lib/logging/logger";
-import { wrapError, getErrorMessage } from "@/lib/logging/errors";
+import { EncryptionKeyRequiredError, wrapError, getErrorMessage } from "@/lib/logging/errors";
 import { getProfileMasterKey } from "@/services/backup/encryption-service";
 
 const log = logger.child({ action: "config-management" });
@@ -69,7 +69,9 @@ export async function uploadAndRestoreConfigAction(formData: FormData) {
 
         let resolvedKeyHex = rawKeyHex || undefined;
         if (profileIdOverride && !resolvedKeyHex) {
-            // User selected a vault profile in the key resolution dialog - resolve to raw key server-side
+            // The recovery dialog offers a vault profile as well as a typed key. An uploaded
+            // file has no storage adapter behind it, so the profile is turned into its key
+            // here rather than being resolved further down.
             const profileKey = await getProfileMasterKey(profileIdOverride);
             resolvedKeyHex = profileKey.toString('hex');
         }
@@ -81,13 +83,13 @@ export async function uploadAndRestoreConfigAction(formData: FormData) {
 
         return { success: true };
     } catch (e: unknown) {
-        log.error("Offline restore failed", {}, wrapError(e));
-        const message = getErrorMessage(e) || "Failed to restore configuration";
-        if (message.startsWith("ENCRYPTION_KEY_REQUIRED:")) {
-            const profileId = message.split(":").slice(1).join(":") || "unknown";
-            return { success: false, code: "ENCRYPTION_KEY_REQUIRED" as const, profileId };
+        // Same contract as the API routes: a missing key is answerable, so it comes back as
+        // a prompt for one rather than as a failure message.
+        if (e instanceof EncryptionKeyRequiredError) {
+            return { success: false, code: "ENCRYPTION_KEY_REQUIRED" as const, profileId: e.profileId ?? "unknown" };
         }
-        return { success: false, error: message };
+        log.error("Offline restore failed", {}, wrapError(e));
+        return { success: false, error: getErrorMessage(e) || "Failed to restore configuration" };
     } finally {
         // Cleanup
         try {

@@ -323,6 +323,31 @@ export class EncryptionError extends DBackupError {
   }
 }
 
+/**
+ * Thrown when a backup cannot be opened because no available key fits it.
+ *
+ * Deliberately distinct from EncryptionError: this is not a malfunction but a question for
+ * the user, who may hold a key the vault does not. Every entry point turns it into the same
+ * 422 with the profile id the backup names, so one recovery dialog can answer it no matter
+ * which flow ran into it.
+ */
+export class EncryptionKeyRequiredError extends DBackupError {
+  /** The profile the backup's metadata names, so the dialog can show what was looked for. */
+  public readonly profileId?: string;
+
+  constructor(
+    message: string,
+    profileId?: string,
+    options?: { cause?: Error; context?: Record<string, unknown> }
+  ) {
+    super(message, "ENCRYPTION_KEY_REQUIRED", {
+      ...options,
+      context: { ...options?.context, profileId },
+    });
+    this.profileId = profileId;
+  }
+}
+
 // ============================================================================
 // Queue Errors
 // ============================================================================

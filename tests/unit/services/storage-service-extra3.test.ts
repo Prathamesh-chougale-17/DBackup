@@ -95,7 +95,10 @@ vi.mock('@/lib/logging/logger', () => ({
         }),
     },
 }));
-vi.mock('@/lib/logging/errors', () => ({
+// Only wrapError is stubbed - the error classes have to stay real, since the service
+// distinguishes a missing key from a decryption failure by instanceof.
+vi.mock('@/lib/logging/errors', async (importOriginal) => ({
+    ...await importOriginal<typeof import('@/lib/logging/errors')>(),
     wrapError: vi.fn((e: any) => e),
 }));
 
@@ -160,10 +163,16 @@ describe('StorageService.downloadFile - rawKeyHex option (extra coverage)', () =
         mockPipeline.mockResolvedValue(undefined);
         mockGetProfileMasterKey.mockResolvedValue(Buffer.alloc(32));
         mockCreateDecryptionStream.mockReturnValue(new PassThrough());
+        // Stands in for the real resolver, which honours a supplied key ahead of the vault.
+        mockResolveDecryptionKey.mockImplementation(
+            async (_meta: any, _file: any, _compression: any, _log: any, override?: { rawKeyHex?: string }) =>
+                override?.rawKeyHex ? Buffer.from(override.rawKeyHex, 'hex') : Buffer.alloc(32)
+        );
     });
 
     // -------------------------------------------------------------------------
-    // rawKeyHex: key is parsed directly from hex without any profile lookup
+    // rawKeyHex: the caller's key reaches the cipher unchanged, with no profile
+    // lookup of its own - it is handed to the shared resolver as an override.
     // -------------------------------------------------------------------------
 
     it('decodes rawKeyHex into a Buffer and passes it to createDecryptionStream', async () => {
@@ -223,7 +232,7 @@ describe('StorageService.downloadFile - rawKeyHex option (extra coverage)', () =
         expect(mockGetProfileMasterKey).not.toHaveBeenCalled();
     });
 
-    it('does not call resolveDecryptionKey when rawKeyHex is provided', async () => {
+    it('hands rawKeyHex to the resolver as an override rather than using it unchecked', async () => {
         const rawKeyHex = 'dd'.repeat(32);
 
         const meta = JSON.stringify({
@@ -246,7 +255,10 @@ describe('StorageService.downloadFile - rawKeyHex option (extra coverage)', () =
 
         await service.downloadFile('conf-123', 'backup.sql', '/tmp/out.sql', true, { rawKeyHex });
 
-        expect(mockResolveDecryptionKey).not.toHaveBeenCalled();
+        // Going through the resolver is what gets the key verified against the backup, so a
+        // wrong one is reported as wrong instead of producing a file that looks corrupt.
+        expect(mockResolveDecryptionKey).toHaveBeenCalledOnce();
+        expect(mockResolveDecryptionKey.mock.calls[0][4]).toMatchObject({ rawKeyHex });
     });
 
     it('returns success when rawKeyHex is provided alongside legacy meta format', async () => {
@@ -272,7 +284,6 @@ describe('StorageService.downloadFile - rawKeyHex option (extra coverage)', () =
 
         expect(result.success).toBe(true);
         expect(mockGetProfileMasterKey).not.toHaveBeenCalled();
-        expect(mockResolveDecryptionKey).not.toHaveBeenCalled();
         expect(mockCreateDecryptionStream).toHaveBeenCalled();
     });
 

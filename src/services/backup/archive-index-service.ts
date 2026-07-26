@@ -23,12 +23,12 @@ import { getTempDir } from "@/lib/temp-dir";
 import { deriveArchiveKeys } from "@/lib/crypto/kdf";
 import { parseIndex } from "@/lib/archive/index-file";
 import { browseLevel, BrowseEntry } from "@/lib/archive/browse";
-import { readArchiveIndex, readArchiveManifest } from "@/lib/archive/reader";
+import { parseArchiveIndex, readArchiveIndex, readArchiveManifest, readEmbeddedIndexBytes } from "@/lib/archive/reader";
 import { localFileSource } from "@/lib/archive/sources";
 import { ArchiveIndex } from "@/lib/archive/types";
-import { getProfileMasterKey } from "./encryption-service";
+import { archiveIndexVerifier, KeyOverride, resolveBackupKey } from "./key-resolution";
 import { logger } from "@/lib/logging/logger";
-import { wrapError } from "@/lib/logging/errors";
+import { EncryptionKeyRequiredError, wrapError } from "@/lib/logging/errors";
 
 const log = logger.child({ service: "ArchiveIndexService" });
 
@@ -64,7 +64,13 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 const CACHE_MAX_ENTRIES = 8;
 
 export class ArchiveIndexService {
-    private cache = new Map<string, { index: ArchiveIndex; expiresAt: number }>();
+    /**
+     * Caches the in-flight read, not just its result. The restore page asks for the same
+     * index several times at once (one file tree per directory source, plus the dry run),
+     * and caching only finished reads let all of them download and decrypt the sidecar
+     * separately - including logging the same failure once per caller.
+     */
+    private cache = new Map<string, { index: Promise<ArchiveIndex | null>; expiresAt: number }>();
 
     /**
      * Loads and parses the index sidecar for one backup file.
@@ -72,37 +78,67 @@ export class ArchiveIndexService {
      * @param configId - Storage adapter config holding the backup
      * @param file - Remote path of the backup file, without the sidecar suffix
      * @param meta - The backup's already-read `.meta.json`
+     * @param override - A key from the recovery dialog, when the vault has none that fits
      * @returns The parsed index, or null when the sidecar is missing or unreadable
+     * @throws EncryptionKeyRequiredError when the sidecar is readable but no key opens it
      */
-    async load(configId: string, file: string, meta: BackupMetadata): Promise<ArchiveIndex | null> {
+    async load(
+        configId: string,
+        file: string,
+        meta: BackupMetadata,
+        override?: KeyOverride
+    ): Promise<ArchiveIndex | null> {
         if (meta.archive?.formatVersion !== 2) return null;
+
+        // A recovery attempt neither reads nor writes the cache: it carries a key nobody
+        // else supplied, so its result is not the one a plain caller asked for.
+        if (override) return this.read(configId, file, meta.archive, override);
 
         const cacheKey = `${configId}::${file}`;
         const cached = this.cache.get(cacheKey);
         if (cached && cached.expiresAt > Date.now()) return cached.index;
 
-        const bytes = await this.fetchSidecar(configId, file, meta.archive.indexFile);
+        const pending = this.read(configId, file, meta.archive, undefined);
+        this.remember(cacheKey, pending);
+        return pending;
+    }
+
+    /** Fetches and opens the sidecar. Everything cacheable about `load` happens here. */
+    private async read(
+        configId: string,
+        file: string,
+        archive: NonNullable<BackupMetadata["archive"]>,
+        override: KeyOverride | undefined
+    ): Promise<ArchiveIndex | null> {
+        const bytes = await this.fetchSidecar(configId, file, archive.indexFile);
         if (!bytes) return null;
 
         try {
-            let index: ArchiveIndex;
-            if (!meta.archive.encrypted) {
-                index = await parseIndex(bytes);
-            } else {
-                if (!meta.archive.profileId || !meta.archive.kdfSalt || !meta.archive.noncePrefix) {
-                    throw new Error("Backup metadata is missing the crypto parameters needed to open the index");
-                }
-                const masterKey = await getProfileMasterKey(meta.archive.profileId);
-                const { indexKey } = deriveArchiveKeys(masterKey, Buffer.from(meta.archive.kdfSalt, "hex"));
-                index = await parseIndex(bytes, {
-                    indexKey,
-                    noncePrefix: Buffer.from(meta.archive.noncePrefix, "hex"),
-                });
+            if (!archive.encrypted) return await parseIndex(bytes);
+
+            if (!archive.profileId || !archive.kdfSalt || !archive.noncePrefix) {
+                throw new Error("Backup metadata is missing the crypto parameters needed to open the index");
             }
 
-            this.remember(cacheKey, index);
-            return index;
+            const masterKey = await resolveBackupKey({
+                profileId: archive.profileId,
+                override,
+                verify: archiveIndexVerifier(bytes, { kdfSalt: archive.kdfSalt, noncePrefix: archive.noncePrefix }),
+                log: (msg, level) => level === "warning"
+                    ? log.warn(msg, { configId, file })
+                    : log.info(msg, { configId, file }),
+            });
+
+            const { indexKey } = deriveArchiveKeys(masterKey, Buffer.from(archive.kdfSalt, "hex"));
+            return await parseIndex(bytes, {
+                indexKey,
+                noncePrefix: Buffer.from(archive.noncePrefix, "hex"),
+            });
         } catch (e: unknown) {
+            // A missing key is answerable - the caller turns it into a prompt for one. Every
+            // other failure means this sidecar is unusable, and the caller may still fall
+            // back to the archive's embedded copy, so it stays a null.
+            if (e instanceof EncryptionKeyRequiredError) throw e;
             log.warn("Failed to parse archive index sidecar", { configId, file }, wrapError(e));
             return null;
         }
@@ -114,9 +150,10 @@ export class ArchiveIndexService {
         file: string,
         meta: BackupMetadata,
         jobSourceId: string,
-        prefix?: string
+        prefix?: string,
+        override?: KeyOverride
     ): Promise<BrowseEntry[] | null> {
-        const index = await this.load(configId, file, meta);
+        const index = await this.load(configId, file, meta, override);
         return index ? browseLevel(index, jobSourceId, prefix) : null;
     }
 
@@ -125,18 +162,29 @@ export class ArchiveIndexService {
         this.cache.delete(`${configId}::${file}`);
     }
 
-    private remember(key: string, index: ArchiveIndex): void {
+    private remember(key: string, index: Promise<ArchiveIndex | null>): void {
         if (this.cache.size >= CACHE_MAX_ENTRIES) {
             // Insertion-ordered, so the first key is the oldest.
             const oldest = this.cache.keys().next().value;
             if (oldest !== undefined) this.cache.delete(oldest);
         }
         this.cache.set(key, { index, expiresAt: Date.now() + CACHE_TTL_MS });
+
+        // Only a successfully parsed index is worth keeping. A failure - a sidecar that is
+        // not there yet, a key the vault does not hold - must be retried by the next caller
+        // rather than replayed at them for the rest of the TTL.
+        const forget = () => { if (this.cache.get(key)?.index === index) this.cache.delete(key); };
+        void index.then((value) => { if (value === null) forget(); }, forget);
     }
 
     /** Index reduced to what the restore dialog's entry pickers need. */
-    async summarize(configId: string, file: string, meta: BackupMetadata): Promise<ArchiveSummary | null> {
-        return this.toSummary(await this.load(configId, file, meta), meta);
+    async summarize(
+        configId: string,
+        file: string,
+        meta: BackupMetadata,
+        override?: KeyOverride
+    ): Promise<ArchiveSummary | null> {
+        return this.toSummary(await this.load(configId, file, meta, override), meta);
     }
 
     /**
@@ -146,15 +194,34 @@ export class ArchiveIndexService {
      * fallback for a missing or corrupt sidecar. It costs the download the sidecar exists
      * to avoid, which is why it is only ever reached after the sidecar has failed.
      */
-    async summarizeFromArchive(archivePath: string, meta: BackupMetadata): Promise<ArchiveSummary | null> {
+    async summarizeFromArchive(
+        archivePath: string,
+        meta: BackupMetadata,
+        override?: KeyOverride
+    ): Promise<ArchiveSummary | null> {
         try {
             const source = await localFileSource(archivePath);
             const manifest = await readArchiveManifest(source);
-            const masterKey = manifest.encryption
-                ? await getProfileMasterKey(manifest.encryption.profileId)
-                : undefined;
-            return this.toSummary(await readArchiveIndex(source, manifest, { masterKey }), meta);
+
+            if (!manifest.encryption) {
+                return this.toSummary(await readArchiveIndex(source, manifest), meta);
+            }
+
+            // Read the index bytes before resolving the key: they are what proves a
+            // candidate fits, so Smart Recovery has nothing to test until they are in hand.
+            const indexBytes = await readEmbeddedIndexBytes(source);
+            const masterKey = await resolveBackupKey({
+                profileId: manifest.encryption.profileId,
+                override,
+                verify: archiveIndexVerifier(indexBytes, manifest.encryption),
+                log: (msg, level) => level === "warning"
+                    ? log.warn(msg, { archivePath })
+                    : log.info(msg, { archivePath }),
+            });
+
+            return this.toSummary(await parseArchiveIndex(indexBytes, manifest, masterKey), meta);
         } catch (e: unknown) {
+            if (e instanceof EncryptionKeyRequiredError) throw e;
             log.warn("Failed to read the embedded archive index", { archivePath }, wrapError(e));
             return null;
         }
