@@ -43,6 +43,8 @@ All notable changes to DBackup are documented here.
 ### 🔒 Security
 
 - **local-filesystem**: Tightened the path containment check, which accepted a sibling directory whose name merely started with the configured base path (a job pointed at `/srv/data` could reach `/srv/dataEVIL`).
+- **dependencies**: Updated Next.js to 16.2.12, closing eight advisories including a middleware bypass, server-side request forgery in Server Actions and in rewrites, and cache confusion of response bodies.
+- **dependencies**: Pinned `sharp`, `postcss` and `brace-expansion` to patched releases, resolving eleven further advisories inherited through transitive dependencies.
 
 ### 🔄 Changed
 

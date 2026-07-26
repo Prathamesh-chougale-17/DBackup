@@ -12,5 +12,11 @@
     "vitepress": "^1.6.0",
     "vitepress-plugin-tabs": "^0.9.1",
     "vue": "^3.5.40"
+  },
+  "pnpm": {
+    "overrides": {
+      "postcss": ">=8.5.18",
+      "rollup": "^4.59.0"
+    }
   }
 }
