@@ -119,6 +119,55 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /jobs/bulk:
+    post:
+      tags: [Jobs]
+      summary: Bulk Job Action
+      description: |
+        Applies one action to several jobs in a single request.
+
+        A job that could not be processed does not fail the request. The response is always
+        `200` with per-job outcomes in `data`, so a partial result is reported rather than
+        discarded.
+
+        **Required permission:** `jobs:write`
+      operationId: bulkJobAction
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, ids]
+              properties:
+                action:
+                  type: string
+                  enum: [delete, enable, disable]
+                ids:
+                  type: array
+                  items: { type: string }
+                  minItems: 1
+                  maxItems: 200
+      responses:
+        "200":
+          description: Action applied, with per-job outcomes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkResponse"
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /jobs/{id}:
     put:
       tags: [Jobs]
@@ -604,6 +653,63 @@ paths:
                 $ref: "#/components/schemas/AdapterConfig"
         "409":
           description: Adapter with this name and type already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /adapters/bulk:
+    post:
+      tags: [Adapters]
+      summary: Bulk Delete Adapters
+      description: |
+        Deletes several adapter configurations in a single request.
+
+        Permissions are checked per distinct adapter type in the selection, so a mixed
+        batch requires every matching write permission (`sources:write`,
+        `destinations:write`, `notifications:write`).
+
+        An adapter still referenced by a job, a directory source or a notification template
+        is kept and reported in `data.failed` with the names holding it. The request itself
+        still answers `200`.
+      operationId: bulkDeleteAdapters
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, ids]
+              properties:
+                action:
+                  type: string
+                  enum: [delete]
+                ids:
+                  type: array
+                  items: { type: string }
+                  minItems: 1
+                  maxItems: 200
+      responses:
+        "200":
+          description: Deletion applied, with per-adapter outcomes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkResponse"
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: None of the given ids exist
           content:
             application/json:
               schema:
@@ -1146,6 +1252,58 @@ paths:
                       $ref: "#/components/schemas/ColumnInfo"
 
   # ─── Storage Explorer ──────────────────────────────────────────
+  /storage/{id}/files/bulk:
+    post:
+      tags: [Storage]
+      summary: Bulk Backup Action
+      description: |
+        Deletes, locks or unlocks several backups on a destination in a single request.
+
+        A locked backup is never deleted - it is reported in `data.failed` instead. An
+        incremental chain can be deleted as a whole, and members are removed newest-first
+        so no snapshot is left depending on one that is gone. Selecting only part of a
+        chain is still refused per file.
+
+        **Required permission:** `storage:delete`
+      operationId: bulkBackupAction
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, paths]
+              properties:
+                action:
+                  type: string
+                  enum: [delete, lock, unlock]
+                paths:
+                  type: array
+                  items: { type: string }
+                  minItems: 1
+                  maxItems: 200
+      responses:
+        "200":
+          description: Action applied, with per-backup outcomes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkResponse"
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /storage/{id}/files:
     get:
       tags: [Storage Explorer]
@@ -1634,6 +1792,54 @@ paths:
                 $ref: "#/components/schemas/CredentialProfile"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /credentials/bulk:
+    post:
+      tags: [Credentials]
+      summary: Bulk Delete Credential Profiles
+      description: |
+        Deletes several credential profiles in a single request.
+
+        A profile still attached to an adapter is kept and reported in `data.failed` with
+        its reference count.
+
+        **Required permission:** `credentials:delete`
+      operationId: bulkDeleteCredentialProfiles
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, ids]
+              properties:
+                action:
+                  type: string
+                  enum: [delete]
+                ids:
+                  type: array
+                  items: { type: string }
+                  minItems: 1
+                  maxItems: 200
+      responses:
+        "200":
+          description: Deletion applied, with per-profile outcomes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkResponse"
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -2224,6 +2430,44 @@ components:
         success:
           type: boolean
           example: true
+
+    BulkResponse:
+      type: object
+      description: |
+        Outcome of an action applied to several records.
+
+        `success` describes the request, not the records. It is `true` whenever the request
+        was handled, including when every record failed - the per-record verdicts live in
+        `data`. Only authentication, permission, validation and unexpected server errors
+        produce `success: false` with a 4xx or 5xx status.
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          description: One-line summary, for example "8 of 10 jobs deleted".
+          example: 8 of 10 jobs deleted
+        data:
+          type: object
+          properties:
+            succeeded:
+              type: array
+              description: Ids (or paths, for storage) that were processed.
+              items: { type: string }
+            failed:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                    description: Human-readable label, when one is known.
+                  error:
+                    type: string
+                    description: Why this record was not processed.
 
     Pagination:
       type: object

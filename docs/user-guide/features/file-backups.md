@@ -172,6 +172,12 @@ on its own, and an index sidecar lists every path, size, timestamp and checksum.
 what makes browsing a backup cheap - listing an archive reads a few megabytes whatever its size - and
 what makes restoring one file out of it possible.
 
+Because compression is decided per file, formats that are already compressed - video,
+photos, archives, Office documents - are stored as-is rather than packed a second time for
+nothing. They are still fully in the backup. The
+[full list of formats](/user-guide/security/compression#formats-stored-as-is) is in the
+compression guide.
+
 An unencrypted archive is a plain TAR: `tar -xf backup.tar` works with no DBackup involved.
 An encrypted one needs the [Recovery Kit](/user-guide/security/recovery-kit), which reads
 it with nothing but Node.js. The layout is specified byte by byte in the

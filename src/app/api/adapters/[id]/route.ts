@@ -8,25 +8,16 @@ import { headers } from "next/headers";
 import { auditService } from "@/services/audit-service";
 import { AUDIT_ACTIONS, AUDIT_RESOURCES } from "@/lib/core/audit-types";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
-import { PERMISSIONS, Permission } from "@/lib/auth/permissions";
+import { getWritePermissionForAdapterType } from "@/lib/auth/permissions";
 import { logger } from "@/lib/logging/logger";
-import { wrapError, getErrorMessage, ValidationError, NotFoundError } from "@/lib/logging/errors";
+import { wrapError, getErrorMessage, ValidationError, NotFoundError, ConflictError } from "@/lib/logging/errors";
 import { registerAdapters } from "@/lib/adapters";
 import { validateCredentialAssignments } from "@/lib/adapters/credential-validation";
+import { deleteAdapter } from "@/services/adapters/adapter-service";
 
 registerAdapters();
 
 const log = logger.child({ route: "adapters/[id]" });
-
-// Helper to get write permission based on adapter type
-function getWritePermissionForType(type: string): Permission {
-    switch (type) {
-        case 'database': return PERMISSIONS.SOURCES.WRITE;
-        case 'storage': return PERMISSIONS.DESTINATIONS.WRITE;
-        case 'notification': return PERMISSIONS.NOTIFICATIONS.WRITE;
-        default: return PERMISSIONS.SOURCES.WRITE; // Fallback to strictest
-    }
-}
 
 export async function DELETE(
     req: NextRequest,
@@ -47,38 +38,9 @@ export async function DELETE(
         if (!adapter) {
             return NextResponse.json({ success: false, error: "Adapter not found" }, { status: 404 });
         }
-        checkPermissionWithContext(ctx, getWritePermissionForType(adapter.type));
+        checkPermissionWithContext(ctx, getWritePermissionForAdapterType(adapter.type));
 
-        // Check for usage in Jobs (Source or Destination)
-        const linkedJobs = await prisma.job.findMany({
-            where: {
-                OR: [
-                    { sourceId: params.id },
-                    { destinations: { some: { configId: params.id } } }
-                ]
-            },
-            select: { name: true }
-        });
-
-        if (linkedJobs.length > 0) {
-            return NextResponse.json({
-                success: false, // Ensure success field is present for consistency
-                error: `Cannot delete. This adapter is used in the following jobs: ${linkedJobs.map(j => j.name).join(', ')}`
-            }, { status: 400 });
-        }
-
-        // Technically notifications (Many-to-Many) might be handled automatically by Prisma for implicit relations,
-        // or might throw depending on underlying DB constraints.
-        // But let's rely on Prisma catch for other cases or strict FKs.
-
-        // Clean up related storage snapshots (no FK relation, manual cleanup)
-        await prisma.storageSnapshot.deleteMany({
-            where: { adapterConfigId: params.id },
-        });
-
-        const deletedAdapter = await prisma.adapterConfig.delete({
-            where: { id: params.id },
-        });
+        const deletedAdapter = await deleteAdapter(params.id);
 
         if (ctx) {
             await auditService.log(
@@ -92,6 +54,10 @@ export async function DELETE(
 
         return NextResponse.json({ success: true });
     } catch (error: unknown) {
+        // Still referenced is the caller's problem to fix, not a server fault.
+        if (error instanceof ConflictError) {
+            return NextResponse.json({ success: false, error: error.message }, { status: 400 });
+        }
         log.error("Delete adapter error", { adapterId: params.id }, wrapError(error));
         return NextResponse.json({
             success: false,
@@ -119,7 +85,7 @@ export async function PUT(
         if (!existingAdapter) {
             return NextResponse.json({ success: false, error: "Adapter not found" }, { status: 404 });
         }
-        checkPermissionWithContext(ctx, getWritePermissionForType(existingAdapter.type));
+        checkPermissionWithContext(ctx, getWritePermissionForAdapterType(existingAdapter.type));
 
         const body = await req.json();
         const { name, config, metadata, primaryCredentialId, sshCredentialId, storageRole } = body;

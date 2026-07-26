@@ -50,3 +50,17 @@ export function isBackupFile(name: string): boolean {
 export function sidecarPathsFor(backupPath: string): string[] {
     return SIDECAR_SUFFIXES.map((suffix) => backupPath + suffix);
 }
+
+/**
+ * The incremental chain folder a backup lives in, or null for a flat full backup.
+ *
+ * The runner names these `chain-<timestamp>`, and the folder layout is what defines the
+ * chain. Anything asking "does something else depend on this archive?" starts here.
+ */
+export function chainFolderOf(backupPath: string): string | null {
+    const normalized = backupPath.replace(/\\/g, "/");
+    const separator = normalized.lastIndexOf("/");
+    if (separator === -1) return null;
+    const folder = normalized.slice(0, separator);
+    return /\/chain-[^/]+$/.test(folder) ? folder : null;
+}

@@ -35,7 +35,9 @@ import {
   updateNamingTemplate,
   deleteNamingTemplate,
 } from "@/app/actions/templates";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type BulkAction } from "@/components/ui/data-table";
+import { unwrapBulkAction } from "@/lib/bulk-request";
+import { bulkDeleteNamingTemplates } from "@/app/actions/templates-bulk";
 import { ColumnDef } from "@tanstack/react-table";
 import { DateDisplay } from "@/components/utils/date-display";
 import {
@@ -95,6 +97,25 @@ export function NamingTemplateList() {
     }
     setIsSettingDefault(null);
   };
+
+  const bulkActions = useMemo<BulkAction<NamingTemplate>[]>(() => [
+    {
+      id: "delete",
+      labels: { verb: "delete", verbPast: "deleted", noun: "naming template" },
+      icon: Trash2,
+      variant: "destructive",
+      itemName: (row) => row.name,
+      // Built-in entries ship with the product and the service refuses them anyway.
+      ineligible: (row) => (row.isSystem ? "Built-in, cannot be deleted" : null),
+      confirm: {
+        title: (rows) => `Delete ${rows.length} naming template${rows.length === 1 ? "" : "s"}?`,
+        description: () =>
+          "This cannot be undone. An entry that is still in use is kept and listed afterwards.",
+        confirmLabel: "Delete",
+      },
+      run: (rows) => unwrapBulkAction(bulkDeleteNamingTemplates(rows.map((row) => row.id))),
+    },
+  ], []);
 
   const columns: ColumnDef<NamingTemplate>[] = [
     {
@@ -192,7 +213,15 @@ export function NamingTemplateList() {
           </Button>
         </CardHeader>
         <CardContent>
-          <DataTable columns={columns} data={templates} isLoading={loading} />
+          <DataTable
+            columns={columns}
+            data={templates}
+            isLoading={loading}
+            enableRowSelection
+            getRowId={(row) => row.id}
+            bulkActions={bulkActions}
+            onBulkActionComplete={fetchTemplates}
+          />
         </CardContent>
       </Card>
 

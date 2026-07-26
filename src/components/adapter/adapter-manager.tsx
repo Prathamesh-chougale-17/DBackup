@@ -13,7 +13,8 @@ import { AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import { ADAPTER_DEFINITIONS, AdapterDefinition } from "@/lib/adapters/definitions";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type BulkAction } from "@/components/ui/data-table";
+import { requestBulk } from "@/lib/bulk-request";
 import { ColumnDef } from "@tanstack/react-table";
 import { Badge } from "@/components/ui/badge";
 import { Edit, Trash, BarChart3, SearchCode, Copy, ArrowLeftRight } from "lucide-react";
@@ -372,6 +373,32 @@ export function AdapterManager({ type, title, description, canManage = true, per
         return [{ id: "adapterId", title: "Type", options }];
     }, [configs, availableAdapters]);
 
+    const bulkActions = useMemo<BulkAction<AdapterConfig>[]>(() => {
+        if (!canManage) return [];
+
+        return [
+            {
+                id: "delete",
+                labels: { verb: "delete", verbPast: "deleted", noun: "connection" },
+                icon: Trash,
+                variant: "destructive",
+                itemName: (config) => config.name,
+                confirm: {
+                    title: (rows) => `Delete ${rows.length} connection${rows.length === 1 ? "" : "s"}?`,
+                    // A connection still referenced by a job is refused per entry rather
+                    // than up front, because the reason names the jobs holding it.
+                    description: () =>
+                        "This cannot be undone. Connections still used by a job or a notification template are kept and listed afterwards.",
+                    confirmLabel: "Delete",
+                },
+                run: (rows) => requestBulk("/api/adapters/bulk", {
+                    action: "delete",
+                    ids: rows.map((config) => config.id),
+                }),
+            },
+        ];
+    }, [canManage]);
+
     // Stable reference for the adapter list passed to AdapterForm - prevents the
     // useEffect inside AdapterForm from re-running (and wiping typed values) when
     // unrelated state changes cause the parent to re-render.
@@ -439,6 +466,12 @@ export function AdapterManager({ type, title, description, canManage = true, per
                             searchKey="name"
                             onRefresh={fetchConfigs}
                             filterableColumns={typeFilterColumns}
+                            enableRowSelection={canManage}
+                            // Load-bearing here: this list is re-fetched by a poll every
+                            // 10 seconds, and index-keyed selection would jump each time.
+                            getRowId={(config) => config.id}
+                            bulkActions={bulkActions}
+                            onBulkActionComplete={fetchConfigs}
                         />
                     </CardContent>
                 </Card>

@@ -11,6 +11,7 @@ import { revalidatePath } from "next/cache";
 import { auditService } from "@/services/audit-service";
 import { AUDIT_ACTIONS, AUDIT_RESOURCES } from "@/lib/core/audit-types";
 import { getErrorMessage } from "@/lib/logging/errors";
+import { BulkIdsSchema } from "@/lib/core/bulk-schema";
 
 /**
  * Returns all encryption profiles.
@@ -212,5 +213,46 @@ export async function recoverEncryptionKeyAction(
         return { success: true, data: result };
     } catch (e: unknown) {
         return { success: false, error: getErrorMessage(e) };
+    }
+}
+
+/**
+ * Deletes several encryption profiles.
+ *
+ * The archive index cache is cleared once after the batch rather than per profile. A
+ * parsed index outlives the key that opened it, so it has to go, but flushing it inside
+ * the loop would discard work the remaining deletions still benefit from.
+ */
+export async function bulkDeleteEncryptionProfiles(ids: string[]) {
+    const headersList = await headers();
+    const session = await auth.api.getSession({ headers: headersList });
+    if (!session) return { success: false as const, error: "Unauthorized" };
+
+    await checkPermission(PERMISSIONS.VAULT.WRITE);
+
+    const parsed = BulkIdsSchema.safeParse(ids);
+    if (!parsed.success) return { success: false as const, error: "Invalid request" };
+
+    try {
+        const result = await encryptionService.deleteEncryptionProfiles(parsed.data);
+
+        if (result.succeeded.length > 0) archiveIndexService.clear();
+
+        if (session.user) {
+            await auditService.log(
+                session.user.id,
+                AUDIT_ACTIONS.DELETE,
+                AUDIT_RESOURCES.SYSTEM,
+                { type: "EncryptionProfile", bulk: true, requested: parsed.data.length, succeeded: result.succeeded.length, failed: result.failed.length }
+            );
+        }
+
+        revalidatePath("/dashboard/vault");
+        revalidatePath("/dashboard/settings");
+        revalidatePath("/dashboard/jobs");
+
+        return { success: true as const, data: result };
+    } catch (e: unknown) {
+        return { success: false as const, error: getErrorMessage(e) };
     }
 }

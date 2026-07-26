@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -30,7 +30,9 @@ import {
   updateExcludePatternPreset,
   deleteExcludePatternPreset,
 } from "@/app/actions/templates";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type BulkAction } from "@/components/ui/data-table";
+import { unwrapBulkAction } from "@/lib/bulk-request";
+import { bulkDeleteExcludePatternPresets } from "@/app/actions/templates-bulk";
 import { ColumnDef } from "@tanstack/react-table";
 import { DateDisplay } from "@/components/utils/date-display";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -102,6 +104,25 @@ export function ExcludePatternPresetList() {
     }
     setIsSettingDefault(null);
   };
+
+  const bulkActions = useMemo<BulkAction<ExcludePatternPreset>[]>(() => [
+    {
+      id: "delete",
+      labels: { verb: "delete", verbPast: "deleted", noun: "exclude preset" },
+      icon: Trash2,
+      variant: "destructive",
+      itemName: (row) => row.name,
+      // Built-in entries ship with the product and the service refuses them anyway.
+      ineligible: (row) => (row.isSystem ? "Built-in, cannot be deleted" : null),
+      confirm: {
+        title: (rows) => `Delete ${rows.length} exclude preset${rows.length === 1 ? "" : "s"}?`,
+        description: () =>
+          "This cannot be undone. An entry that is still in use is kept and listed afterwards.",
+        confirmLabel: "Delete",
+      },
+      run: (rows) => unwrapBulkAction(bulkDeleteExcludePatternPresets(rows.map((row) => row.id))),
+    },
+  ], []);
 
   const columns: ColumnDef<ExcludePatternPreset>[] = [
     {
@@ -206,7 +227,15 @@ export function ExcludePatternPresetList() {
           </Button>
         </CardHeader>
         <CardContent>
-          <DataTable columns={columns} data={presets} isLoading={loading} />
+          <DataTable
+            columns={columns}
+            data={presets}
+            isLoading={loading}
+            enableRowSelection
+            getRowId={(row) => row.id}
+            bulkActions={bulkActions}
+            onBulkActionComplete={fetchPresets}
+          />
         </CardContent>
       </Card>
 

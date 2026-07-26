@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -30,7 +30,9 @@ import {
   updateSchedulePreset,
   deleteSchedulePreset,
 } from "@/app/actions/templates";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type BulkAction } from "@/components/ui/data-table";
+import { unwrapBulkAction } from "@/lib/bulk-request";
+import { bulkDeleteSchedulePresets } from "@/app/actions/templates-bulk";
 import { ColumnDef } from "@tanstack/react-table";
 import { DateDisplay } from "@/components/utils/date-display";
 
@@ -72,6 +74,23 @@ export function SchedulePresetList() {
       toast.error(res.error || "Failed to delete preset");
     }
   };
+
+  const bulkActions = useMemo<BulkAction<SchedulePreset>[]>(() => [
+    {
+      id: "delete",
+      labels: { verb: "delete", verbPast: "deleted", noun: "schedule preset" },
+      icon: Trash2,
+      variant: "destructive",
+      itemName: (row) => row.name,
+      confirm: {
+        title: (rows) => `Delete ${rows.length} schedule preset${rows.length === 1 ? "" : "s"}?`,
+        description: () =>
+          "This cannot be undone. An entry that is still in use is kept and listed afterwards.",
+        confirmLabel: "Delete",
+      },
+      run: (rows) => unwrapBulkAction(bulkDeleteSchedulePresets(rows.map((row) => row.id))),
+    },
+  ], []);
 
   const columns: ColumnDef<SchedulePreset>[] = [
     {
@@ -147,7 +166,15 @@ export function SchedulePresetList() {
           </Button>
         </CardHeader>
         <CardContent>
-          <DataTable columns={columns} data={presets} isLoading={loading} />
+          <DataTable
+            columns={columns}
+            data={presets}
+            isLoading={loading}
+            enableRowSelection
+            getRowId={(row) => row.id}
+            bulkActions={bulkActions}
+            onBulkActionComplete={fetchPresets}
+          />
         </CardContent>
       </Card>
 

@@ -171,3 +171,18 @@ export const AVAILABLE_PERMISSIONS = [
   { id: PERMISSIONS.TEMPLATES.READ, label: "View Templates", category: "Templates" },
   { id: PERMISSIONS.TEMPLATES.WRITE, label: "Manage Templates (Create/Edit/Delete)", category: "Templates" },
 ];
+
+/**
+ * The write permission guarding an adapter of the given type.
+ *
+ * Connections are one table but three permissions, so any endpoint touching them has to
+ * resolve the type before it can check anything. Falls back to the strictest.
+ */
+export function getWritePermissionForAdapterType(type: string): Permission {
+  switch (type) {
+    case "database": return PERMISSIONS.SOURCES.WRITE;
+    case "storage": return PERMISSIONS.DESTINATIONS.WRITE;
+    case "notification": return PERMISSIONS.NOTIFICATIONS.WRITE;
+    default: return PERMISSIONS.SOURCES.WRITE;
+  }
+}

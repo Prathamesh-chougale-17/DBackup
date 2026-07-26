@@ -1,4 +1,5 @@
 import prisma from "@/lib/prisma";
+import { runBulk, type BulkResult } from "@/lib/core/bulk";
 import { logger } from "@/lib/logging/logger";
 import { NotFoundError, ServiceError } from "@/lib/logging/errors";
 
@@ -119,4 +120,17 @@ export function parseExcludePatternPresetPatterns(patterns: string): string[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Deletes several exclude pattern presets, reporting per-entry outcomes.
+ *
+ * Each entry goes through the single-entry guard above, so a exclude pattern presets that is still in use
+ * is refused with its own reason while the rest of the batch continues.
+ */
+export async function deleteExcludePatternPresetMany(ids: string[]): Promise<BulkResult> {
+  const rows = await prisma.excludePatternPreset.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } });
+  const names = new Map(rows.map((row) => [row.id, row.name]));
+
+  return runBulk(ids, (id) => deleteExcludePatternPreset(id).then(() => undefined), (id) => names.get(id));
 }

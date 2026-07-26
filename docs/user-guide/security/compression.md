@@ -81,8 +81,6 @@ With encryption:
 
 In a file or folder backup, every file is compressed on its own. Files whose format is
 already compressed are stored as-is instead, even when the job has compression enabled.
-This covers video, audio, images, archives, ZIP containers such as `.docx`, `.xlsx` and
-`.apk`, web fonts, and encrypted files.
 
 Recompressing them gains a fraction of a percent at best, and costs the full CPU time plus a
 complete extra write and read of the file through a temporary file. On a photo or video
@@ -92,6 +90,44 @@ library that is the difference between a backup that finishes and one that does 
 This only skips the compression step. Nothing is left out. To leave files out of a backup,
 use [exclude patterns](/user-guide/features/file-backups) on the directory source.
 :::
+
+### Formats stored as-is
+
+Matched on the file extension, case-insensitive, and only the last one - so `photos.tar.gz`
+counts as `gz`.
+
+<!-- The table below is checked against src/lib/incompressible-formats.ts by
+     tests/unit/lint-guards/incompressible-formats-doc.test.ts. Edit both together. -->
+
+| Category | Extensions |
+| :--- | :--- |
+| Video | `3gp` `avi` `flv` `m2ts` `m4v` `mkv` `mov` `mp4` `mpeg` `mpg` `mts` `ts` `vob` `webm` `wmv` |
+| Audio | `aac` `ape` `flac` `m4a` `mka` `mp3` `oga` `ogg` `opus` `wma` |
+| Images | `avif` `gif` `heic` `heif` `jp2` `jpeg` `jpg` `jxl` `png` `webp` |
+| Archives | `7z` `br` `bz2` `cab` `gz` `lz4` `lzma` `rar` `tbz2` `tgz` `txz` `xz` `zip` `zst` |
+| ZIP containers | `apk` `docx` `epub` `ipa` `jar` `nupkg` `odp` `ods` `odt` `pptx` `vsix` `war` `whl` `xlsx` `xpi` |
+| Web fonts | `woff` `woff2` |
+| Encrypted | `age` `enc` `gpg` `pgp` |
+| Disk images | `dmg` |
+
+Some formats that look like they belong here are deliberately left out, because they
+compress well often enough to be worth the attempt:
+
+| Not on the list | Why |
+| :--- | :--- |
+| `pdf` | Streams inside a PDF may or may not be compressed, and an uncompressed one shrinks a lot. |
+| `tif` `tiff` `bmp` | Frequently uncompressed or LZW, both of which still gain. |
+| `ttf` `otf` | Uncompressed font tables. `woff` is the compressed variant and is listed above. |
+| `sqlite` `db` | Page-oriented and full of repetition, one of the best cases there is. |
+| `svg` | XML text. |
+| `asc` | Base64-armored ciphertext. The encoding overhead still gives back roughly a quarter, unlike the raw `.gpg`. |
+| `vmdk` `qcow2` | Either sparse-but-raw or already compressed, with no way to tell from the name. |
+
+If a format is missing from the first table and you are backing up a lot of it, that is
+worth [reporting](https://github.com/Skyfay/DBackup/issues) - the list ships in the code and
+grows with releases, without anything to reconfigure.
+
+### Behaviour
 
 It is automatic and needs no configuration. The job log names how many files were affected:
 

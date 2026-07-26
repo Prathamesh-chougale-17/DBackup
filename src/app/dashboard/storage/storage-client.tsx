@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { SortingState, ColumnFiltersState } from "@tanstack/react-table";
-import { ChevronsUpDown, HardDrive, RefreshCw } from "lucide-react";
+import { ChevronsUpDown, HardDrive, RefreshCw, Trash2, Lock, LockOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AdapterIcon } from "@/components/adapter/adapter-icon";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -31,7 +31,8 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type BulkAction } from "@/components/ui/data-table";
+import { requestBulk } from "@/lib/bulk-request";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { getColumns, FileInfo, RestoreMode } from "./columns";
@@ -330,6 +331,54 @@ export function StorageClient({ canDownload, canRestore, canDelete, canManageVau
         }
     }, [canDownload, selectedDestination]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    const bulkActions = useMemo<BulkAction<FileInfo>[]>(() => {
+        if (!canDelete || !selectedDestination) return [];
+
+        const runAction = (action: "delete" | "lock" | "unlock", rows: FileInfo[]) =>
+            requestBulk(`/api/storage/${selectedDestination}/files/bulk`, {
+                action,
+                paths: rows.map((file) => file.path),
+            });
+
+        return [
+            {
+                id: "lock",
+                labels: { verb: "lock", verbPast: "locked", noun: "backup" },
+                icon: Lock,
+                isAvailable: (rows) => rows.some((file) => !file.locked),
+                itemName: (file) => file.name,
+                ineligible: (file) => (file.locked ? "Already locked" : null),
+                run: (rows) => runAction("lock", rows),
+            },
+            {
+                id: "unlock",
+                labels: { verb: "unlock", verbPast: "unlocked", noun: "backup" },
+                icon: LockOpen,
+                isAvailable: (rows) => rows.some((file) => file.locked),
+                itemName: (file) => file.name,
+                ineligible: (file) => (file.locked ? null : "Not locked"),
+                run: (rows) => runAction("unlock", rows),
+            },
+            {
+                id: "delete",
+                labels: { verb: "delete", verbPast: "deleted", noun: "backup" },
+                icon: Trash2,
+                variant: "destructive",
+                itemName: (file) => file.name,
+                // A locked backup was deliberately protected. The server refuses it too,
+                // this only makes the refusal visible before the request goes out.
+                ineligible: (file) => (file.locked ? "Locked, unlock it first" : null),
+                confirm: {
+                    title: (rows) => `Delete ${rows.length} backup${rows.length === 1 ? "" : "s"}?`,
+                    description: () =>
+                        "This permanently removes the archives and their metadata from this destination. It cannot be undone.",
+                    confirmLabel: "Delete",
+                },
+                run: (rows) => runAction("delete", rows),
+            },
+        ];
+    }, [canDelete, selectedDestination]);
+
     const columns = useMemo(() => getColumns({
         onRestore: handleRestoreClick,
         onDownloadSnapshot: handleDownloadSnapshot,
@@ -471,7 +520,10 @@ export function StorageClient({ canDownload, canRestore, canDelete, canManageVau
                                 <CardTitle>Backups</CardTitle>
                             </CardHeader>
                             <CardContent>
-                                {loading ? (
+                                {/* Only the very first load swaps the table for a skeleton. A
+                                    refresh keeps the table mounted, otherwise the unmount
+                                    would discard any row selection mid-flow. */}
+                                {loading && files.length === 0 ? (
                                     <div className="space-y-4">
                                         {/* Toolbar skeleton */}
                                         <div className="flex items-center gap-2">
@@ -508,6 +560,11 @@ export function StorageClient({ canDownload, canRestore, canDelete, canManageVau
                                     </div>
                                 ) : (
                                     <DataTable
+                                        // A file is identified by its path, which is only
+                                        // unique within one destination. Remounting on a
+                                        // switch keeps a selection from carrying over into
+                                        // a bucket where those paths mean something else.
+                                        key={selectedDestination}
                                         columns={columns}
                                         data={files}
                                         filterableColumns={filterableColumns}
@@ -516,6 +573,11 @@ export function StorageClient({ canDownload, canRestore, canDelete, canManageVau
                                         columnFilters={columnFilters}
                                         onColumnFiltersChange={setColumnFilters}
                                         onRefresh={() => selectedDestination && fetchFiles(selectedDestination, showSystemConfigs)}
+                                        isLoading={loading}
+                                        enableRowSelection={canDelete}
+                                        getRowId={(file) => file.path}
+                                        bulkActions={bulkActions}
+                                        onBulkActionComplete={() => { if (selectedDestination) fetchFiles(selectedDestination, showSystemConfigs); }}
                                     />
                                 )}
                             </CardContent>

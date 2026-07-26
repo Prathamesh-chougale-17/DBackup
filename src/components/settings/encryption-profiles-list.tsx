@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -10,9 +10,10 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { toast } from "sonner"
 import { Loader2, Lock, Plus, Trash2, AlertTriangle, ShieldCheck, Download, Copy, Eye, Import } from "lucide-react"
 import { EncryptionProfile } from "@prisma/client"
-import { createEncryptionProfile, importEncryptionProfile, deleteEncryptionProfile, getEncryptionProfiles, revealMasterKey } from "@/app/actions/backup/encryption"
+import { createEncryptionProfile, importEncryptionProfile, deleteEncryptionProfile, getEncryptionProfiles, revealMasterKey, bulkDeleteEncryptionProfiles } from "@/app/actions/backup/encryption"
 import { DateDisplay } from "@/components/utils/date-display"
-import { DataTable } from "@/components/ui/data-table"
+import { DataTable, type BulkAction } from "@/components/ui/data-table"
+import { unwrapBulkAction } from "@/lib/bulk-request"
 import { Checkbox } from "@/components/ui/checkbox"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ColumnDef } from "@tanstack/react-table"
@@ -175,6 +176,25 @@ export function EncryptionProfilesList() {
         });
     }
 
+    const bulkActions = useMemo<BulkAction<EncryptionProfile>[]>(() => [
+        {
+            id: "delete",
+            labels: { verb: "delete", verbPast: "deleted", noun: "encryption profile" },
+            icon: Trash2,
+            variant: "destructive",
+            itemName: (profile) => profile.name,
+            confirm: {
+                title: (rows) => `Delete ${rows.length} encryption profile${rows.length === 1 ? "" : "s"}?`,
+                // The strongest warning in the app belongs here. Losing a key is not
+                // recoverable by any means DBackup has.
+                description: () =>
+                    "Every backup encrypted with these profiles becomes permanently unreadable. Make sure you hold a Recovery Kit for anything you still need.",
+                confirmLabel: "Delete",
+            },
+            run: (rows) => unwrapBulkAction(bulkDeleteEncryptionProfiles(rows.map((profile) => profile.id))),
+        },
+    ], []);
+
     const columns: ColumnDef<EncryptionProfile>[] = [
         {
             accessorKey: "name",
@@ -317,6 +337,10 @@ export function EncryptionProfilesList() {
                         data={profiles}
                         searchKey="name"
                         onRefresh={fetchProfiles}
+                        enableRowSelection
+                        getRowId={(profile) => profile.id}
+                        bulkActions={bulkActions}
+                        onBulkActionComplete={fetchProfiles}
                     />
                 )}
             </CardContent>

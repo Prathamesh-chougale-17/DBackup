@@ -35,6 +35,10 @@ vi.mock("@/lib/auth/permissions", () => ({
         SOURCES: { VIEW: "sources:view", WRITE: "sources:write" },
         NOTIFICATIONS: { READ: "notifications:read", WRITE: "notifications:write" },
     },
+    getWritePermissionForAdapterType: (type: string) =>
+        type === "storage" ? "destinations:write"
+            : type === "notification" ? "notifications:write"
+                : "sources:write",
 }));
 
 const mockFindMany = vi.fn().mockResolvedValue([]);

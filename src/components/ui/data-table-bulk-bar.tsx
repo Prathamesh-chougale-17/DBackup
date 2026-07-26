@@ -1,0 +1,204 @@
+"use client";
+
+import * as React from "react";
+import { toast } from "sonner";
+import { X } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { BulkConfirmDialog } from "@/components/ui/bulk-confirm-dialog";
+import { BulkResultDialog } from "@/components/ui/bulk-result-dialog";
+import type { BulkAction } from "@/components/ui/data-table-types";
+import { summarizeBulkResult, BULK_REQUEST_LIMIT, type BulkFailure, type BulkResult } from "@/lib/core/bulk";
+import { logger } from "@/lib/logging/logger";
+
+const log = logger.child({ component: "DataTableBulkBar" });
+
+interface DataTableBulkBarProps<TData> {
+    selectedRows: TData[];
+    actions: BulkAction<TData>[];
+    onClearSelection: () => void;
+    onComplete?: () => void | Promise<void>;
+}
+
+/**
+ * Action bar shown while rows are selected.
+ *
+ * It owns the whole sequence - confirm, run, split the partial result, report, clear,
+ * refetch - so that no call site re-derives it. In particular it deliberately avoids
+ * `toast.promise`, the pattern used for single-row actions elsewhere: that collapses a
+ * result into success or failure and would silently swallow the failed half of a batch.
+ */
+export function DataTableBulkBar<TData>({
+    selectedRows,
+    actions,
+    onClearSelection,
+    onComplete,
+}: DataTableBulkBarProps<TData>) {
+    const [pendingAction, setPendingAction] = React.useState<BulkAction<TData> | null>(null);
+    const [runningId, setRunningId] = React.useState<string | null>(null);
+    const [failures, setFailures] = React.useState<BulkFailure[] | null>(null);
+
+    const nameOf = React.useCallback(
+        (action: BulkAction<TData>, row: TData, index: number) =>
+            action.itemName?.(row) ?? `Item ${index + 1}`,
+        []
+    );
+
+    /** Splits the selection into what this action will touch and what it skips. */
+    const partition = React.useCallback(
+        (action: BulkAction<TData>) => {
+            const eligible: TData[] = [];
+            const skipped: { name: string; reason: string }[] = [];
+            selectedRows.forEach((row, index) => {
+                const reason = action.ineligible?.(row) ?? null;
+                if (reason) skipped.push({ name: nameOf(action, row, index), reason });
+                else eligible.push(row);
+            });
+            return { eligible, skipped };
+        },
+        [selectedRows, nameOf]
+    );
+
+    const report = React.useCallback((action: BulkAction<TData>, result: BulkResult) => {
+        const succeeded = result.succeeded.length;
+        const failed = result.failed.length;
+        const summary = summarizeBulkResult(result, action.labels);
+
+        if (failed === 0) {
+            toast.success(summary);
+            return;
+        }
+
+        const showDetails = () => setFailures(result.failed);
+
+        if (succeeded === 0 && failed === 1) {
+            // A single failure has room for its actual reason, which beats a count.
+            toast.error(result.failed[0].error);
+            return;
+        }
+
+        if (succeeded === 0) {
+            toast.error(summary, { action: { label: "Details", onClick: showDetails } });
+            return;
+        }
+
+        toast.warning(summary, {
+            action: {
+                label: failed === 1 ? "Show 1 failure" : `Show ${failed} failures`,
+                onClick: showDetails,
+            },
+        });
+    }, []);
+
+    const execute = React.useCallback(
+        async (action: BulkAction<TData>, rows: TData[]) => {
+            setRunningId(action.id);
+            try {
+                const result = await action.run(rows);
+                report(action, result);
+                if (result.succeeded.length > 0) onClearSelection();
+            } catch (error: unknown) {
+                // The action itself failed rather than any single row. Nothing is known
+                // about what got through, so the selection stays put for a retry.
+                log.error("Bulk action failed", { actionId: action.id }, error instanceof Error ? error : new Error(String(error)));
+                toast.error(error instanceof Error ? error.message : "The action could not be completed.");
+            } finally {
+                setRunningId(null);
+                setPendingAction(null);
+                await onComplete?.();
+            }
+        },
+        [report, onClearSelection, onComplete]
+    );
+
+    const start = React.useCallback(
+        (action: BulkAction<TData>) => {
+            const { eligible, skipped } = partition(action);
+
+            if (eligible.length === 0) {
+                toast.error(
+                    skipped[0]?.reason ?? "None of the selected entries can be used for this action."
+                );
+                return;
+            }
+            if (eligible.length > BULK_REQUEST_LIMIT) {
+                toast.error(`Select at most ${BULK_REQUEST_LIMIT} entries for one action.`);
+                return;
+            }
+
+            if (action.confirm) setPendingAction(action);
+            else void execute(action, eligible);
+        },
+        [partition, execute]
+    );
+
+    const visibleActions = actions.filter((action) => action.isAvailable?.(selectedRows) ?? true);
+    const confirmState = pendingAction ? partition(pendingAction) : null;
+
+    return (
+        <>
+            {selectedRows.length > 0 && visibleActions.length > 0 && (
+                <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border bg-muted/50 px-3 py-2">
+                    <span className="text-sm font-medium">
+                        {selectedRows.length} selected
+                    </span>
+                    <div className="flex flex-wrap items-center gap-2">
+                        {visibleActions.map((action) => {
+                            const Icon = action.icon;
+                            return (
+                                <Button
+                                    key={action.id}
+                                    size="sm"
+                                    variant={action.variant ?? "outline"}
+                                    className="h-8"
+                                    disabled={runningId !== null}
+                                    onClick={() => start(action)}
+                                >
+                                    {Icon && <Icon className="mr-2 h-4 w-4" />}
+                                    {action.label?.(selectedRows) ?? defaultLabel(action, selectedRows.length)}
+                                </Button>
+                            );
+                        })}
+                    </div>
+                    <Button
+                        size="sm"
+                        variant="ghost"
+                        className="ml-auto h-8"
+                        disabled={runningId !== null}
+                        onClick={onClearSelection}
+                    >
+                        <X className="mr-2 h-4 w-4" />
+                        Clear
+                    </Button>
+                </div>
+            )}
+
+            {pendingAction && confirmState && (
+                <BulkConfirmDialog
+                    open
+                    onOpenChange={(open) => !open && setPendingAction(null)}
+                    title={pendingAction.confirm!.title(confirmState.eligible)}
+                    description={pendingAction.confirm!.description(confirmState.eligible)}
+                    items={confirmState.eligible.map((row, index) => nameOf(pendingAction, row, index))}
+                    skipped={confirmState.skipped}
+                    confirmLabel={pendingAction.confirm!.confirmLabel}
+                    destructive={pendingAction.variant === "destructive"}
+                    isPending={runningId === pendingAction.id}
+                    onConfirm={() => void execute(pendingAction, confirmState.eligible)}
+                />
+            )}
+
+            <BulkResultDialog
+                open={failures !== null}
+                onOpenChange={(open) => !open && setFailures(null)}
+                title="Some entries were not processed"
+                failures={failures ?? []}
+            />
+        </>
+    );
+}
+
+/** "Delete 3". Derived from the action's labels so call sites do not repeat the verb. */
+function defaultLabel<TData>(action: BulkAction<TData>, count: number): string {
+    const verb = action.labels.verb;
+    return `${verb.charAt(0).toUpperCase()}${verb.slice(1)} ${count}`;
+}

@@ -16,7 +16,7 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Edit, Play, Trash2, Clock, Lock, Webhook, Copy, FolderOpen, FolderInput } from "lucide-react";
+import { Edit, Play, Trash2, Clock, Lock, Webhook, Copy, FolderOpen, FolderInput, Pause } from "lucide-react";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -31,7 +31,8 @@ import { Badge } from "@/components/ui/badge";
 import { Plus } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type BulkAction } from "@/components/ui/data-table";
+import { requestBulk } from "@/lib/bulk-request";
 import { ColumnDef } from "@tanstack/react-table";
 import { useMemo } from "react";
 import { useUserPreferences } from "@/hooks/use-user-preferences";
@@ -159,6 +160,47 @@ export function JobsClient({ canManage, canExecute, sources, destinations, notif
             }
         } catch { toast.error("Execution request failed"); }
     }, [router, autoRedirectOnJobStart]);
+
+    const bulkActions = useMemo<BulkAction<Job>[]>(() => {
+        if (!canManage) return [];
+
+        const runAction = (action: "delete" | "enable" | "disable", rows: Job[]) =>
+            requestBulk("/api/jobs/bulk", { action, ids: rows.map((job) => job.id) });
+
+        return [
+            {
+                id: "enable",
+                labels: { verb: "enable", verbPast: "enabled", noun: "job" },
+                icon: Play,
+                // Nothing to do when every selected job already runs.
+                isAvailable: (rows) => rows.some((job) => !job.enabled),
+                itemName: (job) => job.name,
+                run: (rows) => runAction("enable", rows),
+            },
+            {
+                id: "pause",
+                labels: { verb: "pause", verbPast: "paused", noun: "job" },
+                icon: Pause,
+                isAvailable: (rows) => rows.some((job) => job.enabled),
+                itemName: (job) => job.name,
+                run: (rows) => runAction("disable", rows),
+            },
+            {
+                id: "delete",
+                labels: { verb: "delete", verbPast: "deleted", noun: "job" },
+                icon: Trash2,
+                variant: "destructive",
+                itemName: (job) => job.name,
+                confirm: {
+                    title: (rows) => `Delete ${rows.length} job${rows.length === 1 ? "" : "s"}?`,
+                    description: () =>
+                        "This cannot be undone. Backups already written to storage are not affected.",
+                    confirmLabel: "Delete",
+                },
+                run: (rows) => runAction("delete", rows),
+            },
+        ];
+    }, [canManage]);
 
     const columns = useMemo<ColumnDef<Job>[]>(() => [
         {
@@ -399,6 +441,10 @@ export function JobsClient({ canManage, canExecute, sources, destinations, notif
                         data={jobs}
                         searchKey="name"
                         onRefresh={fetchJobs}
+                        enableRowSelection={canManage}
+                        getRowId={(job) => job.id}
+                        bulkActions={bulkActions}
+                        onBulkActionComplete={fetchJobs}
                     />
                 </CardContent>
             </Card>

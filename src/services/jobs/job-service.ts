@@ -5,6 +5,7 @@ import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { registry } from "@/lib/core/registry";
 import { registerAdapters } from "@/lib/adapters";
+import { runBulk, type BulkResult } from "@/lib/core/bulk";
 import type { DatabaseAdapter } from "@/lib/core/interfaces";
 
 registerAdapters();
@@ -429,6 +430,60 @@ export class JobService {
         scheduler.refresh().catch((e) => log.error("Scheduler refresh failed after deleteJob", {}, wrapError(e)));
 
         return deletedJob;
+    }
+
+    /**
+     * Deletes several jobs, reporting per-job outcomes instead of aborting on the first failure.
+     *
+     * The scheduler is refreshed once at the end rather than per job. It re-reads every
+     * job on each call, so refreshing inside the loop would repeat the identical full
+     * rebuild N times to reach the same state.
+     */
+    async deleteJobs(ids: string[]): Promise<BulkResult> {
+        const names = await this.jobNamesById(ids);
+
+        const result = await runBulk(
+            ids,
+            async (id) => { await prisma.job.delete({ where: { id } }); },
+            (id) => names.get(id)
+        );
+
+        if (result.succeeded.length > 0) {
+            scheduler.refresh().catch((e) => log.error("Scheduler refresh failed after deleteJobs", {}, wrapError(e)));
+        }
+
+        return result;
+    }
+
+    /**
+     * Enables or pauses several jobs.
+     *
+     * Absolute rather than a toggle: flipping each job in a mixed selection would only
+     * re-scramble it, so the caller states the target state it wants.
+     */
+    async setJobsEnabled(ids: string[], enabled: boolean): Promise<BulkResult> {
+        const names = await this.jobNamesById(ids);
+
+        const result = await runBulk(
+            ids,
+            async (id) => { await prisma.job.update({ where: { id }, data: { enabled } }); },
+            (id) => names.get(id)
+        );
+
+        if (result.succeeded.length > 0) {
+            scheduler.refresh().catch((e) => log.error("Scheduler refresh failed after setJobsEnabled", {}, wrapError(e)));
+        }
+
+        return result;
+    }
+
+    /** Names for the failure list, read up front because a deleted job cannot be named after. */
+    private async jobNamesById(ids: string[]): Promise<Map<string, string>> {
+        const jobs = await prisma.job.findMany({
+            where: { id: { in: ids } },
+            select: { id: true, name: true },
+        });
+        return new Map(jobs.map((job) => [job.id, job.name]));
     }
 
     async cloneJob(id: string, name?: string) {

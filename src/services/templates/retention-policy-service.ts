@@ -1,4 +1,5 @@
 import prisma from "@/lib/prisma";
+import { runBulk, type BulkResult } from "@/lib/core/bulk";
 import { logger } from "@/lib/logging/logger";
 import { NotFoundError, ServiceError } from "@/lib/logging/errors";
 import type { RetentionConfiguration } from "@/lib/core/retention";
@@ -129,4 +130,17 @@ export function parseRetentionPolicyConfig(
   } catch {
     return { mode: "NONE" };
   }
+}
+
+/**
+ * Deletes several retention policies, reporting per-entry outcomes.
+ *
+ * Each entry goes through the single-entry guard above, so a retention policies that is still in use
+ * is refused with its own reason while the rest of the batch continues.
+ */
+export async function deleteRetentionPolicyMany(ids: string[]): Promise<BulkResult> {
+  const rows = await prisma.retentionPolicy.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } });
+  const names = new Map(rows.map((row) => [row.id, row.name]));
+
+  return runBulk(ids, (id) => deleteRetentionPolicy(id).then(() => undefined), (id) => names.get(id));
 }

@@ -3,6 +3,7 @@ import prisma from "@/lib/prisma";
 import { logger } from "@/lib/logging/logger";
 import { ApiKeyError, NotFoundError, wrapError } from "@/lib/logging/errors";
 import { Permission } from "@/lib/auth/permissions";
+import { runBulk, type BulkResult } from "@/lib/core/bulk";
 
 const log = logger.child({ service: "ApiKeyService" });
 
@@ -173,6 +174,31 @@ export class ApiKeyService {
 
     await prisma.apiKey.delete({ where: { id } });
     log.info("API key deleted", { apiKeyId: id });
+  }
+
+  /** Deletes several API keys, reporting per-key outcomes. */
+  async deleteMany(ids: string[]): Promise<BulkResult> {
+    const names = await this.namesById(ids);
+    return runBulk(ids, (id) => this.delete(id), (id) => names.get(id));
+  }
+
+  /**
+   * Enables or disables several API keys.
+   *
+   * Absolute rather than a toggle, so a mixed selection converges on one state.
+   */
+  async toggleMany(ids: string[], enabled: boolean): Promise<BulkResult> {
+    const names = await this.namesById(ids);
+    return runBulk(ids, (id) => this.toggle(id, enabled).then(() => undefined), (id) => names.get(id));
+  }
+
+  /** Names for the failure list, read before a delete makes them unreadable. */
+  private async namesById(ids: string[]): Promise<Map<string, string>> {
+    const keys = await prisma.apiKey.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, name: true },
+    });
+    return new Map(keys.map((key) => [key.id, key.name]));
   }
 
   /**

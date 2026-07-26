@@ -13,7 +13,8 @@ import AdmZip from "adm-zip";
 import { registerAdapters } from "@/lib/adapters";
 import { logger } from "@/lib/logging/logger";
 import { EncryptionKeyRequiredError, ValidationError, getErrorMessage, wrapError } from "@/lib/logging/errors";
-import { isBackupFile, sidecarPathsFor, METADATA_SIDECAR_SUFFIX } from "@/lib/core/backup-files";
+import { isBackupFile, sidecarPathsFor, chainFolderOf, METADATA_SIDECAR_SUFFIX } from "@/lib/core/backup-files";
+import { dependentsOf, fileNameOf } from "./bulk-delete-order";
 
 const log = logger.child({ service: "StorageService" });
 
@@ -111,35 +112,90 @@ export class StorageService {
         const adapter = registry.get(adapterConfig.adapterId) as StorageAdapter;
         const config = await resolveAdapterConfig(adapterConfig);
 
-        const metaPath = filePath + ".meta.json";
+        const metadata = await this.readLockMetadata(adapter, config, filePath);
+        return this.writeLockState(adapterConfigId, adapter, config, filePath, metadata, !metadata.locked);
+    }
 
-        let metadata: BackupMetadata;
+    /**
+     * Sets a backup's lock to an explicit state.
+     *
+     * Absolute rather than a toggle, because a bulk lock over a mixed selection has to
+     * converge on one state instead of flipping each row and staying mixed.
+     */
+    async setLocked(adapterConfigId: string, filePath: string, locked: boolean): Promise<boolean> {
+        const adapterConfig = await prisma.adapterConfig.findUnique({
+            where: { id: adapterConfigId }
+        });
 
+        if (!adapterConfig) throw new Error("Storage not found");
+
+        const adapter = registry.get(adapterConfig.adapterId) as StorageAdapter;
+        const config = await resolveAdapterConfig(adapterConfig);
+
+        return this.setLockedWith(adapterConfigId, adapter, config, filePath, locked);
+    }
+
+    /**
+     * Lock state change for a caller that already resolved the adapter and its config.
+     *
+     * A batch resolves both once. Going through `setLocked` per file would repeat a Prisma
+     * read and a secret decryption for every row.
+     */
+    async setLockedWith(
+        adapterConfigId: string,
+        adapter: StorageAdapter,
+        config: unknown,
+        filePath: string,
+        locked: boolean,
+        // A batch updates the cache once at the end instead of rewriting the whole
+        // listing blob after every file.
+        options: { deferCacheUpdate?: boolean } = {}
+    ): Promise<boolean> {
+        const metadata = await this.readLockMetadata(adapter, config, filePath);
+        if (metadata.locked === locked) return locked;
+        return this.writeLockState(adapterConfigId, adapter, config, filePath, metadata, locked, options);
+    }
+
+    private async readLockMetadata(adapter: StorageAdapter, config: unknown, filePath: string): Promise<BackupMetadata> {
+        const metaPath = filePath + METADATA_SIDECAR_SUFFIX;
         try {
             if (!adapter.read) throw new Error("Adapter does not support reading metadata");
-            const content = await adapter.read(config, metaPath);
+            const content = await adapter.read(config as never, metaPath);
             if (!content) throw new Error("Metadata file not found");
-            metadata = JSON.parse(content);
+            return JSON.parse(content);
         } catch (e: unknown) {
-             log.error("Toggle lock error", { metaPath }, wrapError(e));
-             const message = e instanceof Error ? e.message : "Unknown error";
-             throw new Error(`Could not read metadata for this backup: ${message}`);
+            log.error("Lock metadata read error", { metaPath }, wrapError(e));
+            const message = e instanceof Error ? e.message : "Unknown error";
+            throw new Error(`Could not read metadata for this backup: ${message}`);
         }
+    }
 
-        metadata.locked = !metadata.locked;
+    private async writeLockState(
+        adapterConfigId: string,
+        adapter: StorageAdapter,
+        config: unknown,
+        filePath: string,
+        metadata: BackupMetadata,
+        locked: boolean,
+        options: { deferCacheUpdate?: boolean } = {}
+    ): Promise<boolean> {
+        const metaPath = filePath + METADATA_SIDECAR_SUFFIX;
+        metadata.locked = locked;
 
-        const tempPath = path.join(getTempDir(), `meta-${Date.now()}.json`);
+        const tempPath = path.join(getTempDir(), `meta-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
         await fs.writeFile(tempPath, JSON.stringify(metadata, null, 2));
 
         try {
-             await adapter.upload(config, tempPath, metaPath);
+            await adapter.upload(config as never, tempPath, metaPath);
         } finally {
-             await fs.unlink(tempPath).catch(() => {});
+            await fs.unlink(tempPath).catch(() => {});
         }
 
-        await this.updateStorageListCacheEntry(adapterConfigId, filePath, { locked: metadata.locked });
+        if (!options.deferCacheUpdate) {
+            await this.updateStorageListCacheEntry(adapterConfigId, filePath, { locked });
+        }
 
-        return metadata.locked;
+        return locked;
     }
 
 
@@ -195,37 +251,67 @@ export class StorageService {
         return listing.files;
     }
 
-    async appendStorageListCacheEntry(adapterConfigId: string, entry: RichFileInfo): Promise<void> {
+    /**
+     * Applies a change to the cached listing in a single write.
+     *
+     * The cache is one JSON blob per destination, so every entry-level helper is really a
+     * read-modify-write of the whole listing. Routing them all through here lets a batch
+     * that touches fifty files pay for one write instead of fifty.
+     *
+     * `mutate` returns null when nothing changed, which skips the write entirely.
+     */
+    async mutateStorageListCache(
+        adapterConfigId: string,
+        mutate: (files: RichFileInfo[]) => RichFileInfo[] | null
+    ): Promise<void> {
         const files = await this.loadCurrentCache(adapterConfigId);
         if (!files) return;
-        if (files.some(f => f.path === entry.path)) return;
-        files.push(entry);
+
+        const next = mutate(files);
+        if (!next) return;
+
         await prisma.storageListCache.update({
             where: { adapterConfigId },
-            data: { filesJson: serializeCachedListing(files), cachedAt: new Date() },
+            data: { filesJson: serializeCachedListing(next), cachedAt: new Date() },
         });
     }
 
+    async appendStorageListCacheEntry(adapterConfigId: string, entry: RichFileInfo): Promise<void> {
+        await this.mutateStorageListCache(adapterConfigId, (files) =>
+            files.some(f => f.path === entry.path) ? null : [...files, entry]
+        );
+    }
+
     async removeStorageListCacheEntry(adapterConfigId: string, filePath: string): Promise<void> {
-        const files = await this.loadCurrentCache(adapterConfigId);
-        if (!files) return;
-        const filtered = files.filter(f => f.path !== filePath);
-        if (filtered.length === files.length) return;
-        await prisma.storageListCache.update({
-            where: { adapterConfigId },
-            data: { filesJson: serializeCachedListing(filtered), cachedAt: new Date() },
+        await this.removeStorageListCacheEntries(adapterConfigId, [filePath]);
+    }
+
+    /** Drops several entries in one write. */
+    async removeStorageListCacheEntries(adapterConfigId: string, filePaths: string[]): Promise<void> {
+        if (filePaths.length === 0) return;
+        const removing = new Set(filePaths);
+        await this.mutateStorageListCache(adapterConfigId, (files) => {
+            const filtered = files.filter(f => !removing.has(f.path));
+            return filtered.length === files.length ? null : filtered;
         });
     }
 
     async updateStorageListCacheEntry(adapterConfigId: string, filePath: string, updates: Partial<RichFileInfo>): Promise<void> {
-        const files = await this.loadCurrentCache(adapterConfigId);
-        if (!files) return;
-        const idx = files.findIndex(f => f.path === filePath);
-        if (idx === -1) return;
-        files[idx] = { ...files[idx], ...updates };
-        await prisma.storageListCache.update({
-            where: { adapterConfigId },
-            data: { filesJson: serializeCachedListing(files), cachedAt: new Date() },
+        await this.updateStorageListCacheEntries(adapterConfigId, [filePath], updates);
+    }
+
+    /** Applies the same change to several entries in one write. */
+    async updateStorageListCacheEntries(adapterConfigId: string, filePaths: string[], updates: Partial<RichFileInfo>): Promise<void> {
+        if (filePaths.length === 0) return;
+        const updating = new Set(filePaths);
+        await this.mutateStorageListCache(adapterConfigId, (files) => {
+            let changed = false;
+            const next = files.map((file) => {
+                if (!updating.has(file.path)) return file;
+                changed = true;
+                return { ...file, ...updates };
+            });
+            return changed ? next : null;
         });
     }
 
@@ -596,26 +682,19 @@ export class StorageService {
      * folder that sorts after this archive is treated as dependent - the folder layout is
      * the chain, and being conservative here costs nothing but a refusal.
      */
-    private async chainDependentsOf(
+    async chainDependentsOf(
         adapterConfigId: string,
         filePath: string,
         adapter: StorageAdapter,
-        config: unknown
+        config: unknown,
+        alreadyDeleted: ReadonlySet<string> = new Set()
     ): Promise<string[]> {
-        const normalized = filePath.replace(/\\/g, "/");
-        const folder = normalized.slice(0, normalized.lastIndexOf("/"));
-        // Chain folders are named chain-<timestamp> by the runner; anything else is a flat
-        // full backup with nothing depending on it.
-        if (!/\/chain-[^/]+$/.test(folder)) return [];
+        const folder = chainFolderOf(filePath);
+        if (!folder) return [];
 
         try {
             const siblings = await adapter.list(config as never, folder);
-            const self = normalized.slice(normalized.lastIndexOf("/") + 1);
-            return siblings
-                .filter((f) => isBackupFile(f.name))
-                .map((f) => f.name)
-                .filter((name) => name > self)
-                .sort();
+            return dependentsOf(siblings.map((f) => f.name), fileNameOf(filePath), alreadyDeleted);
         } catch (e) {
             // Cannot prove it is safe, so do not claim it is.
             log.warn("Could not check chain membership before delete", { adapterConfigId, filePath }, wrapError(e));

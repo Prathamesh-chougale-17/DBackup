@@ -1,4 +1,5 @@
 import prisma from '@/lib/prisma';
+import { runBulk, type BulkResult } from '@/lib/core/bulk';
 import { encrypt, decrypt } from '@/lib/crypto';
 import crypto from 'crypto';
 
@@ -129,4 +130,20 @@ export async function getProfileMasterKey(profileId: string): Promise<Buffer> {
   }
 
   return Buffer.from(masterKeyHex, 'hex');
+}
+
+/**
+ * Deletes several encryption profiles, reporting per-profile outcomes.
+ *
+ * WARNING: as with the single delete, every backup encrypted with a removed profile
+ * becomes permanently unreadable.
+ */
+export async function deleteEncryptionProfiles(ids: string[]): Promise<BulkResult> {
+  const profiles = await prisma.encryptionProfile.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, name: true },
+  });
+  const names = new Map(profiles.map((profile) => [profile.id, profile.name]));
+
+  return runBulk(ids, (id) => deleteEncryptionProfile(id).then(() => undefined), (id) => names.get(id));
 }
