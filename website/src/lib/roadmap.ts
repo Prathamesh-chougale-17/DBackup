@@ -30,14 +30,6 @@ export interface RoadmapItem {
 
 export const ROADMAP_ITEMS: RoadmapItem[] = [
   {
-    slug: "file-based-linked-backup-restore",
-    title: "File-Based & Linked Backup and Restore",
-    description:
-      "Direct file-based backup and restore for engines that support file-level snapshots, with linked/incremental backups to reduce storage usage.",
-    status: "planned",
-    category: "backup-engine",
-  },
-  {
     slug: "stream-based-backup-pipeline",
     title: "Stream-based Backup Pipeline",
     description:
@@ -217,6 +209,15 @@ export interface ShippedItem {
 }
 
 export const SHIPPED_ITEMS: ShippedItem[] = [
+  {
+    slug: "file-folder-backups",
+    title: "File & Folder Backups",
+    description:
+      "Directory and file sources with a seekable, per-entry encrypted archive format, incremental backup chains, byte-range restores, and a completely rebuilt Recovery Kit.",
+    version: "v3.0.0",
+    releaseDate: "2026-07-26",
+    changelogAnchor: "v3-0-0-file-folder-backups-incremental-chains-and-general-improvements-fixes",
+  },
   {
     slug: "200-github-stars",
     title: "200 GitHub Stars",
