@@ -34,6 +34,11 @@ interface ArchiveFileTreeProps {
     selection: ArchiveTreeSelection;
     onSelectionChange: (selection: ArchiveTreeSelection) => void;
     disabled?: boolean;
+    /**
+     * Vault profile the user picked after a key prompt elsewhere on the page. Browsing opens
+     * the same backup, so it needs the same answer.
+     */
+    profileIdOverride?: string;
 }
 
 /**
@@ -46,7 +51,7 @@ interface ArchiveFileTreeProps {
  * beneath it.
  */
 export function ArchiveFileTree({
-    destinationId, file, jobSourceId, selection, onSelectionChange, disabled,
+    destinationId, file, jobSourceId, selection, onSelectionChange, disabled, profileIdOverride,
 }: ArchiveFileTreeProps) {
     const [levels, setLevels] = useState<Record<string, BrowseEntry[]>>({});
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -58,7 +63,7 @@ export function ArchiveFileTree({
             const res = await fetch(`/api/storage/${destinationId}/browse-archive`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ file, jobSourceId, prefix: prefix || undefined }),
+                body: JSON.stringify({ file, jobSourceId, prefix: prefix || undefined, ...(profileIdOverride ? { profileIdOverride } : {}) }),
             });
             const body = await res.json();
             if (!body.success) throw new Error(body.error || "Failed to browse backup");
@@ -72,7 +77,7 @@ export function ArchiveFileTree({
                 return next;
             });
         }
-    }, [destinationId, file, jobSourceId]);
+    }, [destinationId, file, jobSourceId, profileIdOverride]);
 
     useEffect(() => {
         if (!levels[""] && !loadingPrefixes.has("")) void loadLevel("");

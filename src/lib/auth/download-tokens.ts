@@ -31,6 +31,11 @@ interface DownloadToken {
         selections?: DownloadSelection[];
         /** Carried with the token so the browser's GET applies the same exclusions. */
         excludePatterns?: string[];
+        /**
+         * Vault profile chosen after a key prompt. Carried too, because the GET opens the
+         * archive again and would otherwise be asked for a key it has no way to answer.
+         */
+        profileIdOverride?: string;
         fileName: string;
     };
     /**
@@ -128,6 +133,7 @@ export function generateSelectionDownloadToken(params: {
     fileName: string;
     selections?: DownloadSelection[];
     excludePatterns?: string[];
+    profileIdOverride?: string;
 }): string {
     const token = crypto.randomBytes(32).toString("hex");
     const now = Date.now();
@@ -143,6 +149,7 @@ export function generateSelectionDownloadToken(params: {
             userId: params.userId,
             selections: params.selections,
             excludePatterns: params.excludePatterns,
+            profileIdOverride: params.profileIdOverride,
             fileName: params.fileName,
         },
     });

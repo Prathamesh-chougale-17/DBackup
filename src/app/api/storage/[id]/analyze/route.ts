@@ -31,7 +31,13 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
         checkPermissionWithContext(ctx, PERMISSIONS.STORAGE.RESTORE);
 
         const body = await req.json();
-        const { file, type } = body;
+        // profileIdOverride: the vault profile the user picked after being asked for a key.
+        // Every request that opens this backup carries it, because the one that raised the
+        // question is rarely the last one that needs the answer.
+        const { file, type, profileIdOverride } = body;
+        const keyOverride = typeof profileIdOverride === "string" && profileIdOverride
+            ? { profileId: profileIdOverride }
+            : undefined;
 
         if (!file || typeof file !== 'string' || file.includes('..') || file.startsWith('/')) {
             return NextResponse.json({ error: "Invalid file path" }, { status: 400 });
@@ -81,7 +87,7 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
 
                     if ((meta as BackupMetadata).archive?.formatVersion === 2) {
                         seekableArchiveMeta = meta as BackupMetadata;
-                        const summary = await archiveIndexService.summarize(params.id, file, seekableArchiveMeta);
+                        const summary = await archiveIndexService.summarize(params.id, file, seekableArchiveMeta, keyOverride);
                         if (summary) return NextResponse.json(summary);
                         // Sidecar missing or unreadable. Deliberately NOT falling through to
                         // the legacy shortcuts below - they only understand databases and
@@ -128,7 +134,7 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
         // carries a copy of its index as its last member, so the listing still works - it
         // just costs the download that the sidecar exists to avoid.
         if (seekableArchiveMeta) {
-            const summary = await archiveIndexService.summarizeFromArchive(tempFile, seekableArchiveMeta);
+            const summary = await archiveIndexService.summarizeFromArchive(tempFile, seekableArchiveMeta, keyOverride);
             if (summary) return NextResponse.json(summary);
         }
 

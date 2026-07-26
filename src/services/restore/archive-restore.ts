@@ -74,7 +74,7 @@ export async function restoreArchiveSnapshot(
 
     // Opens the archive remotely, reads the index (sidecar first), and verifies the chain
     // is complete - a missing sibling archive fails here, by name, before anything runs.
-    const archive = await openArchiveForRestore(input.storageConfigId, input.file);
+    const archive = await openArchiveForRestore(input.storageConfigId, input.file, input.keyOverride);
 
     try {
         const index = archive.index;

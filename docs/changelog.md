@@ -54,7 +54,7 @@ All notable changes to DBackup are documented here.
 ### 🎨 Improvements
 
 - **restore**: Encryption keys are now resolved the same way everywhere. Database restores, file restores, storage downloads and config restores previously each had their own idea of what to try when the profile a backup names no longer exists, which meant the same backup could be recoverable in one place and a dead end in another. All of them now run the same sequence: a key you supplied, then the profile the backup names, then every profile in the vault tested against the backup. A key you supplied is verified rather than trusted, so a wrong one is reported as wrong instead of producing a file that looks corrupt.
-- **restore**: Every place that opens an encrypted backup now asks for a key the same way, through one dialog. Browsing, analysing, restoring and downloading each used to answer a missing key differently - a prompt in one place, a bare error in another, silence in a third.
+- **restore**: Every place that opens an encrypted backup now asks for a key the same way, through one dialog. Browsing, analysing, restoring and downloading each used to answer a missing key differently - a prompt in one place, a bare error in another, silence in a third. The answer belongs to the whole page rather than to the one request that happened to ask, so it carries over to browsing folders, the dry run, the download and the restore itself, and into the background job that the restore starts.
 - **restore**: Reading the file index of a backup no longer downloads it several times over. The restore page asks for the same index once per directory source plus once for the dry run, and each request used to fetch and decrypt the index sidecar separately - including logging the same failure once per request.
 
 ### 🔄 Changed
@@ -99,6 +99,7 @@ All notable changes to DBackup are documented here.
 - **charts**: New render tests for the chart wrapper and all four chart types, asserting that the series, axes, grid, pie sectors and the legend's mapping back through the chart config actually reach the DOM. The chart components had no coverage at all, which made the Recharts 3 upgrade a change nothing could verify.
 - **restore**: New coverage for key resolution: the order it tries things in, that a key you supplied is reported as wrong rather than quietly replaced by another, and that an archive index seals against every key but the right one. Plus a regression test that a backup with no usable key asks for one instead of reporting an empty archive.
 - **vault**: New coverage for key recovery, including that a key which does not open the backup is never stored, that an existing profile is reused rather than duplicated, and that a generated profile name steps around one already taken.
+- **restore**: New coverage for the key prompt's own state machine: that a retry running into the same prompt keeps the dialog open with a reason instead of closing as though it had worked, that the answer is remembered for the rest of the page, and that a raw key never travels with an ordinary request.
 
 ### 🔧 CI/CD
 

@@ -74,6 +74,11 @@ export interface FileRestoreInput {
      */
     excludePatterns?: string[];
     target: FileRestoreTarget;
+    /**
+     * Which key to open the backup with, when the profile it names does not fit and the
+     * user picked another. Absent for the ordinary case, where the metadata decides.
+     */
+    keyOverride?: KeyOverride;
 }
 
 /** Everything needed to read files out of a snapshot, plus how to release it. */
@@ -252,7 +257,7 @@ export interface FileRestorePlan {
 
 /** Resolves a selection without restoring anything, for confirmation dialogs. */
 export async function planFileRestore(input: FileRestoreInput): Promise<FileRestorePlan> {
-    const archive = await openArchiveForRestore(input.storageConfigId, input.file);
+    const archive = await openArchiveForRestore(input.storageConfigId, input.file, input.keyOverride);
     try {
         const files = resolveFiles(archive.index, input.selections, input.excludePatterns);
         return {
@@ -273,7 +278,7 @@ export async function planFileRestore(input: FileRestoreInput): Promise<FileRest
  * immediately rather than after a long silent staging phase.
  */
 export async function streamFileRestore(input: FileRestoreInput): Promise<NodeJS.ReadableStream> {
-    const archive = await openArchiveForRestore(input.storageConfigId, input.file);
+    const archive = await openArchiveForRestore(input.storageConfigId, input.file, input.keyOverride);
     const files = resolveFiles(archive.index, input.selections, input.excludePatterns);
 
     if (files.length === 0) {
@@ -394,7 +399,7 @@ export async function restoreFilesToStorage(
         throw new ValidationError("Use streamFileRestore() for browser downloads", { field: "target" });
     }
 
-    const archive = await openArchiveForRestore(input.storageConfigId, input.file);
+    const archive = await openArchiveForRestore(input.storageConfigId, input.file, input.keyOverride);
     const files = resolveFiles(archive.index, input.selections, input.excludePatterns);
     const targets = await resolveTargets(input, [...new Set(files.map((f) => f.src))]);
 

@@ -171,6 +171,25 @@ describe("POST /api/storage/[id]/analyze - combined (manifest v2) archives", () 
         expect(body.directories).toBeUndefined();
     });
 
+    it("opens the backup with the profile the user picked after being asked", async () => {
+        // The answer to a key prompt has to reach the server, or choosing a profile does
+        // nothing and the same prompt comes straight back.
+        mockRead.mockResolvedValue(JSON.stringify({
+            archive: { formatVersion: 2, indexFile: ".index", encrypted: true, profileId: "gone", kdfSalt: "00", noncePrefix: "01" },
+            sourceType: "directory-only",
+        }));
+        mockSummarize.mockResolvedValue({ databases: [], directories: [], sourceType: undefined });
+
+        await POST(
+            createRequest({ file: "backups/job1/archive.tar", profileIdOverride: "picked-by-user" }),
+            createProps()
+        );
+
+        expect(mockSummarize).toHaveBeenCalledWith(
+            "dest-1", "backups/job1/archive.tar", expect.anything(), { profileId: "picked-by-user" }
+        );
+    });
+
     it("asks for a key instead of reporting an archive nobody can open as empty", async () => {
         // The regression: the metadata block's own catch swallowed this, so the route
         // downloaded the whole archive to fail again on the same key, then answered 200

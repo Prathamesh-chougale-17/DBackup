@@ -162,6 +162,17 @@ export class ArchiveIndexService {
         this.cache.delete(`${configId}::${file}`);
     }
 
+    /**
+     * Drops every cached index.
+     *
+     * Call when the vault changes. A cached index outlives the key that opened it, so
+     * deleting a profile would otherwise leave a backup that still lists its contents but
+     * can no longer be restored - which reads as a bug rather than as a missing key.
+     */
+    clear(): void {
+        this.cache.clear();
+    }
+
     private remember(key: string, index: Promise<ArchiveIndex | null>): void {
         if (this.cache.size >= CACHE_MAX_ENTRIES) {
             // Insertion-ordered, so the first key is the oldest.

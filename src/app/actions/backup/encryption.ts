@@ -6,6 +6,7 @@ import { checkPermission, getUserPermissions } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
 import * as encryptionService from "@/services/backup/encryption-service";
 import { recoverEncryptionKey } from "@/services/backup/key-recovery";
+import { archiveIndexService } from "@/services/backup/archive-index-service";
 import { revalidatePath } from "next/cache";
 import { auditService } from "@/services/audit-service";
 import { AUDIT_ACTIONS, AUDIT_RESOURCES } from "@/lib/core/audit-types";
@@ -143,6 +144,11 @@ export async function deleteEncryptionProfile(id: string) {
         // Warning: This action is destructive and might brick backups.
         // The service does the deletion. Caller should warn user.
         await encryptionService.deleteEncryptionProfile(id);
+        // A parsed archive index outlives the key that opened it. Left cached, a backup
+        // would keep listing its contents for another five minutes while every restore of
+        // it failed - so the vault change drops them here rather than in the service, which
+        // the index service already depends on.
+        archiveIndexService.clear();
         if (session.user) {
             await auditService.log(
                 session.user.id,

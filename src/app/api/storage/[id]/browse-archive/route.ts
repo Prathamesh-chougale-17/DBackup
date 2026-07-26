@@ -24,6 +24,8 @@ const BrowseSchema = z.object({
     jobSourceId: z.string().min(1).optional(),
     /** Directory to list, relative to that source's root. Omit for the root. */
     prefix: z.string().optional(),
+    /** Vault profile to open the backup with, when the one it names does not fit. */
+    profileIdOverride: z.string().min(1).optional(),
 });
 
 /**
@@ -46,7 +48,8 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
         if (!parsed.success) {
             return NextResponse.json({ success: false, error: parsed.error.issues[0]?.message ?? "Invalid request" }, { status: 400 });
         }
-        const { file, jobSourceId, prefix } = parsed.data;
+        const { file, jobSourceId, prefix, profileIdOverride } = parsed.data;
+        const keyOverride = profileIdOverride ? { profileId: profileIdOverride } : undefined;
 
         const storageConfig = await prisma.adapterConfig.findUnique({ where: { id } });
         if (!storageConfig || storageConfig.type !== "storage") {
@@ -74,14 +77,14 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
 
         // No source selected yet - list the directory sources to pick from.
         if (!jobSourceId) {
-            const summary = await archiveIndexService.summarize(id, file, meta);
+            const summary = await archiveIndexService.summarize(id, file, meta, keyOverride);
             if (!summary) {
                 return NextResponse.json({ success: false, error: "Could not read the backup's file index" }, { status: 502 });
             }
             return NextResponse.json({ success: true, data: { sources: summary.directories, entries: [] } });
         }
 
-        const entries = await archiveIndexService.browse(id, file, meta, jobSourceId, prefix);
+        const entries = await archiveIndexService.browse(id, file, meta, jobSourceId, prefix, keyOverride);
         if (!entries) {
             return NextResponse.json({ success: false, error: "Could not read the backup's file index" }, { status: 502 });
         }

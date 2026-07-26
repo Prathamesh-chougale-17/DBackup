@@ -49,6 +49,8 @@ interface EncryptionKeyResolutionDialogProps {
     onConfirm: (result: KeyResolutionResult) => void;
     /** Shows a spinner on the confirm button while the parent is processing. */
     loading?: boolean;
+    /** Why the last attempt did not work. Keeps the dialog usable for a second try. */
+    error?: string;
 }
 
 export function EncryptionKeyResolutionDialog({
@@ -59,6 +61,7 @@ export function EncryptionKeyResolutionDialog({
     canManageVault = true,
     onConfirm,
     loading = false,
+    error,
 }: EncryptionKeyResolutionDialogProps) {
     const [profiles, setProfiles] = useState<{ id: string; name: string }[]>([]);
     const [selectedProfileId, setSelectedProfileId] = useState<string>("");
@@ -155,6 +158,13 @@ export function EncryptionKeyResolutionDialog({
                         <AlertDescription className="text-xs font-mono break-all">
                             Expected profile ID: {profileIdHint}
                         </AlertDescription>
+                    </Alert>
+                )}
+
+                {error && (
+                    <Alert variant="destructive">
+                        <ShieldAlert className="h-4 w-4" />
+                        <AlertDescription className="text-sm">{error}</AlertDescription>
                     </Alert>
                 )}
 

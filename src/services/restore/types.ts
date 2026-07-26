@@ -50,5 +50,10 @@ export interface RestoreInput {
         user?: string;
         password?: string;
     };
+    /**
+     * Vault profile to open the backup with, when the one its metadata names does not fit
+     * and the user picked another. Absent for the ordinary case.
+     */
+    keyOverride?: { profileId?: string };
     triggerInfo?: TriggerInfo;
 }

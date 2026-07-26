@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -33,8 +33,8 @@ import type { ExcludePatternPreset } from "@prisma/client";
 import { resolveExcludePatterns, parseJsonStringArray } from "@/lib/exclude-groups";
 import { computeRestoreValidity } from "./restore-validation";
 import { parseRestoreScope, normalizeRestoreScope } from "@/components/dashboard/storage/restore-scope";
-import { EncryptionKeyResolutionDialog } from "@/components/common/encryption-key-resolution-dialog";
-import { useEncryptionKeyRecovery } from "@/hooks/use-encryption-key-recovery";
+import { EncryptionKeyResolutionDialog, type KeyResolutionResult } from "@/components/common/encryption-key-resolution-dialog";
+import { keyOverrideBody, useEncryptionKeyRecovery, type KeyOverrideBody } from "@/hooks/use-encryption-key-recovery";
 
 interface DatabaseInfo {
     name: string;
@@ -145,6 +145,19 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
     // analyzeBackup - which the mount effect depends on - must stay stable. `intercept`
     // itself does not change.
     const { intercept: interceptKeyRequest } = keyRecovery;
+    /**
+     * The answer to a key prompt, held in a ref rather than state.
+     *
+     * Opening this backup takes several requests - analyse, browse each folder, dry run,
+     * restore - and all of them need it, including the retry that runs in the same tick the
+     * answer arrives. A state update would not be visible to that retry.
+     */
+    const keyOverrideRef = useRef<KeyOverrideBody>({});
+    /** Records the answer, then hands back what every request should carry. */
+    const applyKeyResolution = useCallback((result?: KeyResolutionResult): KeyOverrideBody => {
+        if (result) keyOverrideRef.current = keyOverrideBody(result);
+        return keyOverrideRef.current;
+    }, []);
 
     // Directory Restore State (combined manifest v2 archives)
     const [directories, setDirectories] = useState<DirectoryAnalysis[]>([]);
@@ -361,18 +374,20 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
         }
     }, [targetSource, fetchTargetDatabases]);
 
-    const analyzeBackup = useCallback(async (file: FileInfo) => {
+    const analyzeBackup = useCallback(async (file: FileInfo, resolvedKey?: KeyResolutionResult) => {
         setIsAnalyzing(true);
         try {
             const res = await fetch(`/api/storage/${destinationId}/analyze`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ file: file.path, type: file.sourceType })
+                // The answer to an earlier key prompt rides along: this page opens the same
+                // backup several times over and each one needs it.
+                body: JSON.stringify({ file: file.path, type: file.sourceType, ...applyKeyResolution(resolvedKey) })
             });
 
             // No key for this backup means no file index, and no file index means an empty
             // page. Asking for one here is what turns that into something answerable.
-            if (await interceptKeyRequest(res, () => analyzeBackup(file))) return;
+            if (await interceptKeyRequest(res, (result) => analyzeBackup(file, result))) return;
 
             if (!res.ok) {
                 const data: { error?: string } = await res.json().catch(() => ({}));
@@ -417,7 +432,7 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
         } finally {
             setIsAnalyzing(false);
         }
-    }, [destinationId, wantsDatabases, wantsFiles, interceptKeyRequest]);
+    }, [destinationId, wantsDatabases, wantsFiles, interceptKeyRequest, applyKeyResolution]);
 
     // Analyze backup on mount
     useEffect(() => {
@@ -508,13 +523,19 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
             return;
         }
 
-        const timer = setTimeout(async () => {
+        const runDryRun = async (resolvedKey?: KeyResolutionResult): Promise<void> => {
             try {
                 const res = await fetch(`/api/storage/${destinationId}/restore-files`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ file: file.path, selections, excludePatterns, target: { kind: 'download' }, dryRun: true }),
+                    body: JSON.stringify({ file: file.path, selections, excludePatterns, target: { kind: 'download' }, dryRun: true, ...applyKeyResolution(resolvedKey) }),
                 });
+
+                // The dry run is often the first thing to notice a key that stopped working -
+                // the page may have been analysed while the profile still existed, or served
+                // from the index cache. Without this it only ever showed the message.
+                if (await interceptKeyRequest(res, (result) => runDryRun(result))) return;
+
                 const data = await res.json();
                 if (data.success) {
                     setRestorePlan(data.data);
@@ -528,11 +549,13 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                 setRestorePlan(null);
                 setPlanError(null);
             }
-        }, 500);
-        return () => clearTimeout(timer);
-    }, [file, hasDirectories, buildSelections, destinationId, excludePatterns]);
+        };
 
-    const handleDownloadSelection = async () => {
+        const timer = setTimeout(() => { void runDryRun(); }, 500);
+        return () => clearTimeout(timer);
+    }, [file, hasDirectories, buildSelections, destinationId, excludePatterns, interceptKeyRequest, applyKeyResolution]);
+
+    const handleDownloadSelection = async (resolvedKey?: KeyResolutionResult) => {
         if (!file) return;
         const selections = buildSelections();
         if (selections.length === 0) return;
@@ -546,8 +569,14 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
             const res = await fetch(`/api/storage/${destinationId}/restore-files`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ file: file.path, selections, excludePatterns, target: { kind: 'download' }, prepare: true }),
+                body: JSON.stringify({ file: file.path, selections, excludePatterns, target: { kind: 'download' }, prepare: true, ...applyKeyResolution(resolvedKey) }),
             });
+
+            if (await interceptKeyRequest(res, (result) => handleDownloadSelection(result))) {
+                toast.dismiss(toastId);
+                return;
+            }
+
             const payload = await res.json().catch(() => ({ error: 'Download failed' }));
             if (!res.ok || !payload?.data?.token) {
                 throw new Error(payload.error || 'Download failed');
@@ -633,7 +662,10 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                 databaseMapping: mapping,
                 directoryMapping,
                 ...(excludePatterns.length > 0 ? { excludePatterns } : {}),
-                privilegedAuth: auth
+                privilegedAuth: auth,
+                // The run is a background job with nobody to ask, so the answer travels
+                // with it rather than being resolved again inside it.
+                ...keyOverrideRef.current,
             };
 
             const res = await fetch(`/api/storage/${destinationId}/restore`, {
@@ -1265,6 +1297,7 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                                                         jobSourceId={d.entryId}
                                                         selection={d.selection}
                                                         onSelectionChange={(sel) => handleDirSelectionChange(d.entryId, sel)}
+                                                        profileIdOverride={keyRecovery.override?.profileIdOverride}
                                                     />
                                                 </div>
                                             )}
@@ -1372,7 +1405,7 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                                             variant="outline"
                                             size="sm"
                                             disabled={restoring || !!planError || buildSelections().length === 0}
-                                            onClick={handleDownloadSelection}
+                                            onClick={() => handleDownloadSelection()}
                                         >
                                             <Download className="h-3.5 w-3.5 mr-1.5" />
                                             Download selection (.tar.gz)
@@ -1598,6 +1631,7 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                 canManageVault={canManageVault}
                 onConfirm={keyRecovery.onConfirm}
                 loading={keyRecovery.loading}
+                error={keyRecovery.error}
             />
         </div>
     );

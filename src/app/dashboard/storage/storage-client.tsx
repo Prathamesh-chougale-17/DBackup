@@ -42,7 +42,7 @@ import { StorageHistoryTab } from "@/components/dashboard/storage/storage-histor
 import { StorageSettingsTab } from "@/components/dashboard/storage/storage-settings-tab";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EncryptionKeyResolutionDialog, type KeyResolutionResult } from "@/components/common/encryption-key-resolution-dialog";
-import { useEncryptionKeyRecovery } from "@/hooks/use-encryption-key-recovery";
+import { keyOverrideBody, useEncryptionKeyRecovery } from "@/hooks/use-encryption-key-recovery";
 import type { StorageHistoryTabRef } from "@/components/dashboard/storage/storage-history-tab";
 import type { StorageSettingsTabRef } from "@/components/dashboard/storage/storage-settings-tab";
 import { logger } from "@/lib/logging/logger";
@@ -185,12 +185,7 @@ export function StorageClient({ canDownload, canRestore, canDelete, canManageVau
             const response = await fetch(baseUrl, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    file: file.path,
-                    prepare: true,
-                    ...(keyResolution?.type === "rawKey" ? { rawKeyHex: keyResolution.keyHex } : {}),
-                    ...(keyResolution?.type === "profile" ? { profileIdOverride: keyResolution.profileId } : {}),
-                }),
+                body: JSON.stringify({ file: file.path, prepare: true, ...keyOverrideBody(keyResolution) }),
             });
 
             if (await keyRecovery.intercept(response, (result) => performDecryptedDownload(file, result))) {
@@ -294,7 +289,7 @@ export function StorageClient({ canDownload, canRestore, canDelete, canManageVau
      * An incremental archive only stores what changed, so downloading the file itself
      * would hand the user a delta. This assembles the full contents from the chain.
      */
-    const handleDownloadSnapshot = useCallback(async (file: FileInfo) => {
+    const handleDownloadSnapshot = useCallback(async (file: FileInfo, keyResolution?: KeyResolutionResult) => {
         if (!canDownload) {
             toast.error("You do not have permission to download backups");
             return;
@@ -308,12 +303,12 @@ export function StorageClient({ canDownload, canRestore, canDelete, canManageVau
             const res = await fetch(`/api/storage/${selectedDestination}/restore-files`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ file: file.path, target: { kind: "download" }, prepare: true }),
+                body: JSON.stringify({ file: file.path, target: { kind: "download" }, prepare: true, ...keyOverrideBody(keyResolution) }),
             });
 
             // Unpacking the archive needs its key, so this can ask for one just like a
             // decrypted download can.
-            if (await keyRecovery.intercept(res, () => handleDownloadSnapshot(file))) {
+            if (await keyRecovery.intercept(res, (result) => handleDownloadSnapshot(file, result))) {
                 setPendingKeyFile(file);
                 toast.dismiss(toastId);
                 return;
@@ -617,6 +612,7 @@ export function StorageClient({ canDownload, canRestore, canDelete, canManageVau
                 canManageVault={canManageVault}
                 onConfirm={keyRecovery.onConfirm}
                 loading={keyRecovery.loading}
+                error={keyRecovery.error}
             />
         </div>
     );
