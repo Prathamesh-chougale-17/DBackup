@@ -104,6 +104,8 @@ All notable changes to DBackup are documented here.
 
 ### 🧪 Tests
 
+- **lint-guards**: New guard that fails the build when the Recovery Kit's tool is missing from the repository or from the Docker image. A kit is assembled by reading it off disk and falls back to a placeholder when it is absent, so nothing else would have noticed.
+
 - Fixed the adapter DTO tests intermittently timing out in a full run. They reset the module registry before each of six tests, which re-evaluated the entire adapter graph - every storage, database and notification SDK - six times over; the graph now loads once per file.
 
 - **backup**: Round-trip coverage for the archive format against awkward inputs - paths past 100 characters, unicode, spaces, empty files - verified with real `tar` and the standalone recovery kit, since "an unencrypted archive extracts with `tar -xf`" and "the kit reads what the writer emits" are promises only running them can prove.
@@ -115,6 +117,8 @@ All notable changes to DBackup are documented here.
 - **restore**: New coverage for key resolution: the order it tries things in, that a key you supplied is reported as wrong rather than quietly replaced by another, and that an archive index seals against every key but the right one. Plus a regression test that a backup with no usable key asks for one instead of reporting an empty archive.
 - **vault**: New coverage for key recovery, including that a key which does not open the backup is never stored, that an existing profile is reused rather than duplicated, and that a generated profile name steps around one already taken.
 - **restore**: New coverage for the key prompt's own state machine: that a retry running into the same prompt keeps the dialog open with a reason instead of closing as though it had worked, that the answer is remembered for the rest of the page, and that a raw key never travels with an ordinary request.
+- **vault**: New coverage for the recovery tool's own helpers, now that they can be imported instead of driven through a terminal: that a menu row always fits the width it is given at four different terminal sizes, that a wrong key's output is told apart from each dump format's opening bytes, and that the decrypted output is never named over its own input.
+- **vault**: New coverage for multi-key kits: that each profile gets a file named after it, that two profiles sharing a name stay apart, that the index maps a backup's profile to its key, and - in the tool - that the right key is picked by profile id, that a keys folder without an index still works by trying them, and that a kit whose keys all fail says which it tried.
 - **vault**: New coverage for the generated kit itself: that it ships the tool rather than a placeholder, that the launchers arrive executable, and that the README gives the terminal command and the macOS workaround.
 - **vault**: New coverage for restoring one named database out of both backup formats, and for an unknown name being answered with the list of databases the backup does contain.
 - **vault**: New coverage for a multi-database backup coming out as one dump per database with no archive left behind, and for every kind of restore defaulting to the same output folder.

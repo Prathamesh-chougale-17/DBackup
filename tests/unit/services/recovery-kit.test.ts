@@ -7,12 +7,16 @@ import { buildRecoveryKit, RECOVERY_TOOL } from "@/services/backup/recovery-kit"
 
 const KEY_HEX = "ab".repeat(32);
 
-async function buildKit() {
-    const zip = new AdmZip(await buildRecoveryKit({
-        profileName: "Production", masterKeyHex: KEY_HEX, generatedAt: "2026-07-26T12:00:00.000Z",
-    }));
+async function buildKit(profiles = [{ id: "p1", name: "Production", masterKeyHex: KEY_HEX }]) {
+    const zip = new AdmZip(await buildRecoveryKit({ profiles, generatedAt: "2026-07-26T12:00:00.000Z" }));
     return new Map(zip.getEntries().map((entry) => [entry.entryName, entry]));
 }
+
+const SECOND_KEY = "cd".repeat(32);
+const TWO_PROFILES = [
+    { id: "p1", name: "Production", masterKeyHex: KEY_HEX },
+    { id: "p2", name: "Legacy 2024 / old", masterKeyHex: SECOND_KEY },
+];
 
 /** Unix mode as an unzip tool reads it: the top 16 bits of the external attributes. */
 function modeOf(entry: AdmZip.IZipEntry): number {
@@ -63,7 +67,10 @@ describe("recovery kit", () => {
         const readme = (await buildKit()).get("README.txt")!.getData().toString("utf-8");
 
         expect(readme).toContain(`node ${RECOVERY_TOOL}`);
-        expect(readme).toMatch(/right-click/i);
+        // Apple removed the right-click shortcut in macOS 15, so the readme has to name
+        // the Privacy & Security route that replaced it.
+        expect(readme).toMatch(/Privacy & Security/);
+        expect(readme).toMatch(/Open Anyway/);
         expect(readme).toMatch(/Command Prompt/);
         expect(readme).toMatch(/Terminal/);
         expect(readme).toMatch(/cd \/path\/to\/this\/folder/);
@@ -72,5 +79,51 @@ describe("recovery kit", () => {
     it("names the profile it belongs to", async () => {
         const readme = (await buildKit()).get("README.txt")!.getData().toString("utf-8");
         expect(readme).toContain("Production");
+    });
+});
+
+describe("recovery kit with several profiles", () => {
+    it("gives each profile its own key file, named after it", async () => {
+        const entries = await buildKit(TWO_PROFILES);
+
+        expect(entries.get("keys/Production.key")!.getData().toString("utf-8")).toBe("ab".repeat(32));
+        // Characters a filesystem would object to are replaced, and the name stays readable.
+        expect(entries.get("keys/Legacy-2024-old.key")!.getData().toString("utf-8")).toBe("cd".repeat(32));
+        // No single-key file to be mistaken for the whole story.
+        expect(entries.has("master.key")).toBe(false);
+    });
+
+    it("indexes the keys by the profile id a backup records", async () => {
+        // This is what lets the tool pick the right key outright instead of trying each one.
+        const entries = await buildKit(TWO_PROFILES);
+        const index = JSON.parse(entries.get("keys/keys.json")!.getData().toString("utf-8"));
+
+        expect(index.keys).toEqual([
+            { profileId: "p1", name: "Production", file: "Production.key" },
+            { profileId: "p2", name: "Legacy 2024 / old", file: "Legacy-2024-old.key" },
+        ]);
+    });
+
+    it("keeps two profiles of the same name apart", async () => {
+        const entries = await buildKit([
+            { id: "p1", name: "Backup", masterKeyHex: KEY_HEX },
+            { id: "p2", name: "Backup", masterKeyHex: SECOND_KEY },
+        ]);
+
+        expect(entries.has("keys/Backup.key")).toBe(true);
+        expect(entries.has("keys/Backup-2.key")).toBe(true);
+    });
+
+    it("names every profile it covers in the readme", async () => {
+        const readme = (await buildKit(TWO_PROFILES)).get("README.txt")!.getData().toString("utf-8");
+
+        expect(readme).toContain("Production");
+        expect(readme).toContain("Legacy 2024 / old");
+        // The blast radius is stated, not implied.
+        expect(readme).toMatch(/every backup made with any of these profiles/);
+    });
+
+    it("refuses to build a kit with no profiles at all", async () => {
+        await expect(buildRecoveryKit({ profiles: [] })).rejects.toThrow(/at least one/);
     });
 });

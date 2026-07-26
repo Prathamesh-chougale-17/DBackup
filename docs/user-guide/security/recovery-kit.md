@@ -20,6 +20,18 @@ recovery-kit/
 └── START-Linux.sh          # Launcher
 ```
 
+A kit covering several profiles carries a `keys/` folder instead of `master.key`, with one
+file per profile named after it and an index tying each key to the backups it opens:
+
+```
+recovery-kit/
+├── keys/
+│   ├── Production.key
+│   ├── Legacy-2024.key
+│   └── keys.json           # which key opens which backups
+└── ...
+```
+
 One tool handles every backup format DBackup writes - database dumps, file backups and
 incremental chains, encrypted or not. It works out which one it is looking at, so you do
 not have to, and everything it restores lands in a `restored` folder ready to use.
@@ -56,9 +68,21 @@ damaged archive never leaves something that looks like a recovered file.
 ## Downloading a Recovery Kit
 
 1. Go to **Settings** → **Vault**
-2. Click on an encryption profile
-3. Click **Download Recovery Kit**
-4. Save the zip file securely
+2. Click **Recovery Kit**
+3. Tick the encryption profiles the kit should carry - everything is ticked by default
+4. Click **Download** and save the zip securely
+
+One kit can hold several keys. That is usually what you want: a backup records which
+profile encrypted it, so the tool picks the right key by itself and you never have to work
+out which of your kits belongs to which job. Untick profiles when you need a kit that only
+opens part of your backups - handing one to someone who should not see everything, for
+instance.
+
+::: danger A multi-key kit opens everything
+A kit with one key exposes one profile's backups if it leaks. A kit with all of them
+exposes all of them. Weigh that against the convenience before you store it somewhere less
+protected than your backups are.
+:::
 
 ::: danger Store Securely
 The Recovery Kit contains your encryption key! Store it:
@@ -116,10 +140,15 @@ of a chain, or restoring only part of it - certain files, or certain databases b
 You never have to type the key: the tool reads `master.key` from its own folder. If the key
 is somewhere else, it asks for it.
 
-::: tip macOS may refuse to open the launcher
-`START-macOS.command` arrives from the internet, so Gatekeeper blocks the first
-double-click. Right-click it, choose **Open**, and confirm - after that it starts normally.
-The terminal command above works either way.
+::: tip macOS blocks the launcher on its first run
+Anything downloaded from the internet is quarantined, so the first double-click is refused
+with *"Apple could not verify START-macOS.command is free of malware"*. Click **Done**, then
+open **System Settings → Privacy & Security**, scroll to **Security**, and click **Open
+Anyway** next to the blocked file. Confirm with Touch ID or your password, then **Open
+Anyway** once more. It starts normally from then on.
+
+On macOS 14 and older, right-clicking the file and choosing **Open** does the same in one
+step. Either way, the terminal command above is unaffected by this.
 :::
 
 ## Command line
@@ -293,17 +322,29 @@ cd /path/to/the/kit
 node dbackup-recover.js
 ```
 
-### macOS: the launcher will not open at all
+### macOS: "Apple could not verify ... is free of malware"
 
-Gatekeeper blocks a file that came from the internet on its first launch. Right-click
-`START-macOS.command`, choose **Open**, and confirm.
+Gatekeeper quarantines anything downloaded from the internet. The dialog only offers *Move
+to Trash* and *Done* - the approval lives elsewhere:
+
+1. Click **Done**.
+2. **System Settings → Privacy & Security**, scroll to **Security**.
+3. **Open Anyway** next to `START-macOS.command`, confirm, then **Open Anyway** again.
+
+macOS 14 and older allow the shortcut of right-clicking the file and choosing **Open**.
+Apple removed that in macOS 15. Running `node dbackup-recover.js` from a terminal avoids the
+whole thing.
 
 ### "Decryption failed. Either the key is wrong or the backup is damaged."
 
-The `master.key` in this folder does not open this backup. Each encryption profile has its
-own key, so check you have the kit for the profile the job used - the backup's `.meta.json`
-names it under `encryption.profileId`. If the key is right, the backup file itself is
-damaged and needs downloading again.
+The key in this folder does not open this backup. Each encryption profile has its own key,
+so check you have the kit for the profile the job used - the backup's `.meta.json` names it
+under `encryption.profileId`. Downloading a kit that covers every profile avoids the
+question entirely. If the key is right, the backup file itself is damaged and needs
+downloading again.
+
+A kit with several keys reports this as *"None of the N keys in this kit open ..."* and
+lists what it tried.
 
 The same cause reads as `Authentication failed for entry N` on a file backup, which
 verifies each entry separately.

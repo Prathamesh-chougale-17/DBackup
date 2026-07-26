@@ -125,20 +125,190 @@ const isHexKey = (value) => typeof value === "string" && /^[0-9a-fA-F]{64}$/.tes
 const DEFAULT_OUTPUT_DIR = path.resolve(process.cwd(), "restored");
 
 /**
- * Reads master.key from the folder this script sits in.
+ * Every key this kit holds, from the folder the script sits in.
  *
- * The kit ships the key as a file and then used to tell people to paste it on the command
- * line, which put it in shell history and in the process list. Reading it is both easier
- * and quieter.
+ * Two shapes. A kit for one profile ships `master.key`. A kit covering several ships a
+ * `keys/` folder with one file per profile plus `keys/keys.json`, which ties each key to
+ * the profile id a backup records - so the right one can be picked outright rather than
+ * tried.
+ *
+ * The kit ships keys as files and used to tell people to paste them on the command line,
+ * which put them in shell history and in the process list. Reading them is easier and
+ * quieter.
  */
-function readKeyFile() {
-    for (const candidate of [path.join(__dirname, "master.key"), path.join(process.cwd(), "master.key")]) {
-        try {
-            const contents = fs.readFileSync(candidate, "utf-8").trim();
-            if (isHexKey(contents)) return { key: contents, source: candidate };
-        } catch { /* not there, try the next */ }
+function loadKeys() {
+    for (const root of [__dirname, process.cwd()]) {
+        const keys = [];
+
+        const single = readHexFile(path.join(root, "master.key"));
+        if (single) keys.push({ name: "master.key", hex: single });
+
+        const index = readJson(path.join(root, "keys", "keys.json"));
+        if (index && Array.isArray(index.keys)) {
+            for (const entry of index.keys) {
+                const hex = readHexFile(path.join(root, "keys", entry.file));
+                if (hex) keys.push({ name: entry.name ?? entry.file, hex, profileId: entry.profileId });
+            }
+        } else {
+            // A keys/ folder without its index still works - the names come from the
+            // filenames, and the right key is found by trying rather than by lookup.
+            for (const file of listKeyFiles(path.join(root, "keys"))) {
+                const hex = readHexFile(path.join(root, "keys", file));
+                if (hex) keys.push({ name: file.replace(/\.key$/, ""), hex });
+            }
+        }
+
+        if (keys.length > 0) return { keys, source: root };
     }
-    return null;
+
+    return { keys: [], source: null };
+}
+
+function readHexFile(target) {
+    try {
+        const contents = fs.readFileSync(target, "utf-8").trim();
+        return isHexKey(contents) ? contents : null;
+    } catch {
+        return null;
+    }
+}
+
+function listKeyFiles(dir) {
+    try {
+        return fs.readdirSync(dir).filter((name) => name.endsWith(".key")).sort();
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * The key for a backup, when it can be known without trying.
+ *
+ * A backup records the profile that encrypted it, so a kit that carries the same id knows
+ * the answer outright. With a single key there is nothing to choose. Otherwise the caller
+ * has to test candidates against the backup itself.
+ */
+function keyFor(keys, profileId) {
+    if (keys.length === 0) return null;
+    if (profileId) {
+        const exact = keys.find((key) => key.profileId === profileId);
+        if (exact) return exact;
+    }
+    return keys.length === 1 ? keys[0] : null;
+}
+
+/** Human-readable summary of what the kit is carrying, for the banner. */
+function describeKeys({ keys, source }) {
+    if (keys.length === 0) return "No key found in this folder";
+    if (keys.length === 1) return `Key loaded from ${path.basename(source ?? "")}`;
+    return `${keys.length} keys loaded: ${keys.map((key) => key.name).join(", ")}`;
+}
+
+/** The encryption profile a backup was made with, read without needing any key. */
+function recordedProfileId(backupPath) {
+    const manifest = peekManifest(backupPath);
+    if (manifest) return manifest.encryption?.profileId;
+    return readJson(`${backupPath}.meta.json`)?.encryption?.profileId;
+}
+
+/**
+ * Works out which key opens a backup.
+ *
+ * The profile a backup records is normally enough, and that costs nothing. Trying keys is
+ * the fallback for when it is not - a profile deleted and created again elsewhere carries
+ * a different id, and a `keys/` folder assembled by hand has no index at all.
+ *
+ * @returns The key as hex, or undefined when the backup needs none.
+ */
+function resolveKey(backupPath, keys) {
+    if (keys.length === 0) return undefined;
+
+    const profileId = recordedProfileId(backupPath);
+    const known = keyFor(keys, profileId);
+    if (known) return known.hex;
+
+    for (const candidate of keys) {
+        if (keyOpens(backupPath, candidate.hex)) return candidate.hex;
+    }
+
+    throw new Error(
+        `None of the ${keys.length} keys in this kit open ${path.basename(backupPath)}` +
+        `${profileId ? ` (it was encrypted with profile ${profileId})` : ""}. ` +
+        `Tried: ${keys.map((key) => key.name).join(", ")}`
+    );
+}
+
+/** Whether a candidate key opens this backup, judged as cheaply as its format allows. */
+function keyOpens(backupPath, hexKey) {
+    const manifest = peekManifest(backupPath);
+    if (manifest) {
+        // Exact: the archive's index carries an authentication tag, so a wrong key cannot
+        // parse it. Costs one manifest and one index read.
+        let archive;
+        try {
+            archive = openArchive(backupPath, hexKey);
+            return true;
+        } catch {
+            return false;
+        } finally {
+            if (archive) { try { fs.closeSync(archive.fd); } catch { /* already gone */ } }
+        }
+    }
+
+    return headLooksDecrypted(backupPath, hexKey);
+}
+
+/**
+ * Heuristic check on the first kilobyte of a whole-file backup.
+ *
+ * These are one AES-GCM stream whose tag only verifies at the very end, so proving a key
+ * properly would mean decrypting the entire dump once per candidate. Instead the leading
+ * bytes are deciphered with `update()` alone - which skips tag verification - and judged by
+ * what the plaintext should look like.
+ */
+function headLooksDecrypted(backupPath, hexKey) {
+    const meta = readJson(`${backupPath}.meta.json`);
+    const encryption = meta?.encryption;
+    if (!encryption?.iv || !encryption?.authTag) return false;
+
+    let fd;
+    try {
+        fd = fs.openSync(backupPath, "r");
+        const head = Buffer.alloc(1024);
+        const read = fs.readSync(fd, head, 0, head.length, 0);
+        if (read === 0) return false;
+
+        const decipher = crypto.createDecipheriv(
+            "aes-256-gcm",
+            Buffer.from(hexKey, "hex"),
+            Buffer.from(encryption.iv, "hex")
+        );
+        decipher.setAuthTag(Buffer.from(encryption.authTag, "hex"));
+        return looksLikeBackupContent(decipher.update(head.subarray(0, read)), meta.compression);
+    } catch {
+        return false;
+    } finally {
+        if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already gone */ } }
+    }
+}
+
+/** Recognises the openings DBackup's dump formats produce. */
+function looksLikeBackupContent(chunk, compression) {
+    if (chunk.length < 2) return false;
+
+    // GZIP, either from the pipeline or from a dump tool that compresses internally.
+    if (chunk[0] === 0x1f && chunk[1] === 0x8b) return true;
+    if (compression === "GZIP") return false;
+
+    const startsWith = (text) => chunk.length >= text.length && chunk.subarray(0, text.length).toString("ascii") === text;
+    if (startsWith("PGDMP")) return true;               // pg_dump custom format
+    if (startsWith("SQLite format 3")) return true;
+    if (startsWith("REDIS")) return true;
+    // POSIX tar writes "ustar" at offset 257 - a multi-database backup.
+    if (chunk.length >= 262 && chunk.subarray(257, 262).toString("ascii") === "ustar") return true;
+
+    // Brotli, or a plain SQL dump.
+    return chunk.filter((byte) => byte >= 0x20 && byte <= 0x7e).length / chunk.length > 0.7;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -963,6 +1133,26 @@ function readLine() {
 }
 
 /**
+ * Trims one menu row to the terminal's width, so it can never wrap.
+ *
+ * A wrapped row breaks the redraw arithmetic, and it reads badly besides. The label is what
+ * identifies the backup, so the hint gives up its space first and only what is left over is
+ * taken from the label itself.
+ */
+function fitRow(marker, label, hint) {
+    const budget = Math.max(16, (process.stdout.columns || 80) - 1 - marker.length);
+    const gap = hint ? 2 : 0;
+
+    if (label.length + gap + (hint?.length ?? 0) <= budget) return { label, hint };
+
+    const shortLabel = label.length > budget ? `${label.slice(0, budget - 1)}…` : label;
+    const room = budget - shortLabel.length - gap;
+    if (!hint || room < 2) return { label: shortLabel, hint: "" };
+
+    return { label: shortLabel, hint: hint.length > room ? `${hint.slice(0, room - 1)}…` : hint };
+}
+
+/**
  * A menu the user drives with the arrow keys, falling back to typing a number.
  *
  * Raw mode is not available everywhere this runs - a piped stdin, some CI shells, the
@@ -974,25 +1164,49 @@ function select(title, options) {
 
     return new Promise((resolve) => {
         let cursor = 0;
-        const render = (first) => {
-            if (!first) process.stdout.write(`\x1b[${options.length + 1}A`);
-            process.stdout.write(`${c.bold(title)}\x1b[K\n`);
+        /**
+         * Physical terminal rows the last frame occupied.
+         *
+         * Counted rather than assumed. A row wider than the terminal wraps onto a second
+         * row, and walking back up one row per option then lands the cursor mid-menu -
+         * which is how every keypress came to leave another copy of the menu behind. fitRow
+         * should prevent that, but the redraw must not depend on it being right.
+         */
+        let lastRows = 0;
+
+        const render = () => {
+            if (lastRows > 0) process.stdout.write(`\x1b[${lastRows}A\x1b[0J`);
+
+            const width = Math.max(1, process.stdout.columns || 80);
+            const rowsFor = (text) => Math.max(1, Math.ceil(text.length / width));
+            let rows = 0;
+
+            const titleText = `  ${title.trim()}`;
+            process.stdout.write(`${c.bold(titleText)}\n`);
+            rows += rowsFor(titleText);
+
             options.forEach((option, i) => {
-                const marker = i === cursor ? c.cyan(" > ") : "   ";
-                const text = i === cursor ? c.bold(option.label) : option.label;
-                const hint = option.hint ? `  ${c.dim(option.hint)}` : "";
-                process.stdout.write(`${marker}${text}${hint}\x1b[K\n`);
+                const marker = i === cursor ? " > " : "   ";
+                const { label, hint } = fitRow(marker, option.label, option.hint);
+                const plain = `${marker}${label}${hint ? `  ${hint}` : ""}`;
+                const shown = i === cursor
+                    ? `${c.cyan(marker)}${c.bold(label)}${hint ? `  ${c.dim(hint)}` : ""}`
+                    : `${marker}${label}${hint ? `  ${c.dim(hint)}` : ""}`;
+                process.stdout.write(`${shown}\n`);
+                rows += rowsFor(plain);
             });
+
+            lastRows = rows;
         };
 
         readline.emitKeypressEvents(process.stdin);
         process.stdin.setRawMode(true);
         process.stdin.resume();
-        render(true);
+        render();
 
         const onKey = (_str, key) => {
-            if (key.name === "up") { cursor = (cursor - 1 + options.length) % options.length; render(false); return; }
-            if (key.name === "down") { cursor = (cursor + 1) % options.length; render(false); return; }
+            if (key.name === "up") { cursor = (cursor - 1 + options.length) % options.length; render(); return; }
+            if (key.name === "down") { cursor = (cursor + 1) % options.length; render(); return; }
             if (key.name === "return") { finish(options[cursor].value); return; }
             if (key.name === "escape" || (key.ctrl && key.name === "c") || key.name === "q") { finish(null); return; }
         };
@@ -1038,16 +1252,15 @@ async function askYesNo(question, defaultYes = true) {
     return /^y/i.test(answer);
 }
 
-function banner(keySource) {
+function banner(kit) {
     console.log();
     console.log(c.bold("  DBackup Recovery"));
-    console.log(c.dim(`  ${keySource ? `Key loaded from ${path.basename(keySource)}` : "No master.key found in this folder"}`));
+    console.log(c.dim(`  ${describeKeys(kit)}`));
     console.log();
 }
 
-async function runWizard(startPath, initialKey, keySource) {
-    let hexKey = initialKey;
-    banner(keySource);
+async function runWizard(startPath, kit) {
+    banner(kit);
 
     console.log(c.dim(`  Looking in ${path.resolve(startPath)} ...`));
     let backups = scanForBackups(startPath);
@@ -1077,9 +1290,18 @@ async function runWizard(startPath, initialKey, keySource) {
         if (choice === null || choice === undefined) return;
 
         const backup = backups[choice];
-        if (backup.encrypted && !hexKey) {
-            hexKey = await promptForKey();
-            if (!hexKey) continue;
+        if (backup.encrypted && kit.keys.length === 0) {
+            const typed = await promptForKey();
+            if (!typed) continue;
+            kit.keys.push({ name: "the key you entered", hex: typed });
+        }
+
+        let hexKey;
+        try {
+            hexKey = backup.encrypted ? resolveKey(backup.path, kit.keys) : undefined;
+        } catch (error) {
+            console.log(c.red(`  ${error.message}`));
+            continue;
         }
 
         await handleBackup(backup, hexKey);
@@ -1461,11 +1683,10 @@ the newest snapshot, which rebuilds the current state out of all of them.`);
 
 async function main() {
     const args = process.argv.slice(2);
-    const keyFile = readKeyFile();
-    const defaultKey = keyFile?.key;
+    const kit = loadKeys();
 
     if (args.length === 0) {
-        await runWizard(process.cwd(), defaultKey, keyFile?.source);
+        await runWizard(process.cwd(), kit);
         return;
     }
 
@@ -1476,22 +1697,24 @@ async function main() {
 
     if (args[0] === "--list") {
         if (!args[1]) throw new Error("Missing archive path");
-        commandList(resolveArchiveArgument(args[1]), isHexKey(args[2]) ? args[2].trim() : defaultKey);
+        const archive = resolveArchiveArgument(args[1]);
+        commandList(archive, isHexKey(args[2]) ? args[2].trim() : resolveKey(archive, kit.keys));
         return;
     }
 
     if (args[0] === "--extract") {
         if (!args[1] || !args[2]) throw new Error("Missing archive path or output directory");
         const rest = args.slice(3);
-        const hexKey = isHexKey(rest[0]) ? rest.shift().trim() : defaultKey;
-        await commandExtract(resolveArchiveArgument(args[1]), args[2], hexKey, rest);
+        const archive = resolveArchiveArgument(args[1]);
+        const hexKey = isHexKey(rest[0]) ? rest.shift().trim() : resolveKey(archive, kit.keys);
+        await commandExtract(archive, args[2], hexKey, rest);
         return;
     }
 
     if (args[0] === "--decrypt") {
         if (!args[1]) throw new Error("Missing backup path");
         const rest = args.slice(2);
-        const hexKey = isHexKey(rest[0]) ? rest.shift().trim() : defaultKey;
+        const hexKey = isHexKey(rest[0]) ? rest.shift().trim() : resolveKey(args[1], kit.keys);
         const outputDir = rest.length > 0 ? path.resolve(rest.shift()) : DEFAULT_OUTPUT_DIR;
         // Anything further names the databases to restore, mirroring how --extract takes
         // patterns after its output directory.
@@ -1505,7 +1728,14 @@ async function main() {
     process.exitCode = 1;
 }
 
-main().catch((error) => {
-    console.error(`\n${c.red("Error:")} ${error.message}`);
-    process.exitCode = 1;
-});
+// Only when started, not when required. Exporting the pure helpers below lets the test
+// suite check the fiddly ones directly instead of driving a terminal, and changes nothing
+// about how the kit runs this file.
+if (require.main === module) {
+    main().catch((error) => {
+        console.error(`\n${c.red("Error:")} ${error.message}`);
+        process.exitCode = 1;
+    });
+}
+
+module.exports = { fitRow, looksLikeBackupContent, defaultDecryptedName, keyFor };

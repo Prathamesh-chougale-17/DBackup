@@ -137,7 +137,11 @@ RUN --mount=type=cache,id=next-cache,target=/app/.next/cache \
 FROM base AS runner
 WORKDIR /app
 
-COPY --from=builder --link --chown=1001:1001 /app/scripts/decrypt_backup.js ./scripts/decrypt_backup.js
+# The Recovery Kit reads this off disk when a user downloads one, so it has to be in the
+# image. A missing file is not a build error - the kit is generated with a placeholder
+# apologising for its absence, which nobody discovers until they need it. Guarded by
+# tests/unit/lint-guards/recovery-kit-shipped.test.ts.
+COPY --from=builder --link --chown=1001:1001 /app/scripts/dbackup-recover.js ./scripts/dbackup-recover.js
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1

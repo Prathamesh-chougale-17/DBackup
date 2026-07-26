@@ -13,6 +13,8 @@ import { EncryptionProfile } from "@prisma/client"
 import { createEncryptionProfile, importEncryptionProfile, deleteEncryptionProfile, getEncryptionProfiles, revealMasterKey } from "@/app/actions/backup/encryption"
 import { DateDisplay } from "@/components/utils/date-display"
 import { DataTable } from "@/components/ui/data-table"
+import { Checkbox } from "@/components/ui/checkbox"
+import { ScrollArea } from "@/components/ui/scroll-area"
 import { ColumnDef } from "@tanstack/react-table"
 
 export function EncryptionProfilesList() {
@@ -36,6 +38,10 @@ export function EncryptionProfilesList() {
     // Reveal Key State
     const [revealedKey, setRevealedKey] = useState<{ id: string, key: string } | null>(null)
     const [isRevealing, setIsRevealing] = useState(false)
+
+    // Recovery Kit Export State
+    const [isKitOpen, setIsKitOpen] = useState(false)
+    const [selectedForKit, setSelectedForKit] = useState<Set<string>>(new Set())
 
     const fetchProfiles = async () => {
         setLoading(true)
@@ -139,8 +145,34 @@ export function EncryptionProfilesList() {
         });
     }
 
-    const downloadRecoveryKit = (profileId: string) => {
-        window.location.href = `/api/vault/${profileId}/recovery-kit`;
+    const downloadRecoveryKit = (profileIds: string[]) => {
+        if (profileIds.length === 0) return;
+        window.location.href = `/api/vault/recovery-kit?ids=${profileIds.map(encodeURIComponent).join(",")}`;
+        setIsKitOpen(false);
+    }
+
+    /**
+     * Opens the export dialog with everything ticked.
+     *
+     * One kit covering every profile is the useful default: a backup records which profile
+     * encrypted it, so the tool picks the right key by itself and nobody has to work out
+     * which of several kits belongs to which job. Unticking is there for handing someone a
+     * kit that only opens what they should see.
+     */
+    const openKitDialog = () => {
+        setSelectedForKit(new Set(profiles.map((profile) => profile.id)));
+        setIsKitOpen(true);
+    }
+
+    const allSelectedForKit = profiles.length > 0 && selectedForKit.size === profiles.length;
+
+    const toggleForKit = (profileId: string) => {
+        setSelectedForKit((prev) => {
+            const next = new Set(prev);
+            if (next.has(profileId)) next.delete(profileId);
+            else next.add(profileId);
+            return next;
+        });
     }
 
     const columns: ColumnDef<EncryptionProfile>[] = [
@@ -211,6 +243,15 @@ export function EncryptionProfilesList() {
                         </CardDescription>
                     </div>
                     <div className="flex gap-2">
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={openKitDialog}
+                            disabled={profiles.length === 0}
+                        >
+                            <Download className="mr-2 h-4 w-4" />
+                            Recovery Kit
+                        </Button>
                         <Button variant="outline" size="sm" onClick={() => {
                             setNewName(""); setNewDesc(""); setImportKey("");
                             setIsImportOpen(true);
@@ -279,6 +320,93 @@ export function EncryptionProfilesList() {
                     />
                 )}
             </CardContent>
+
+            {/* Recovery Kit Export Dialog */}
+            <Dialog open={isKitOpen} onOpenChange={setIsKitOpen}>
+                <DialogContent className="sm:max-w-md max-h-[90vh] p-0 flex flex-col">
+                    <div className="px-6 pt-6 pb-4 shrink-0">
+                        <DialogHeader>
+                            <DialogTitle>Download Recovery Kit</DialogTitle>
+                            <DialogDescription>
+                                A standalone tool that restores your backups without DBackup. Pick which
+                                keys it should carry - one kit can hold several, and it works out which
+                                one each backup needs by itself.
+                            </DialogDescription>
+                        </DialogHeader>
+                    </div>
+
+                    <div className="flex items-center justify-between px-6 pb-2 shrink-0">
+                        <span className="text-xs text-muted-foreground">
+                            {selectedForKit.size} of {profiles.length} selected
+                        </span>
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 text-xs"
+                            onClick={() => setSelectedForKit(
+                                allSelectedForKit ? new Set() : new Set(profiles.map((p) => p.id))
+                            )}
+                        >
+                            {allSelectedForKit ? "Deselect all" : "Select all"}
+                        </Button>
+                    </div>
+
+                    {/* flex-1 min-h-0 rather than a max-height: the header wraps to a
+                        different number of lines depending on the viewport, and any fixed
+                        subtraction pushed the footer off the bottom of the dialog. */}
+                    <ScrollArea className="flex-1 min-h-0">
+                        {/* pr-8 rather than pr-6: the scrollbar is drawn over the last 10px
+                            of the gutter, so matching the header's px-6 exactly leaves the
+                            cards visibly closer to the right edge than to the left. */}
+                        <div className="space-y-2 pl-6 pr-8 pb-4">
+                            {profiles.map((profile) => (
+                                <label
+                                    key={profile.id}
+                                    htmlFor={`kit-${profile.id}`}
+                                    // A fixed minimum height keeps rows even whether or not a profile
+                                    // carries a description.
+                                    className="flex min-h-14 items-center gap-3 rounded-md border px-3 py-2 cursor-pointer hover:bg-accent/50"
+                                >
+                                    <Checkbox
+                                        id={`kit-${profile.id}`}
+                                        checked={selectedForKit.has(profile.id)}
+                                        onCheckedChange={() => toggleForKit(profile.id)}
+                                    />
+                                    <div className="min-w-0">
+                                        <p className="text-sm font-medium leading-tight truncate">{profile.name}</p>
+                                        {profile.description && (
+                                            <p className="text-xs text-muted-foreground leading-tight truncate mt-0.5">
+                                                {profile.description}
+                                            </p>
+                                        )}
+                                    </div>
+                                </label>
+                            ))}
+                        </div>
+                    </ScrollArea>
+
+                    <div className="px-6 pt-2 pb-6 space-y-3 shrink-0">
+                        <Alert variant="destructive">
+                            <AlertTriangle className="h-4 w-4" />
+                            <AlertDescription className="text-xs">
+                                {selectedForKit.size > 1
+                                    ? `This kit opens every backup made with any of these ${selectedForKit.size} profiles. Store it somewhere safe, and not next to your backups.`
+                                    : "The kit contains the raw key. Store it somewhere safe, and not next to your backups."}
+                            </AlertDescription>
+                        </Alert>
+                        <DialogFooter>
+                            <Button variant="outline" onClick={() => setIsKitOpen(false)}>Cancel</Button>
+                            <Button
+                                onClick={() => downloadRecoveryKit([...selectedForKit])}
+                                disabled={selectedForKit.size === 0}
+                            >
+                                <Download className="mr-2 h-4 w-4" />
+                                Download {selectedForKit.size > 1 ? `${selectedForKit.size} keys` : "kit"}
+                            </Button>
+                        </DialogFooter>
+                    </div>
+                </DialogContent>
+            </Dialog>
 
             {/* Delete Confirmation Dialog */}
             <Dialog open={!!profileToDelete} onOpenChange={(open) => !open && setProfileToDelete(null)}>
@@ -369,7 +497,7 @@ export function EncryptionProfilesList() {
                                         variant="outline"
                                         onClick={() =>
                                             revealedKey &&
-                                            downloadRecoveryKit(revealedKey.id)
+                                            downloadRecoveryKit([revealedKey.id])
                                         }
                                     >
                                         Download .zip

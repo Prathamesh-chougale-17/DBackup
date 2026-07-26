@@ -11,7 +11,7 @@ import AdmZip from "adm-zip";
 import fs from "fs/promises";
 import path from "path";
 import { logger } from "@/lib/logging/logger";
-import { wrapError } from "@/lib/logging/errors";
+import { ValidationError, wrapError } from "@/lib/logging/errors";
 
 const log = logger.child({ service: "RecoveryKitService" });
 
@@ -71,12 +71,27 @@ pause
 `;
 }
 
-function readme(profileName: string, generatedAt: string): string {
-    return `# Recovery Kit for Profile: ${profileName}
-Generated at: ${generatedAt}
+function readme(profiles: RecoveryKitProfile[], generatedAt: string): string {
+    const single = profiles.length === 1;
+    const heading = single
+        ? `# Recovery Kit for Profile: ${profiles[0].name}`
+        : `# Recovery Kit for ${profiles.length} Encryption Profiles`;
 
+    // Spelled out rather than counted: in a recovery, knowing which profiles a kit covers
+    // is the difference between "this is the right one" and trying all of them.
+    const covers = single ? "" : `
+Covers these profiles:
+${profiles.map((profile) => `  - ${profile.name}`).join("\n")}
+
+The tool picks the right key for each backup by itself, from the profile the backup
+records. Nothing needs choosing.
+`;
+
+    return `${heading}
+Generated at: ${generatedAt}
+${covers}
 This kit restores your backups WITHOUT DBackup. Keep it somewhere safe, and NOT next to
-your backups - it contains the key that opens them.
+your backups - it contains the ${single ? "key" : "keys"} that open them.
 
 
 ## HOW TO USE IT
@@ -94,8 +109,19 @@ your backups - it contains the key that opens them.
        macOS        START-macOS.command
        Linux        START-Linux.sh
 
-       On macOS the first double-click may be refused because the file came from the
-       internet. Right-click it, choose Open, then confirm. After that it just works.
+       macOS refuses the first launch of anything downloaded from the internet, with
+       "Apple could not verify START-macOS.command is free of malware". To allow it:
+
+         1. Click Done on that dialog.
+         2. Open System Settings > Privacy & Security and scroll to Security.
+         3. Next to "START-macOS.command was blocked", click Open Anyway.
+         4. Confirm with Touch ID or your password, then Open Anyway once more.
+
+       After that it starts normally. On macOS 14 and older, right-clicking the file and
+       choosing Open does the same thing in one step.
+
+       If that is more trouble than it is worth, use the terminal below - it is not
+       affected by any of this.
 
    THE WAY THAT ALWAYS WORKS - a terminal
 
@@ -116,8 +142,8 @@ your backups - it contains the key that opens them.
 
 4. It shows what it found and asks what to do with it. That is all.
 
-You do not need to know which kind of backup you have, and you do not need to type the
-key anywhere: the tool reads master.key from this folder by itself.
+You do not need to know which kind of backup you have, and you do not need to type a key
+anywhere: the tool reads ${single ? "master.key" : "the keys/ folder"} from here by itself.
 
 
 ## PREREQUISITES
@@ -130,7 +156,11 @@ To check whether you already have it, run "node --version" in a terminal.
 
 ## CONTENTS
 
-  master.key            Your raw 64-character key. Anyone holding it can read your backups.
+${single
+        ? "  master.key            Your raw 64-character key. Anyone holding it can read your backups."
+        : "  keys/                 One key per profile, named after it, plus an index tying each\n" +
+          "                        one to the backups it opens. Anyone holding these can read\n" +
+          "                        every backup made with any of these profiles."}
   ${RECOVERY_TOOL}   The recovery tool. Reads every backup format DBackup writes.
   START-Windows.bat     Double-click launcher for Windows.
   START-macOS.command   Double-click launcher for macOS.
@@ -176,7 +206,7 @@ to see which ones there are:
     node ${RECOVERY_TOOL} --extract backup.tar ./restored databases/shop
 
 Every extracted file is checked against the checksum recorded when the backup was made.
-A key can be passed as an extra argument if master.key is not in this folder.
+A key can be passed as an extra argument if this folder has none.
 
 
 ## WITHOUT THIS KIT AT ALL
@@ -190,25 +220,67 @@ or 'brotli -d' on them afterwards. Encrypted backups always need this kit.
 `;
 }
 
-export interface RecoveryKitInput {
-    profileName: string;
+/** One encryption profile going into a kit. */
+export interface RecoveryKitProfile {
+    id: string;
+    name: string;
     /** The profile's raw 64-character master key. */
     masterKeyHex: string;
+}
+
+export interface RecoveryKitInput {
+    profiles: RecoveryKitProfile[];
     /** Stamped into the README. Injected so the output is reproducible in tests. */
     generatedAt?: string;
 }
 
-/** Assembles the kit. Returns the zip bytes, ready to send. */
+/** Index of a multi-key kit, so the tool can go straight from a backup to its key. */
+export const KEYS_INDEX = "keys/keys.json";
+
+/**
+ * Turns a profile name into something safe to use as a filename, keeping it recognisable.
+ *
+ * The name is what the person reads when they open the folder, so a key called "Production"
+ * should not arrive as `key-2.key`.
+ */
+function keyFileName(name: string, taken: Set<string>): string {
+    const base = name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "key";
+    let candidate = `${base}.key`;
+    for (let n = 2; taken.has(candidate.toLowerCase()); n++) candidate = `${base}-${n}.key`;
+    taken.add(candidate.toLowerCase());
+    return candidate;
+}
+
+/**
+ * Assembles the kit. Returns the zip bytes, ready to send.
+ *
+ * A single profile produces the familiar `master.key`. Several produce a `keys/` folder,
+ * one file per profile named after it, plus an index mapping each backup's recorded profile
+ * id to its key - which is what lets the tool pick the right one instead of trying them.
+ */
 export async function buildRecoveryKit({
-    profileName,
-    masterKeyHex,
+    profiles,
     generatedAt = new Date().toISOString(),
 }: RecoveryKitInput): Promise<Buffer> {
+    if (profiles.length === 0) {
+        throw new ValidationError("A Recovery Kit needs at least one encryption profile.", { field: "profiles" });
+    }
+
     const zip = new AdmZip();
 
-    // The tool reads this itself, which is why no launcher carries the key: a key passed as
+    // The tool reads these itself, which is why no launcher carries a key: a key passed as
     // an argument shows up in shell history and in the process list.
-    zip.addFile("master.key", Buffer.from(masterKeyHex, "utf8"));
+    if (profiles.length === 1) {
+        zip.addFile("master.key", Buffer.from(profiles[0].masterKeyHex, "utf8"));
+    } else {
+        const taken = new Set<string>();
+        const index = profiles.map((profile) => {
+            const file = keyFileName(profile.name, taken);
+            zip.addFile(`keys/${file}`, Buffer.from(profile.masterKeyHex, "utf8"));
+            return { profileId: profile.id, name: profile.name, file };
+        });
+        zip.addFile(KEYS_INDEX, Buffer.from(JSON.stringify({ version: 1, keys: index }, null, 2), "utf8"));
+    }
 
     // One file, deliberately. It is unzipped into a strange folder in the worst week of
     // someone's year, and anything that can be separated from it by a careless copy
@@ -226,13 +298,13 @@ export async function buildRecoveryKit({
     }
 
     // One launcher per platform, so the tool can be started by double-clicking. None takes
-    // an argument and none carries the key - they only start it, and it asks the rest.
+    // an argument and none carries a key - they only start it, and it asks the rest.
     zip.addFile("START-Windows.bat", Buffer.from(windowsLauncher(), "utf8"));
     // A .command file is what macOS opens in Terminal on a double-click.
     zip.addFile("START-macOS.command", Buffer.from(unixLauncher(), "utf8"), "", EXECUTABLE_MODE);
     zip.addFile("START-Linux.sh", Buffer.from(unixLauncher(), "utf8"), "", EXECUTABLE_MODE);
 
-    zip.addFile("README.txt", Buffer.from(readme(profileName, generatedAt), "utf8"));
+    zip.addFile("README.txt", Buffer.from(readme(profiles, generatedAt), "utf8"));
 
     return zip.toBuffer();
 }

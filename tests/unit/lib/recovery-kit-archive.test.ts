@@ -258,6 +258,72 @@ describe("recovery kit: dbackup-recover.js", () => {
     });
 });
 
+describe("recovery kit: a kit holding several keys", () => {
+    const OTHER_KEY = Buffer.alloc(32, 0x9a);
+
+    /** Lays out a kit folder the way the multi-profile download does. */
+    async function buildKitFolder(entries: { name: string; file: string; key: Buffer; profileId?: string }[], withIndex = true) {
+        const kitDir = path.join(workDir, "kit");
+        await fs.mkdir(path.join(kitDir, "keys"), { recursive: true });
+        for (const entry of entries) {
+            await fs.writeFile(path.join(kitDir, "keys", entry.file), entry.key.toString("hex"));
+        }
+        if (withIndex) {
+            await fs.writeFile(path.join(kitDir, "keys", "keys.json"), JSON.stringify({
+                version: 1,
+                keys: entries.map((e) => ({ profileId: e.profileId, name: e.name, file: e.file })),
+            }));
+        }
+        return kitDir;
+    }
+
+    it("picks the key by the profile the backup records", async () => {
+        // No trying: the archive names its profile, and the index maps it to a key.
+        const archivePath = await buildArchive(true);
+        const kitDir = await buildKitFolder([
+            { name: "Unrelated", file: "Unrelated.key", key: OTHER_KEY, profileId: "other" },
+            { name: "Production", file: "Production.key", key: MASTER_KEY, profileId: "p1" },
+        ]);
+        const outDir = path.join(workDir, "out");
+
+        const { code } = await runScript(["--extract", archivePath, outDir], kitDir);
+
+        expect(code).toBe(0);
+        expect(await fs.readFile(path.join(outDir, "src-1", "docs/notes.txt")))
+            .toEqual(FIXTURE["docs/notes.txt"]);
+    });
+
+    it("falls back to trying the keys when there is no index to look in", async () => {
+        // A keys/ folder someone assembled by hand, or one whose index was lost.
+        const archivePath = await buildArchive(true);
+        const kitDir = await buildKitFolder([
+            { name: "Unrelated", file: "a.key", key: OTHER_KEY },
+            { name: "Production", file: "b.key", key: MASTER_KEY },
+        ], false);
+        const outDir = path.join(workDir, "out");
+
+        const { code } = await runScript(["--extract", archivePath, outDir], kitDir);
+
+        expect(code).toBe(0);
+        expect(await fs.readFile(path.join(outDir, "src-1", "docs/notes.txt")))
+            .toEqual(FIXTURE["docs/notes.txt"]);
+    });
+
+    it("says which keys it tried when none of them fit", async () => {
+        const archivePath = await buildArchive(true);
+        const kitDir = await buildKitFolder([
+            { name: "Wrong One", file: "a.key", key: OTHER_KEY, profileId: "other" },
+            { name: "Also Wrong", file: "b.key", key: Buffer.alloc(32, 0x5c), profileId: "another" },
+        ]);
+
+        const { stderr, code } = await runScript(["--list", archivePath], kitDir);
+
+        expect(code).toBe(1);
+        expect(stderr).toContain("Wrong One");
+        expect(stderr).toContain("Also Wrong");
+    });
+});
+
 describe("recovery kit: whole-file backups", () => {
     /** A database backup as the older pipeline writes it: one encrypted, compressed stream. */
     async function buildWholeFile({ encrypted = true } = {}) {
