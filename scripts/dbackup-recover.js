@@ -16,7 +16,11 @@
  *
  *   node dbackup-recover.js --list    <archive|folder> [<hex_key>]
  *   node dbackup-recover.js --extract <archive|folder> <output_dir> [<hex_key>] [glob...]
- *   node dbackup-recover.js --decrypt <backup.enc> [<hex_key>] [<output_file>]
+ *   node dbackup-recover.js --decrypt <backup.enc> [<hex_key>] [<output_dir>]
+ *
+ * Every mode writes into ./restored unless another folder is named, and every mode leaves
+ * files that are ready to use - a multi-database backup comes out as one dump per database
+ * rather than as a TAR to unpack afterwards.
  *
  * The key is read from master.key next to this file when it is there. Pass it explicitly to
  * override, or leave it out entirely for unencrypted backups.
@@ -116,6 +120,9 @@ function createDecompressStream(kind) {
 }
 
 const isHexKey = (value) => typeof value === "string" && /^[0-9a-fA-F]{64}$/.test(value.trim());
+
+/** Everything a restore produces lands here unless the user says otherwise. */
+const DEFAULT_OUTPUT_DIR = path.resolve(process.cwd(), "restored");
 
 /**
  * Reads master.key from the folder this script sits in.
@@ -525,12 +532,20 @@ function matchesAny(filePath, patterns) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Decrypts a backup that was encrypted as one stream, and decompresses it on the way out.
+ * Restores a backup that was encrypted as one stream: decrypts it, decompresses it, and
+ * unpacks it if what comes out is an archive of database dumps.
  *
  * Everything needed beyond the key is in the `.meta.json` written next to the backup: the
  * IV, the authentication tag, and whether the plaintext is gzip or brotli.
+ *
+ * A job backing up several databases at once produces one TAR holding one dump per
+ * database. Handing that back as a `.tar` and leaving the user to unpack it was one step
+ * short of the job - especially next to the file-backup path, which has always come out as
+ * ready-to-use files.
+ *
+ * @returns Absolute paths of everything written.
  */
-async function decryptWholeFile(inputPath, hexKey, outputPath) {
+async function restoreWholeFile(inputPath, hexKey, outputDir) {
     const metaPath = `${inputPath}.meta.json`;
     if (!fs.existsSync(metaPath)) {
         throw new Error(
@@ -550,9 +565,10 @@ async function decryptWholeFile(inputPath, hexKey, outputPath) {
         throw new Error("This backup is encrypted. Put master.key next to this tool, or pass the key.");
     }
 
-    const target = outputPath ?? defaultDecryptedName(inputPath, compression);
-    const partial = `${target}.partial`;
-    fs.mkdirSync(path.dirname(path.resolve(target)), { recursive: true });
+    const root = path.resolve(outputDir);
+    fs.mkdirSync(root, { recursive: true });
+    const plainName = path.basename(defaultDecryptedName(inputPath, compression));
+    const partial = path.join(root, `${plainName}.partial`);
 
     const stages = [fs.createReadStream(inputPath)];
     if (encryption) {
@@ -580,8 +596,72 @@ async function decryptWholeFile(inputPath, hexKey, outputPath) {
         throw error;
     }
 
+    const unpacked = await unpackMultiDbTar(partial, root);
+    if (unpacked) {
+        fs.rmSync(partial, { force: true });
+        return unpacked;
+    }
+
+    const target = path.join(root, plainName);
     fs.renameSync(partial, target);
-    return target;
+    return [target];
+}
+
+/**
+ * Unpacks a multi-database TAR, if that is what this file is.
+ *
+ * Recognised by its own `manifest.json` declaring version 1, which is what DBackup writes
+ * ahead of the dumps. Anything else - a single dump, or some unrelated tar a user happens
+ * to have - is left exactly as it is rather than being taken apart on a guess.
+ *
+ * @returns Paths written, or null when the file is not a multi-database archive.
+ */
+async function unpackMultiDbTar(tarPath, outputDir) {
+    let fd;
+    let members;
+    try {
+        fd = fs.openSync(tarPath, "r");
+        const size = fs.fstatSync(fd).size;
+        if (size < TAR_BLOCK * 2) return null;
+
+        const header = Buffer.alloc(TAR_BLOCK);
+        fs.readSync(fd, header, 0, TAR_BLOCK, 0);
+        if (header.subarray(257, 262).toString("ascii") !== "ustar") return null;
+
+        members = walkMembers(fd, size);
+        const manifestMember = members.find((m) => m.name === MANIFEST_MEMBER);
+        if (!manifestMember || manifestMember.size > 1024 * 1024) return null;
+
+        const manifest = JSON.parse(readAt(fd, manifestMember.offset, manifestMember.size).toString("utf-8"));
+        if (manifest.version !== 1 || !Array.isArray(manifest.databases)) return null;
+    } catch {
+        return null;
+    } finally {
+        if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already gone */ } }
+    }
+
+    const written = [];
+    for (const member of members) {
+        if (member.name === MANIFEST_MEMBER || member.size === 0) continue;
+
+        // Refuse anything that would escape the output directory.
+        const target = path.resolve(outputDir, member.name);
+        const root = path.resolve(outputDir);
+        if (target !== root && !target.startsWith(root + path.sep)) {
+            console.error(`SKIPPED (unsafe path): ${member.name}`);
+            continue;
+        }
+
+        // Streamed, not buffered: a single dump in here can be tens of gigabytes.
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        await pipeline(
+            fs.createReadStream(tarPath, { start: member.offset, end: member.offset + member.size - 1 }),
+            fs.createWriteStream(target)
+        );
+        written.push(target);
+    }
+
+    return written;
 }
 
 /**
@@ -959,6 +1039,17 @@ async function runWizard(startPath, initialKey, keySource) {
     }
 }
 
+/**
+ * Where a restore lands, asked the same way for every kind of backup.
+ *
+ * One answer, one default. A database backup used to appear next to its own encrypted file
+ * while a file backup went to `restored/`, which made the tool feel like two tools again.
+ */
+async function askOutputDir() {
+    const answer = await ask(`  Restore into [${DEFAULT_OUTPUT_DIR}]: `);
+    return answer ? path.resolve(answer.replace(/^["']|["']$/g, "")) : DEFAULT_OUTPUT_DIR;
+}
+
 async function promptForKey() {
     console.log();
     console.log(c.yellow("  This backup is encrypted and no master.key was found."));
@@ -977,14 +1068,11 @@ async function handleBackup(backup, hexKey) {
     if (backup.kind === "file") {
         console.log();
         console.log(`  ${c.bold(backup.label)}  ${c.dim(describeBackup(backup))}`);
-        const target = await ask(`  Save decrypted copy as [${path.basename(defaultDecryptedName(backup.path, backup.meta.compression))}]: `);
+        const outputDir = await askOutputDir();
         try {
-            const written = await decryptWholeFile(
-                backup.path,
-                hexKey,
-                target ? path.resolve(path.dirname(backup.path), target) : undefined
-            );
-            console.log(c.green(`  Done. Written to ${written}`));
+            const written = await restoreWholeFile(backup.path, hexKey, outputDir);
+            console.log(c.green(`  Restored ${written.length} file(s) to ${outputDir}`));
+            for (const file of written) console.log(c.dim(`    ${path.basename(file)}`));
         } catch (error) {
             console.log(c.red(`  ${error.message}`));
         }
@@ -1027,9 +1115,7 @@ async function handleBackup(backup, hexKey) {
         if (patterns.length === 0) return;
     }
 
-    const defaultOut = path.resolve(process.cwd(), "restored");
-    const answer = await ask(`  Restore into [${defaultOut}]: `);
-    const outputDir = answer ? path.resolve(answer.replace(/^["']|["']$/g, "")) : defaultOut;
+    const outputDir = await askOutputDir();
 
     console.log();
     try {
@@ -1232,7 +1318,10 @@ Or drive it directly:
 
   node dbackup-recover.js --list    <archive|folder> [<hex_key>]
   node dbackup-recover.js --extract <archive|folder> <output_dir> [<hex_key>] [pattern...]
-  node dbackup-recover.js --decrypt <backup.enc> [<hex_key>] [<output_file>]
+  node dbackup-recover.js --decrypt <backup.enc> [<hex_key>] [<output_dir>]
+
+Everything is restored into ./restored unless another folder is named. A database backup
+holding several databases is unpacked into one dump per database, not left as a .tar.
 
 The key is read from master.key next to this file when it is there, so it usually does not
 need to be passed at all. Unencrypted backups need no key either.
@@ -1277,8 +1366,10 @@ async function main() {
         if (!args[1]) throw new Error("Missing backup path");
         const rest = args.slice(2);
         const hexKey = isHexKey(rest[0]) ? rest.shift().trim() : defaultKey;
-        const written = await decryptWholeFile(args[1], hexKey, rest[0]);
-        console.log(`Written to ${written}`);
+        const outputDir = rest[0] ? path.resolve(rest[0]) : DEFAULT_OUTPUT_DIR;
+        const written = await restoreWholeFile(args[1], hexKey, outputDir);
+        console.log(`Restored ${written.length} file(s) to ${outputDir}`);
+        for (const file of written) console.log(`  ${path.basename(file)}`);
         return;
     }
 

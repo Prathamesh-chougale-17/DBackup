@@ -274,18 +274,66 @@ describe("recovery kit: whole-file backups", () => {
     it("decrypts and decompresses in one pass, leaving a usable dump", async () => {
         // The old tool left a .gz behind and told the user to gunzip it themselves.
         const { target, plain } = await buildWholeFile();
+        const outDir = path.join(workDir, "out");
 
-        const { code } = await runScript(["--decrypt", target, KEY_HEX]);
+        const { code } = await runScript(["--decrypt", target, KEY_HEX, outDir]);
 
         expect(code).toBe(0);
-        expect(await fs.readFile(path.join(workDir, "MyDb_2026-07-20.sql"))).toEqual(plain);
+        expect(await fs.readFile(path.join(outDir, "MyDb_2026-07-20.sql"))).toEqual(plain);
+    });
+
+    it("unpacks a multi-database backup into one dump per database", async () => {
+        // These are a TAR of dumps. Handing back the .tar was one step short of the job,
+        // and left the database half of the tool behaving unlike the file half.
+        const { createMultiDbTar } = await import("@/lib/adapters/database/common/tar-utils");
+        const dumps = { "shop.sql": "CREATE TABLE orders (id INT);\n", "blog.sql": "CREATE TABLE posts (id INT);\n" };
+        for (const [name, body] of Object.entries(dumps)) await fs.writeFile(path.join(workDir, name), body);
+
+        const tarPath = path.join(workDir, "AllDbs_2026-07-20.tar");
+        await createMultiDbTar(
+            Object.keys(dumps).map((name) => ({ name, path: path.join(workDir, name), dbName: name.replace(".sql", ""), format: "sql" as const })),
+            tarPath,
+            { sourceType: "mysql" }
+        );
+
+        const plain = await fs.readFile(tarPath);
+        const iv = crypto.randomBytes(16);
+        const cipher = crypto.createCipheriv("aes-256-gcm", MASTER_KEY, iv);
+        const encPath = path.join(workDir, "AllDbs_2026-07-20.tar.enc");
+        await fs.writeFile(encPath, Buffer.concat([cipher.update(plain), cipher.final()]));
+        await fs.writeFile(`${encPath}.meta.json`, JSON.stringify({
+            compression: "NONE",
+            encryption: { enabled: true, profileId: "p1", algorithm: "aes-256-gcm",
+                iv: iv.toString("hex"), authTag: cipher.getAuthTag().toString("hex") },
+        }));
+
+        const outDir = path.join(workDir, "out");
+        const { code } = await runScript(["--decrypt", encPath, KEY_HEX, outDir]);
+
+        expect(code).toBe(0);
+        for (const [name, body] of Object.entries(dumps)) {
+            expect(await fs.readFile(path.join(outDir, name), "utf-8")).toBe(body);
+        }
+        // The archive it came out of is not left lying next to the dumps.
+        await expect(fs.access(path.join(outDir, "AllDbs_2026-07-20.tar"))).rejects.toThrow();
+    });
+
+    it("defaults to the same restore folder the file backups use", async () => {
+        const { target } = await buildWholeFile();
+        const runDir = path.join(workDir, "run");
+        await fs.mkdir(runDir, { recursive: true });
+
+        const { code } = await runScript(["--decrypt", target, KEY_HEX], runDir);
+
+        expect(code).toBe(0);
+        expect(await fs.access(path.join(runDir, "restored", "MyDb_2026-07-20.sql"))).toBeUndefined();
     });
 
     it("says what is missing when the metadata sidecar was left behind", async () => {
         const { target } = await buildWholeFile();
         await fs.rm(`${target}.meta.json`);
 
-        const { stderr, code } = await runScript(["--decrypt", target, KEY_HEX]);
+        const { stderr, code } = await runScript(["--decrypt", target, KEY_HEX, path.join(workDir, "out")]);
 
         expect(code).toBe(1);
         expect(stderr).toMatch(/meta\.json/);
@@ -294,20 +342,22 @@ describe("recovery kit: whole-file backups", () => {
     it("writes nothing at all when the key is wrong", async () => {
         const { target } = await buildWholeFile();
 
-        const { code } = await runScript(["--decrypt", target, Buffer.alloc(32, 0x02).toString("hex")]);
+        const outDir = path.join(workDir, "out");
+        const { code } = await runScript(["--decrypt", target, Buffer.alloc(32, 0x02).toString("hex"), outDir]);
 
         expect(code).toBe(1);
         // A half-written file would look like a restore: GCM only authenticates at the end.
-        await expect(fs.access(path.join(workDir, "MyDb_2026-07-20.sql"))).rejects.toThrow();
+        await expect(fs.access(path.join(outDir, "MyDb_2026-07-20.sql"))).rejects.toThrow();
     });
 
     it("handles an unencrypted backup with no key", async () => {
         const { target, plain } = await buildWholeFile({ encrypted: false });
 
-        const { code } = await runScript(["--decrypt", target]);
+        const outDir = path.join(workDir, "out");
+        const { code } = await runScript(["--decrypt", target, outDir]);
 
         expect(code).toBe(0);
-        expect(await fs.readFile(path.join(workDir, "MyDb_2026-07-20.sql"))).toEqual(plain);
+        expect(await fs.readFile(path.join(outDir, "MyDb_2026-07-20.sql"))).toEqual(plain);
     });
 });
 

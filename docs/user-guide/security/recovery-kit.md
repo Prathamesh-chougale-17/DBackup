@@ -22,7 +22,7 @@ recovery-kit/
 
 One tool handles every backup format DBackup writes - database dumps, file backups and
 incremental chains, encrypted or not. It works out which one it is looking at, so you do
-not have to.
+not have to, and everything it restores lands in a `restored` folder ready to use.
 
 It streams every entry it extracts, so a backup containing a 50 GB VM image needs no more
 memory than one containing text files - which matters precisely when you are recovering
@@ -117,8 +117,10 @@ an archive.
 ```bash
 node dbackup-recover.js --list    <archive or folder>
 node dbackup-recover.js --extract <archive or folder> <output_dir> [pattern...]
-node dbackup-recover.js --decrypt <backup.enc> [output_file]
+node dbackup-recover.js --decrypt <backup.enc> [output_dir]
 ```
+
+Everything lands in `./restored` unless another folder is named.
 
 `--list` prints the databases, the directory sources, and every file with its size and
 modification time. For an incremental snapshot it also names every archive the snapshot
@@ -134,8 +136,10 @@ node dbackup-recover.js --extract backup.tar ./restored docs
 Every extracted file is verified against the checksum recorded when the backup was made. A
 mismatch is reported and the command exits non-zero.
 
-`--decrypt` handles a database backup encrypted as a single file, and decompresses it in the
-same pass - the output is the usable dump, not a `.gz`.
+`--decrypt` handles a database backup encrypted as a single file. It decompresses in the
+same pass, and a backup holding several databases is unpacked into one dump per database -
+the output is always ready to feed to `mysql`, `psql` or `mongorestore`, never a `.gz` or a
+`.tar` to take apart first.
 
 The key is read from `master.key` next to the tool. Pass it as an extra argument to override,
 or leave it out entirely for unencrypted backups.
