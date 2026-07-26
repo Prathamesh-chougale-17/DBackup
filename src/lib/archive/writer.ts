@@ -25,11 +25,11 @@ import { createReadStream, createWriteStream } from "fs";
 import { PassThrough, Readable, pipeline as pipelineCb } from "stream";
 import { pipeline } from "stream/promises";
 import { pack, Pack } from "tar-stream";
-import zlib from "zlib";
-import { getCompressionStream, getCompressionExtension } from "@/lib/crypto/compression";
+import { compressBufferSync, getCompressionStream, getCompressionExtension } from "@/lib/crypto/compression";
 import { deriveArchiveKeys, generateKdfSalt } from "@/lib/crypto/kdf";
 import { generateNoncePrefix, sealEntry, sealedSize } from "@/lib/crypto/entry-cipher";
 import { getTempDir } from "@/lib/temp-dir";
+import { isIncompressible } from "@/lib/incompressible-formats";
 import {
     BUNDLE_FILE_MAX_SIZE,
     BUNDLE_TARGET_SIZE,
@@ -94,10 +94,6 @@ interface MaterializedEntry {
     parts?: { offset: number; length: number }[];
 }
 
-function compressBuffer(input: Buffer, kind: CompressionKind): Buffer {
-    return kind === "GZIP" ? zlib.gzipSync(input) : zlib.brotliCompressSync(input);
-}
-
 /**
  * Groups source entries into physical tar members.
  *
@@ -152,10 +148,18 @@ function planEntries(entries: ArchiveSourceEntry[], encrypted: boolean, compress
                 continue;
             }
 
+            // Recompressing an already-compressed format costs a full temp-file round trip
+            // and the CPU to go with it, for a fraction of a percent - the same reasoning
+            // that skips a natively compressed dump above. Bundles are deliberately left
+            // out: they hold whatever small files happen to be adjacent, and lifting an
+            // image out of one would cost it its own tar header and auth tag, which is more
+            // than the compression ever saved on a file that size.
+            const comp = isIncompressible(file.path) ? undefined : compression;
+
             planned.push({
                 ordinal,
-                member: memberName(`${SOURCE_MEMBER_PREFIX}${entry.jobSourceId}/${file.path}`, compression),
-                comp: compression,
+                member: memberName(`${SOURCE_MEMBER_PREFIX}${entry.jobSourceId}/${file.path}`, comp),
+                comp,
                 origin: { kind: "file", src: entry.jobSourceId, file, localPath },
             });
             ordinal++;
@@ -202,7 +206,7 @@ async function materialize(entry: PlannedEntry, sealKey: Buffer | null, noncePre
         }
 
         const plain = Buffer.concat(buffers);
-        const payload = entry.comp ? compressBuffer(plain, entry.comp) : plain;
+        const payload = entry.comp ? compressBufferSync(plain, entry.comp) : plain;
 
         return { storedSize: withTag(payload.length), open: () => seal(Readable.from([payload])), parts };
     }
@@ -270,6 +274,17 @@ export async function createArchive(
     const keys = options.encryption && kdfSalt ? deriveArchiveKeys(options.encryption.masterKey, kdfSalt) : null;
 
     const planned = planEntries(entries, encrypted, compression);
+
+    // Files the format rule stored as-is. Counted so a run can report it: a job configured
+    // for compression that produces an archive the size of its input otherwise looks like a
+    // setting that silently did not apply.
+    const skippedCompression = planned.reduce(
+        (acc, entry) =>
+            compression && entry.origin.kind === "file" && !entry.comp
+                ? { files: acc.files + 1, bytes: acc.bytes + entry.origin.file.size }
+                : acc,
+        { files: 0, bytes: 0 }
+    );
 
     const directoryLines: IndexDirectoryLine[] = entries
         .filter((e): e is Extract<ArchiveSourceEntry, { kind: "directory" }> => e.kind === "directory")
@@ -484,5 +499,5 @@ export async function createArchive(
         ])
     );
 
-    return { manifest, index, indexBytes };
+    return { manifest, index, indexBytes, skippedCompression };
 }

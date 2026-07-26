@@ -305,6 +305,99 @@ describe("unencrypted archives stay recoverable with plain tar", () => {
     });
 });
 
+describe("files already in a compressed format are stored as-is", () => {
+    /** Random bytes stand in for real media: there is nothing in them for a compressor to find. */
+    const MIXED: FixtureFile[] = [
+        { relPath: "media/holiday.jpg", content: crypto.randomBytes(BUNDLE_FILE_MAX_SIZE * 2) },
+        { relPath: "media/clip.mp4", content: crypto.randomBytes(BUNDLE_FILE_MAX_SIZE * 2) },
+        { relPath: "www/notes.txt", content: Buffer.from("the same line over and over\n".repeat(8000)) },
+    ];
+
+    it("skips compression per file while its neighbours stay compressed", async () => {
+        const { archivePath, result } = await buildArchive({
+            compression: "GZIP",
+            encrypted: true,
+            files: MIXED,
+            withDatabase: false,
+        });
+
+        const entryFor = (relPath: string) => {
+            const line = result.index.files.find((f) => f.p === relPath)!;
+            return result.index.entries.get(entryKey(line.a, line.n))!;
+        };
+
+        expect(entryFor("media/holiday.jpg").comp).toBeUndefined();
+        expect(entryFor("media/clip.mp4").comp).toBeUndefined();
+        expect(entryFor("www/notes.txt").comp).toBe("GZIP");
+
+        // A mixed archive still has to read back exactly, which is the whole point of `comp`
+        // being per entry rather than per archive.
+        const source = await localFileSource(archivePath);
+        const manifest = await readArchiveManifest(source);
+        const index = await readArchiveIndex(source, manifest, { masterKey: MASTER_KEY });
+        for (const file of MIXED) {
+            const line = index.files.find((f) => f.p === file.relPath)!;
+            const actual = await readArchiveFile(source, manifest, index, line, MASTER_KEY);
+            expect(actual.equals(file.content), file.relPath).toBe(true);
+        }
+    });
+
+    it("names the member without a compression extension, so plain tar yields a usable file", async () => {
+        const { archivePath } = await buildArchive({
+            compression: "GZIP",
+            encrypted: false,
+            files: MIXED,
+            withDatabase: false,
+        });
+
+        const names = (await walkTarHeaders(archivePath)).map((m) => m.name);
+        expect(names).toContain("sources/src-uuid-1/media/holiday.jpg");
+        expect(names).toContain("sources/src-uuid-1/www/notes.txt.gz");
+        // A `.gz` on a member that was never gzipped is the failure this guards against:
+        // `tar -xf` followed by `gunzip` would fail on a file that needed neither.
+        expect(names).not.toContain("sources/src-uuid-1/media/holiday.jpg.gz");
+
+        const extractDir = path.join(workDir, "out");
+        await fs.mkdir(extractDir);
+        await execFileAsync("tar", ["-xf", archivePath, "-C", extractDir]);
+        const extracted = await fs.readFile(path.join(extractDir, "sources", "src-uuid-1", "media", "holiday.jpg"));
+        expect(extracted.equals(MIXED[0].content)).toBe(true);
+    });
+
+    it("leaves small files in their bundle, which stays compressed as a whole", async () => {
+        const files: FixtureFile[] = [
+            { relPath: "thumbs/small.jpg", content: crypto.randomBytes(4 * 1024) },
+            { relPath: "www/tiny.txt", content: Buffer.from("repeat\n".repeat(500)) },
+        ];
+        const { result } = await buildArchive({ compression: "GZIP", encrypted: true, files, withDatabase: false });
+
+        const thumb = result.index.files.find((f) => f.p === "thumbs/small.jpg")!;
+        expect(thumb.o, "small files belong in a bundle regardless of their format").toBeDefined();
+        expect(result.index.entries.get(entryKey(thumb.a, thumb.n))!.comp).toBe("GZIP");
+    });
+
+    it("reports what it skipped, and nothing when the job has no compression", async () => {
+        const compressed = await buildArchive({
+            compression: "GZIP",
+            encrypted: true,
+            files: MIXED,
+            withDatabase: false,
+        });
+        expect(compressed.result.skippedCompression.files).toBe(2);
+        expect(compressed.result.skippedCompression.bytes).toBe(
+            MIXED[0].content.length + MIXED[1].content.length
+        );
+
+        const plain = await buildArchive({
+            compression: "NONE",
+            encrypted: true,
+            files: MIXED,
+            withDatabase: false,
+        });
+        expect(plain.result.skippedCompression).toEqual({ files: 0, bytes: 0 });
+    });
+});
+
 describe("small-file bundling", () => {
     it("packs small files together and gives large files their own entry", async () => {
         const { result } = await buildArchive({ compression: "GZIP", encrypted: true });

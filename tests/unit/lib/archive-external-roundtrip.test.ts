@@ -15,6 +15,7 @@ import { describe, it, expect, afterAll } from "vitest";
 import { createArchive } from "@/lib/archive/writer";
 import { readArchiveIndex, readArchiveFile, readArchiveManifest } from "@/lib/archive/reader";
 import { localFileSource } from "@/lib/archive/sources";
+import { entryKey } from "@/lib/archive/types";
 import type { ArchiveSourceEntry, SourceFileEntry } from "@/lib/archive/types";
 import { execFile } from "child_process";
 import { promisify } from "util";
@@ -42,6 +43,10 @@ const AWKWARD: Record<string, string> = {
     ["deep/" + "a".repeat(80) + "/" + "b".repeat(80) + "/long-name-file.txt"]: "long path over 100 chars",
     "dotfile/.hidden": "hidden",
     "big.bin": "X".repeat(300_000),
+    // Named like media, so the writer stores it as-is even with compression on. Its content
+    // is deliberately trivial to compress: every external path below then proves it handles
+    // an archive whose entries are not uniformly compressed.
+    "media/photo.jpg": "J".repeat(200_000),
 };
 
 async function stageSource(): Promise<{ root: string; files: SourceFileEntry[] }> {
@@ -154,6 +159,32 @@ describe.skipIf(!hasTar)("archive round-trip through external tools", () => {
             expect(entry.off, "negative offset").toBeGreaterThanOrEqual(0);
             expect(entry.off + entry.size, `entry ${entry.member} runs past EOF`).toBeLessThanOrEqual(stat.size);
         }
+    });
+
+    it("mixes compressed and stored entries in one archive", async () => {
+        const { archivePath, masterKey } = await buildArchive({ compression: "GZIP" });
+        const source = await localFileSource(archivePath);
+        const manifest = await readArchiveManifest(source);
+        const index = await readArchiveIndex(source, manifest, { masterKey });
+
+        const entryFor = (rel: string) => {
+            const line = index.files.find((f) => f.p === rel)!;
+            return index.entries.get(entryKey(line.a, line.n))!;
+        };
+
+        // The manifest still names the job's setting. Per-entry `comp` is what a reader has
+        // to follow, and the two disagreeing here is the normal case, not a corrupt archive.
+        expect(manifest.compression).toBe("GZIP");
+
+        // Both fixtures are long runs of a single character, so a gzipped entry shrinks to a
+        // sliver. Storing the photo at nearly its full length is what proves the rule fired.
+        const photo = entryFor("media/photo.jpg");
+        expect(photo.comp).toBeUndefined();
+        expect(photo.size).toBe(AWKWARD["media/photo.jpg"].length);
+
+        const binary = entryFor("big.bin");
+        expect(binary.comp).toBe("GZIP");
+        expect(binary.size).toBeLessThan(AWKWARD["big.bin"].length / 10);
     });
 
     it("the recovery kit lists and extracts the unencrypted archive", async () => {

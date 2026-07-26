@@ -326,7 +326,7 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
         // because both passes already happened here.
         ctx.setStage(PIPELINE_STAGES.PROCESSING);
         ctx.log(`Creating combined archive with ${dbNames.length} database(s) and ${ctx.sources.length} directory source(s)...`);
-        const { manifest, index, indexBytes } = await createArchive(entries, tempFile, {
+        const { manifest, index, indexBytes, skippedCompression } = await createArchive(entries, tempFile, {
             sourceType: job.source ? job.source.adapterId : DIRECTORY_ONLY_SOURCE_TYPE,
             engineVersion,
             compression: (job.compression as "NONE" | "GZIP" | "BROTLI" | undefined) ?? "NONE",
@@ -352,6 +352,14 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
                     : {}),
             },
         });
+
+        // Said out loud, because otherwise a job configured for compression that produces an
+        // archive roughly the size of its input reads like a setting that did not apply.
+        if (skippedCompression.files > 0) {
+            ctx.log(
+                `${skippedCompression.files} file(s) stored uncompressed (${formatBytes(skippedCompression.bytes)}) - their format is already compressed`
+            );
+        }
 
         // The sidecar is a byte-identical copy of the archive's own index member. Uploading
         // it separately is what lets browsing and file-level restore read a file list

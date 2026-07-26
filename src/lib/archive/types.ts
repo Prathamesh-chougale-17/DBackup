@@ -299,6 +299,12 @@ export interface CreateArchiveResult {
      * next to the archive as the sidecar.
      */
     indexBytes: Buffer;
+    /**
+     * Directory files stored as-is because their format is already compressed. Reporting
+     * only - nothing in the archive depends on it, and it stays at zero when the job has no
+     * compression configured, since then nothing was skipped.
+     */
+    skippedCompression: { files: number; bytes: number };
 }
 
 // ── Reader ────────────────────────────────────────────────────────────────

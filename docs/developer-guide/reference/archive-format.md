@@ -271,6 +271,30 @@ is negligible next to the round trip.
 **Bundling is applied only to encrypted archives.** A bundle has no single real path, so
 enabling it for unencrypted archives would break the promise that `tar -xf` is enough.
 
+## Compression is per entry
+
+The manifest's `compression` field records what the job was configured with. **`comp` on the
+index entry is what a reader has to follow**, and the two routinely disagree. Two rules take
+individual entries out of compression even when the job asks for it:
+
+- A dump the adapter already compressed itself, such as `pg_dump -Z`.
+- A file whose extension names an already-compressed format - video, audio, images, archives,
+  ZIP containers like `.docx` and `.apk`, web fonts, encrypted payloads. The list lives in
+  `src/lib/incompressible-formats.ts`. Recompressing these costs a full temp-file round trip
+  and the CPU with it, for a fraction of a percent.
+
+The rule applies to standalone entries only. Small files stay in their bundle and the bundle
+is compressed as a whole, since lifting one out would cost it a TAR header and an auth tag -
+more than the compression saved on a file that size.
+
+In an unencrypted archive the member name follows the entry: a stored file keeps its real
+name, a compressed one gains `.gz` or `.br`. So a mixed archive extracts with plain `tar -xf`
+and only the suffixed members need a decompressor.
+
+This is not a format change. `comp` has been per entry since version 2, so an older reader -
+including a Recovery Kit generated before this rule existed - handles a mixed archive without
+any update.
+
 ## Reading an archive
 
 To restore one file:
@@ -312,7 +336,7 @@ node dbackup-recover.js --list ./chain-2026-07-15
 
 ```bash
 tar -xf backup.tar
-# If the job used compression, the extracted files are gzip/brotli streams:
+# Members carrying .gz or .br are compressed streams, the rest are already the real file:
 find . -name '*.gz' -exec gunzip {} +
 ```
 
@@ -322,6 +346,10 @@ Full disclosure of the residual leak:
 
 - The **number of entries** and each one's **stored size**. Bundling blurs this for small
   files, but a large file's approximate size is visible. restic and borg leak the same.
+  An entry stored uncompressed gives its exact plaintext size rather than an approximate
+  one, since sealing adds a fixed 16 bytes. That only happens for formats which are already
+  compressed, and for those a compressed entry gives the same figure to within a fraction of
+  a percent anyway.
 - The **archive's own size and timestamp**.
 - Everything in `.meta.json`, which is cleartext by design - job name, source name and type,
   engine version, timestamps, and the crypto parameters. It contains no file paths or

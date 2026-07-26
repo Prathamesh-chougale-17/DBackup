@@ -215,8 +215,10 @@ An UNENCRYPTED file backup is a plain TAR:
 
     tar -xf backup.tar
 
-If the job used compression, the extracted files are gzip or brotli streams - run 'gunzip'
-or 'brotli -d' on them afterwards. Encrypted backups always need this kit.
+If the job used compression, look at the names: anything ending in '.gz' or '.br' is a
+compressed stream - run 'gunzip' or 'brotli -d' on it. Everything else is already the real
+file. Formats that are compressed to begin with, such as videos and photos, are stored
+as-is and come out ready to use. Encrypted backups always need this kit.
 `;
 }
 
