@@ -17,6 +17,14 @@ function makeTags(...names: string[]) {
     return names.map(name => ({ name }));
 }
 
+/** Bumps one semver component of CURRENT_VERSION, so "a newer/older version" tests survive package.json version bumps. */
+function bump(part: 'major' | 'minor' | 'patch', by = 1): string {
+    const [major, minor, patch] = CURRENT_VERSION.split('.').map(Number);
+    if (part === 'major') return `${major + by}.0.0`;
+    if (part === 'minor') return `${major}.${minor + by}.0`;
+    return `${major}.${minor}.${patch + by}`;
+}
+
 const globalFetch = vi.fn();
 vi.stubGlobal('fetch', globalFetch);
 
@@ -111,15 +119,16 @@ describe('updateService.checkForUpdates()', () => {
     // ── Version comparison - stable channel ──────────────────
 
     it('detects a newer stable version', async () => {
+        const newer = bump('major');
         globalFetch.mockResolvedValue({
             ok: true,
-            json: async () => makeTags('v3.0.0', 'v2.1.0', 'v2.0.0'),
+            json: async () => makeTags(`v${newer}`, `v${CURRENT_VERSION}`, 'v0.1.0'),
         });
 
         const result = await updateService.checkForUpdates();
 
         expect(result.updateAvailable).toBe(true);
-        expect(result.latestVersion).toBe('v3.0.0');
+        expect(result.latestVersion).toBe(`v${newer}`);
     });
 
     it('returns no update when current version is already the latest', async () => {

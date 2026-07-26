@@ -44,6 +44,62 @@ export interface BackupMetadata {
         /** Database names contained in the archive */
         databases: string[];
     };
+    /** Present only for combined (manifest v2) archives - job had directory sources in addition to (or instead of) a database source. */
+    combined?: {
+        databases: number;
+        directorySources: number;
+    };
+    /**
+     * Present only for seekable (manifest v2) archives. Lets the browse and file-level
+     * restore paths find and open the index sidecar without touching the archive itself,
+     * which is the whole point of the sidecar - a directory listing must not cost a
+     * multi-gigabyte download.
+     *
+     * Note that a v2 archive is never compressed or encrypted as a whole, so the top-level
+     * `compression` and `encryption` fields above stay unset for it even when the job has
+     * both enabled. Both are applied per entry inside the archive instead.
+     */
+    archive?: {
+        formatVersion: 2;
+        /** Filename suffix of the index sidecar, appended to the backup file's remote path. */
+        indexFile: string;
+        encrypted: boolean;
+        /** EncryptionProfile id, when encrypted. */
+        profileId?: string;
+        /**
+         * Hex-encoded KDF salt and nonce prefix, copied from the archive's own manifest.
+         * Neither is a secret - they exist so the index sidecar can be opened without
+         * reading the archive at all, which is what keeps a directory listing cheap.
+         */
+        kdfSalt?: string;
+        noncePrefix?: string;
+        compression?: 'GZIP' | 'BROTLI';
+        /** Whether small files were packed into shared bundles. */
+        bundled?: boolean;
+        files?: number;
+    };
+    /**
+     * Whether this backup stores everything or only what changed.
+     *
+     * Written for **every** backup, including database-only ones that have no notion of
+     * chains yet, so the Storage Explorer can label them uniformly and a future
+     * incremental database mode does not need a second signal.
+     */
+    backupType?: 'full' | 'incremental';
+    /**
+     * Incremental chain membership. Absent on a standalone full backup.
+     *
+     * Duplicated from the archive's own manifest so retention can group backups into
+     * chains without opening any archive, and so it still works for archives whose
+     * Execution row has been cleaned up.
+     */
+    chain?: {
+        id: string;
+        type: 'full' | 'incremental';
+        /** Filename of the predecessor archive. Absent on the full. */
+        base?: string;
+        index: number;
+    };
     /** SHA-256 checksum of the final backup file (after compression/encryption) */
     checksum?: string;
     /** MD5 checksum of the final backup file - enables native verification for Google Drive and OneDrive */
@@ -227,6 +283,36 @@ export interface DatabaseAdapter extends BaseAdapter {
      * Returns rows, total count, and column definitions.
      */
     getTableData?: (config: AdapterConfig, options: TableDataOptions) => Promise<TableDataResult>;
+
+    /**
+     * Optional: dumps a single named database to a plain local file, without any
+     * TAR/manifest wrapping. Adapters that implement this expose the same per-database
+     * logic `dump()` already uses internally for its own multi-DB case - it is a capability
+     * export, not new dump logic. Presence of this method is what makes a database source
+     * combinable with directory sources (JobSource) in one backup job.
+     */
+    dumpOne?(
+        config: AdapterConfig,
+        dbName: string,
+        destinationPath: string,
+        onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
+    ): Promise<{ size: number }>;
+
+    /**
+     * Optional: restores a single plain dump file (as produced by dumpOne) into a single
+     * target database. Counterpart to dumpOne - required for the same combined-backup
+     * capability during restore.
+     * @param originalDbName The database's original name at backup time (needed by adapters
+     * that must rewrite embedded USE/CREATE DATABASE statements when restoring to a renamed target).
+     */
+    restoreOne?(
+        config: AdapterConfig,
+        filePath: string,
+        targetDbName: string,
+        onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
+        onProgress?: (percentage: number, detail?: string) => void,
+        originalDbName?: string
+    ): Promise<void>;
 }
 
 export type FileInfo = {
@@ -236,6 +322,14 @@ export type FileInfo = {
     lastModified: Date;
     locked?: boolean;
     storageClass?: string;
+    /**
+     * Incremental chain this backup belongs to, read from its `.meta.json`.
+     *
+     * Retention needs it because a chain can only be deleted as a whole - later snapshots
+     * reference bytes in earlier archives, so removing one member would silently gut the
+     * others.
+     */
+    chainId?: string;
 };
 
 /** Optional options passed to upload() for adapters that support native checksum storage. */
@@ -260,7 +354,96 @@ export interface StorageSession {
         onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
         options?: UploadOptions
     ): Promise<boolean>;
+    /**
+     * Optional: downloads over the session's connections too. Present on adapters where opening
+     * a connection is expensive enough that a directory collection should not pay for one per
+     * file. Callers must fall back to `StorageAdapter.download()` when it is absent.
+     */
+    download?(
+        remotePath: string,
+        localPath: string,
+        onProgress?: (processed: number, total: number) => void
+    ): Promise<boolean>;
     close(): Promise<void>;
+}
+
+/** A single file discovered while downloading a directory tree. */
+export interface DirectoryFileEntry {
+    /** Path relative to the directory source root, POSIX separators. */
+    relativePath: string;
+    size: number;
+    lastModified: Date;
+    /**
+     * Set when an incremental backup decided the file is unchanged and skipped the
+     * transfer. The file still belongs to the snapshot - its bytes just already exist in
+     * an earlier archive of the chain - so it is reported here rather than omitted.
+     */
+    unchanged?: boolean;
+}
+
+/** Options for a directory download, used by incremental backups to skip unchanged files. */
+export interface DirectoryDownloadOptions {
+    /**
+     * Decides whether a file has to be transferred.
+     *
+     * Adapters that ignore this stay correct: everything is downloaded, and the archive
+     * writer still avoids re-storing unchanged content by comparing checksums. Honouring
+     * it is what turns that storage saving into a bandwidth saving as well.
+     */
+    shouldDownload?: (entry: { relativePath: string; size: number; lastModified: Date }) => boolean;
+    /**
+     * How many files to transfer at once. Over a network destination the per-file round trip,
+     * not the bandwidth, is the limit, so downloading several in parallel is much faster.
+     * Defaults to serial (1) when unset - the generic loop's historical behaviour. Adapters
+     * with their own downloadDirectory (Rsync) ignore it.
+     */
+    concurrency?: number;
+}
+
+/** Result of downloading an entire remote directory tree to a local directory. */
+export interface DirectoryDownloadResult {
+    files: number;
+    bytes: number;
+    /** Per-file index - becomes the manifest's searchable file list (path/size/mtime). */
+    entries: DirectoryFileEntry[];
+    /**
+     * Files the source listed but would not hand over - unreadable, locked, vanished
+     * mid-run, or rejected by the remote.
+     *
+     * Reported rather than skipped in silence: such a file is missing from the archive and
+     * from its index, so a backup that ignored this would look complete and not be. The
+     * runner names them and downgrades the execution instead of reporting Success.
+     */
+    failures: { path: string; error: string }[];
+}
+
+/** A single child directory returned by browseDirectories(), one tree level at a time. */
+export interface DirectoryBrowseEntry {
+    name: string;
+    /** Path relative to the adapter's configured root, POSIX separators, no leading slash.
+     *  For ID-based adapters (Google Drive) this is the folder ID, not a path string. */
+    path: string;
+}
+
+/**
+ * A point-in-time copy of a source tree, so a backup reads a stable snapshot instead of a
+ * tree that keeps changing underneath it.
+ *
+ * Held by the runner for the duration of the collection and released in `stepCleanup`,
+ * which runs in the runner's `finally` - so a snapshot outlives neither a failure nor a
+ * cancellation.
+ */
+export interface SnapshotHandle {
+    /** Opaque id the adapter needs to release this snapshot again. */
+    id: string;
+    /**
+     * Config fields to overlay while reading. A snapshot is usually exposed somewhere else
+     * entirely - FSRVP hands out a separate UNC path - so collection reads the same
+     * relative paths against an overlaid config rather than a rewritten remote path.
+     */
+    configOverride: Record<string, unknown>;
+    /** Human-readable location, for the execution log. */
+    label: string;
 }
 
 export interface StorageAdapter extends BaseAdapter {
@@ -286,13 +469,18 @@ export interface StorageAdapter extends BaseAdapter {
     ): Promise<'passed' | 'failed' | 'unsupported'>;
 
     /**
-     * Optional: Opens a persistent session for multiple uploads on a single connection.
-     * Adapters that do not implement this fall back to per-call `upload()` (stateless).
-     * Implementations should hold the underlying connection until `close()` is invoked.
+     * Optional: Opens a persistent session for multiple transfers over pooled connections.
+     * Adapters that do not implement this fall back to per-call `upload()`/`download()` (stateless).
+     * Implementations should hold the underlying connections until `close()` is invoked.
+     *
+     * `options.concurrency` is how many transfers the caller intends to run at once, and so how
+     * many connections the session may open. Sessions must never open more than that: on SFTP
+     * and FTP the connection count is what servers rate-limit, not the byte count.
      */
     openSession?(
         config: AdapterConfig,
-        onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
+        onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
+        options?: { concurrency?: number }
     ): Promise<StorageSession>;
 
     /**
@@ -312,6 +500,26 @@ export interface StorageAdapter extends BaseAdapter {
     read?(config: AdapterConfig, remotePath: string): Promise<string | null>;
 
     /**
+     * Optional: streams a byte range [start, end] (both inclusive) of a remote file.
+     *
+     * This is what makes file-level restore cheap: a seekable (manifest v2) archive records
+     * the exact byte offset of every entry, so one file can be pulled out of a
+     * multi-gigabyte backup by fetching just its range. Implemented by adapters whose
+     * protocol supports it natively - HTTP Range for S3/WebDAV/Drive/OneDrive/Dropbox, seek
+     * for SFTP and the local filesystem.
+     *
+     * Adapters that don't implement this still work: the caller falls back to downloading
+     * the archive once to a temp file and ranging over that. See
+     * src/lib/archive/storage-source.ts.
+     */
+    downloadRange?(
+        config: AdapterConfig,
+        remotePath: string,
+        start: number,
+        end: number
+    ): Promise<NodeJS.ReadableStream>;
+
+    /**
      * Lists files in a directory
      */
     list(config: AdapterConfig, remotePath: string): Promise<FileInfo[]>;
@@ -320,6 +528,51 @@ export interface StorageAdapter extends BaseAdapter {
      * Deletes a file
      */
     delete(config: AdapterConfig, remotePath: string): Promise<boolean>;
+
+    /**
+     * Optional: downloads an entire remote directory tree to a local directory, used by
+     * directory-source (JobSource) backups. Adapters that don't implement this are handled
+     * via a generic fallback (list() + per-file download()) - see
+     * src/lib/adapters/storage/common/download-directory.ts. Rsync implements this natively
+     * to preserve its delta-transfer advantage.
+     */
+    downloadDirectory?(
+        config: AdapterConfig,
+        remotePath: string,
+        localPath: string,
+        excludePatterns?: string[],
+        onProgress?: (processedBytes: number, totalBytes: number, processedFiles: number, totalFiles: number) => void,
+        onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
+        options?: DirectoryDownloadOptions
+    ): Promise<DirectoryDownloadResult>;
+
+    /**
+     * Optional: lists the immediate child directories of subPath (non-recursive), scoped to this
+     * adapter's configured root. Used for lazy expansion in the directory-source folder tree picker
+     * (job form). Adapters that don't implement this are treated as "browse unsupported" by the
+     * picker, which falls back to plain manual path entry.
+     */
+    browseDirectories?(config: AdapterConfig, subPath: string): Promise<DirectoryBrowseEntry[]>;
+
+    /**
+     * Reports whether this server can produce a point-in-time snapshot of the given path.
+     *
+     * Checked before the option can be enabled at all, and again before every backup that
+     * relies on it - a service can be stopped or a permission revoked after the fact.
+     */
+    supportsSnapshot?(config: AdapterConfig, remotePath: string): Promise<{ supported: boolean; message: string }>;
+
+    /** Creates and exposes a snapshot. The caller must release it, whatever else happens. */
+    createSnapshot?(config: AdapterConfig, remotePath: string): Promise<SnapshotHandle>;
+
+    /** Releases a snapshot. Must tolerate one that is already gone. */
+    releaseSnapshot?(config: AdapterConfig, handle: SnapshotHandle): Promise<void>;
+
+    /**
+     * Finds snapshots this adapter left behind on the server, so a run killed before it
+     * could clean up does not block the next one. Returns handles ready for release.
+     */
+    findOrphanedSnapshots?(config: AdapterConfig, remotePath: string): Promise<SnapshotHandle[]>;
 }
 
 /**

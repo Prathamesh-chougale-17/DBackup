@@ -10,11 +10,12 @@ import {
     DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { deleteUser } from "@/app/actions/auth/user"
+import { deleteUser, bulkDeleteUsers } from "@/app/actions/auth/user"
 import { toast } from "sonner"
 import { User, Group } from "@prisma/client"
-import { DataTable } from "@/components/ui/data-table"
-import { useState } from "react"
+import { DataTable, type BulkAction } from "@/components/ui/data-table"
+import { unwrapBulkAction } from "@/lib/bulk-request"
+import { useMemo, useState } from "react"
 import { EditUserDialogComponent as EditUserDialog } from "@/app/dashboard/users/edit-user-dialog"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { DateDisplay } from "@/components/utils/date-display"
@@ -32,11 +33,34 @@ interface UserTableProps {
     data: UserWithGroup[];
     groups: GroupWithStats[];
     canManage: boolean;
+    /** The signed-in account, which may not be selected for a bulk action. */
+    currentUserId: string | null;
 }
 
-export function UserTable({ data, groups, canManage }: UserTableProps) {
+export function UserTable({ data, groups, canManage, currentUserId }: UserTableProps) {
     const [editingUser, setEditingUser] = useState<UserWithGroup | null>(null)
     const router = useRouter();
+
+    const bulkActions = useMemo<BulkAction<UserWithGroup>[]>(() => {
+        if (!canManage) return []
+
+        return [
+            {
+                id: "delete",
+                labels: { verb: "delete", verbPast: "deleted", noun: "user" },
+                icon: Trash,
+                variant: "destructive",
+                itemName: (user) => user.name || user.email,
+                confirm: {
+                    title: (rows) => `Delete ${rows.length} user${rows.length === 1 ? "" : "s"}?`,
+                    description: () =>
+                        "This cannot be undone. Their sessions end immediately. The last SuperAdmin and the last remaining account are kept.",
+                    confirmLabel: "Delete",
+                },
+                run: (rows) => unwrapBulkAction(bulkDeleteUsers(rows.map((user) => user.id))),
+            },
+        ]
+    }, [canManage])
 
     const handleDelete = async (userId: string) => {
          toast.promise(deleteUser(userId), {
@@ -163,7 +187,16 @@ export function UserTable({ data, groups, canManage }: UserTableProps) {
 
     return (
         <>
-            <DataTable columns={columns} data={data} onRefresh={() => router.refresh()} />
+            <DataTable
+                columns={columns}
+                data={data}
+                onRefresh={() => router.refresh()}
+                enableRowSelection={canManage}
+                getRowId={(user) => user.id}
+                isRowSelectable={(user) => user.id !== currentUserId}
+                bulkActions={bulkActions}
+                onBulkActionComplete={() => router.refresh()}
+            />
             {editingUser && (
                 <EditUserDialog
                     user={editingUser}

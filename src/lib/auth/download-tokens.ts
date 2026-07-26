@@ -6,6 +6,13 @@
  */
 
 import crypto from "crypto";
+import fs from "fs/promises";
+
+/** Selected paths within a directory source, mirrored structurally to keep this layer standalone. */
+export interface DownloadSelection {
+    src: string;
+    paths?: string[];
+}
 
 interface DownloadToken {
     storageId: string;
@@ -14,6 +21,34 @@ interface DownloadToken {
     createdAt: number;
     expiresAt: number;
     used: boolean;
+    /**
+     * Present for archive-selection downloads, which extract chosen files out of a backup
+     * rather than fetching one stored file.
+     */
+    selection?: {
+        /** The token is only honoured for the session that created it. */
+        userId: string;
+        selections?: DownloadSelection[];
+        /** Carried with the token so the browser's GET applies the same exclusions. */
+        excludePatterns?: string[];
+        /**
+         * Vault profile chosen after a key prompt. Carried too, because the GET opens the
+         * archive again and would otherwise be asked for a key it has no way to answer.
+         */
+        profileIdOverride?: string;
+        fileName: string;
+    };
+    /**
+     * Present for a download that was already fetched and decrypted into a temp file, so the
+     * browser only has to collect the finished result.
+     */
+    localFile?: {
+        /** The token is only honoured for the session that created it. */
+        userId: string;
+        tempFile: string;
+        fileName: string;
+        contentType: string;
+    };
 }
 
 // Token validity: 5 minutes
@@ -84,6 +119,109 @@ export function consumeDownloadToken(token: string): DownloadToken | null {
 }
 
 /**
+ * Parks a validated file selection so the browser can fetch it as a plain GET.
+ *
+ * A selection is far too large for a query string, but the download has to be a normal
+ * navigation for the browser's own download manager to take it - which is the point: the
+ * response is written straight to disk instead of being buffered in the tab, so a selection
+ * larger than the machine's RAM stays downloadable.
+ */
+export function generateSelectionDownloadToken(params: {
+    storageId: string;
+    file: string;
+    userId: string;
+    fileName: string;
+    selections?: DownloadSelection[];
+    excludePatterns?: string[];
+    profileIdOverride?: string;
+}): string {
+    const token = crypto.randomBytes(32).toString("hex");
+    const now = Date.now();
+
+    tokenStore.set(token, {
+        storageId: params.storageId,
+        file: params.file,
+        decrypt: false,
+        createdAt: now,
+        expiresAt: now + TOKEN_TTL_MS,
+        used: false,
+        selection: {
+            userId: params.userId,
+            selections: params.selections,
+            excludePatterns: params.excludePatterns,
+            profileIdOverride: params.profileIdOverride,
+            fileName: params.fileName,
+        },
+    });
+
+    return token;
+}
+
+/**
+ * Resolves a selection token for the session presenting it.
+ *
+ * Deliberately not consumed on use - a browser that retries or resumes the download would
+ * otherwise fail on the second attempt. The short TTL and the owner check bound it instead,
+ * so a leaked token is worthless without that user's session.
+ */
+export function consumeSelectionDownloadToken(
+    token: string,
+    userId: string
+): (DownloadToken & { selection: NonNullable<DownloadToken["selection"]> }) | null {
+    const data = consumeDownloadToken(token);
+    if (!data?.selection || data.selection.userId !== userId) return null;
+    return data as DownloadToken & { selection: NonNullable<DownloadToken["selection"]> };
+}
+
+/**
+ * Parks a file that has already been fetched and decrypted, for the browser to collect.
+ *
+ * The decrypting download has to know up front whether a key is needed - that answer only
+ * exists after the attempt - which is why it used to run through the page and buffer the
+ * whole backup in the tab. Doing the work first and handing over a token moves the decision
+ * to a step that returns nothing but JSON, leaving the transfer itself a plain GET the
+ * browser writes straight to disk.
+ */
+export function generateFileDownloadToken(params: {
+    storageId: string;
+    file: string;
+    userId: string;
+    tempFile: string;
+    fileName: string;
+    contentType: string;
+}): string {
+    const token = crypto.randomBytes(32).toString("hex");
+    const now = Date.now();
+
+    tokenStore.set(token, {
+        storageId: params.storageId,
+        file: params.file,
+        decrypt: true,
+        createdAt: now,
+        expiresAt: now + TOKEN_TTL_MS,
+        used: false,
+        localFile: {
+            userId: params.userId,
+            tempFile: params.tempFile,
+            fileName: params.fileName,
+            contentType: params.contentType,
+        },
+    });
+
+    return token;
+}
+
+/** Resolves a prepared-file token for the session presenting it. */
+export function consumeFileDownloadToken(
+    token: string,
+    userId: string
+): (DownloadToken & { localFile: NonNullable<DownloadToken["localFile"]> }) | null {
+    const data = consumeDownloadToken(token);
+    if (!data?.localFile || data.localFile.userId !== userId) return null;
+    return data as DownloadToken & { localFile: NonNullable<DownloadToken["localFile"]> };
+}
+
+/**
  * Mark a token as used (call after successful download)
  */
 export function markTokenUsed(token: string): void {
@@ -102,6 +240,10 @@ function cleanupExpiredTokens(): void {
         // Remove if expired or used more than 1 minute ago
         if (now > data.expiresAt || (data.used && now > data.createdAt + CLEANUP_INTERVAL_MS)) {
             tokenStore.delete(token);
+            // A prepared download that was never collected - the user closed the tab, or the
+            // browser never followed the link - would otherwise leave its decrypted temp file
+            // behind for good.
+            if (data.localFile) fs.unlink(data.localFile.tempFile).catch(() => { });
         }
     }
 }

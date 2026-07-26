@@ -1,4 +1,5 @@
 import prisma from "@/lib/prisma";
+import { STORAGE_ROLES } from "@/lib/core/storage-roles";
 import { registry } from "@/lib/core/registry";
 import { registerAdapters } from "@/lib/adapters";
 import { StorageAdapter } from "@/lib/core/interfaces";
@@ -7,6 +8,7 @@ import { verificationService } from "@/services/storage/verification-service";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { INTEGRITY_CHECK_STAGES } from "@/lib/core/logs";
+import { isBackupFile } from "@/lib/core/backup-files";
 
 const log = logger.child({ service: "IntegrityService" });
 
@@ -111,7 +113,7 @@ export class IntegrityService {
       }
     } else {
       const storageConfigs = await prisma.adapterConfig.findMany({
-        where: { type: "storage" },
+        where: { type: "storage", storageRole: STORAGE_ROLES.DESTINATION },
       });
 
       callbacks?.onLog(`Found ${storageConfigs.length} storage destination${storageConfigs.length !== 1 ? "s" : ""}`);
@@ -279,7 +281,7 @@ export class IntegrityService {
 
       // Keep only files that belong to one of the eligible jobs (path starts with jobName/)
       const backupFiles = allFiles.filter(
-        (f) => !f.name.endsWith(".meta.json") && jobNames.some((n) => f.path.startsWith(n + "/"))
+        (f) => isBackupFile(f.name) && jobNames.some((n) => f.path.startsWith(n + "/"))
       );
 
       for (const file of backupFiles) {
@@ -360,7 +362,7 @@ export class IntegrityService {
       }
     }
 
-    const backupFiles = allFiles.filter((f) => !f.name.endsWith(".meta.json"));
+    const backupFiles = allFiles.filter((f) => isBackupFile(f.name));
 
     for (const file of backupFiles) {
       if (filters.maxAgeDays > 0 && file.lastModified) {
@@ -378,12 +380,34 @@ export class IntegrityService {
       });
     }
 
+    prioritiseChainMembers(workItems);
+
     callbacks?.onLog(
       `${storageConfig.name}: found ${workItems.length} file${workItems.length !== 1 ? "s" : ""} to verify`
     );
 
     return workItems;
   }
+}
+
+/**
+ * Puts incremental chain members first, fulls ahead of their incrementals.
+ *
+ * A standalone backup only risks itself. A chain's full carries every snapshot built on
+ * it, so if a run is cut short by a filter or a timeout, the archives with the most at
+ * stake should already have been checked. A failed full also makes the next backup run
+ * start a fresh chain, so finding it early limits how much is piled on top of it.
+ *
+ * Chain membership is read from the filename prefix the upload step writes, which avoids
+ * fetching a sidecar per file just to order the queue.
+ */
+function prioritiseChainMembers(items: { fileName: string }[]): void {
+  const rank = (name: string): number => {
+    if (name.startsWith("full-")) return 0;
+    if (name.startsWith("inc-")) return 1;
+    return 2;
+  };
+  items.sort((a, b) => rank(a.fileName) - rank(b.fileName));
 }
 
 export const integrityService = new IntegrityService();

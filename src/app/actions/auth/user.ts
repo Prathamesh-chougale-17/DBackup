@@ -11,6 +11,7 @@ import { logger } from "@/lib/logging/logger";
 import { wrapError, getErrorMessage } from "@/lib/logging/errors";
 import { notify } from "@/services/notifications/system-notification-service";
 import { NOTIFICATION_EVENTS } from "@/lib/notifications";
+import { BulkIdsSchema } from "@/lib/core/bulk-schema";
 
 const log = logger.child({ action: "user" });
 
@@ -310,4 +311,51 @@ export async function getUserPreference(key: 'autoRedirectOnJobStart'): Promise<
     }
 
     return true;
+}
+
+/**
+ * Deletes several users.
+ *
+ * The caller's own account is refused here rather than only being hidden in the UI, since
+ * a client-side check is not a guarantee. The last-SuperAdmin and last-user guards live in
+ * the service and surface as per-user failures.
+ */
+export async function bulkDeleteUsers(userIds: string[]) {
+    await checkPermission(PERMISSIONS.USERS.WRITE);
+    const currentUser = await getCurrentUserWithGroup();
+
+    const parsed = BulkIdsSchema.safeParse(userIds);
+    if (!parsed.success) {
+        return { success: false as const, error: "Invalid request" };
+    }
+
+    try {
+        const deletable = parsed.data.filter((id) => id !== currentUser?.id);
+        const result = await userService.deleteUsers(deletable);
+
+        if (deletable.length !== parsed.data.length) {
+            result.failed.push({
+                id: currentUser!.id,
+                name: currentUser!.name || currentUser!.email,
+                error: "You cannot delete your own account.",
+            });
+        }
+
+        revalidatePath("/dashboard/users");
+        revalidatePath("/dashboard/settings");
+
+        if (currentUser) {
+            await auditService.log(
+                currentUser.id,
+                AUDIT_ACTIONS.DELETE,
+                AUDIT_RESOURCES.USER,
+                { bulk: true, requested: parsed.data.length, succeeded: result.succeeded.length, failed: result.failed.length }
+            );
+        }
+
+        return { success: true as const, data: result };
+    } catch (error: unknown) {
+        log.error("Failed to bulk delete users", {}, wrapError(error));
+        return { success: false as const, error: getErrorMessage(error) || "Failed to delete users" };
+    }
 }

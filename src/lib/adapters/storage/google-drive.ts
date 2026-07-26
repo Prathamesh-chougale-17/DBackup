@@ -1,4 +1,4 @@
-import { StorageAdapter, FileInfo } from "@/lib/core/interfaces";
+import { StorageAdapter, FileInfo, DirectoryBrowseEntry } from "@/lib/core/interfaces";
 import { GoogleDriveSchema } from "@/lib/adapters/definitions";
 import { google, drive_v3 } from "googleapis";
 import { Readable, Transform } from "stream";
@@ -45,6 +45,64 @@ function createDriveClient(config: GoogleDriveConfig): drive_v3.Drive {
  * folders as needed. Returns the final folder ID.
  * If folderId is set, uses that as root. Otherwise uses Drive root.
  */
+/**
+ * In-flight folder resolutions, keyed by parent id and segment name.
+ *
+ * Drive identifies a folder by its id, not by its name, so two folders called "Images" under
+ * the same parent are perfectly legal and the API creates both without complaint. Looking a
+ * folder up and creating it when absent is therefore a read-modify-write across an await:
+ * with several files being restored at once, every one of them sees "no such folder" and
+ * makes its own, and the restored tree ends up scattered across duplicates.
+ *
+ * Sharing the promise makes the second caller wait for the first one's folder instead of
+ * creating a rival. Entries are dropped once settled, so a folder deleted between restores is
+ * looked up again rather than remembered wrongly.
+ */
+const folderResolutions = new Map<string, Promise<string>>();
+
+async function resolveSegment(
+    drive: drive_v3.Drive,
+    parentId: string,
+    segment: string
+): Promise<string> {
+    const key = `${parentId}/${segment}`;
+    const inFlight = folderResolutions.get(key);
+    if (inFlight) return inFlight;
+
+    const resolution = (async () => {
+        // Search for existing folder (escape \ before ' to prevent query injection)
+        const query = `name='${segment.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+        const res = await drive.files.list({
+            q: query,
+            fields: "files(id, name)",
+            spaces: "drive",
+        });
+
+        if (res.data.files && res.data.files.length > 0) {
+            // Several matches mean duplicates already exist, from an earlier run or made by
+            // hand. Always taking the first keeps a restore landing in one place.
+            return res.data.files[0].id!;
+        }
+
+        const folder = await drive.files.create({
+            requestBody: {
+                name: segment,
+                mimeType: "application/vnd.google-apps.folder",
+                parents: [parentId],
+            },
+            fields: "id",
+        });
+        return folder.data.id!;
+    })();
+
+    folderResolutions.set(key, resolution);
+    try {
+        return await resolution;
+    } finally {
+        folderResolutions.delete(key);
+    }
+}
+
 async function resolveOrCreatePath(
     drive: drive_v3.Drive,
     baseFolderId: string | undefined,
@@ -60,28 +118,7 @@ async function resolveOrCreatePath(
     let currentParent = parentId;
 
     for (const segment of segments) {
-        // Search for existing folder (escape \ before ' to prevent query injection)
-        const query = `name='${segment.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}' and '${currentParent}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
-        const res = await drive.files.list({
-            q: query,
-            fields: "files(id, name)",
-            spaces: "drive",
-        });
-
-        if (res.data.files && res.data.files.length > 0) {
-            currentParent = res.data.files[0].id!;
-        } else {
-            // Create folder
-            const folder = await drive.files.create({
-                requestBody: {
-                    name: segment,
-                    mimeType: "application/vnd.google-apps.folder",
-                    parents: [currentParent],
-                },
-                fields: "id",
-            });
-            currentParent = folder.data.id!;
-        }
+        currentParent = await resolveSegment(drive, currentParent, segment);
     }
 
     return currentParent;
@@ -224,6 +261,29 @@ export const GoogleDriveAdapter: StorageAdapter = {
         }
     },
 
+    async downloadRange(
+        config: GoogleDriveConfig,
+        remotePath: string,
+        start: number,
+        end: number
+    ): Promise<NodeJS.ReadableStream> {
+        // An empty range is legal - a zero-length file's archive entry produces one.
+        if (end < start) return Readable.from([]);
+
+        const drive = createDriveClient(config);
+        const dirPath = path.posix.dirname(remotePath);
+        const targetFolderId = await resolveOrCreatePath(drive, config.folderId, dirPath === "." ? "dummy" : dirPath + "/dummy");
+
+        const file = await findFile(drive, targetFolderId, path.basename(remotePath));
+        if (!file) throw new Error(`File not found: ${remotePath}`);
+
+        const res = await drive.files.get(
+            { fileId: file.id!, alt: "media" },
+            { responseType: "stream", headers: { Range: `bytes=${start}-${end}` } }
+        );
+        return res.data as unknown as Readable;
+    },
+
     async download(
         config: GoogleDriveConfig,
         remotePath: string,
@@ -319,6 +379,42 @@ export const GoogleDriveAdapter: StorageAdapter = {
             return await listFilesRecursive(drive, rootFolderId, dir || "");
         } catch (error: unknown) {
             log.error("Google Drive list failed", { dir }, wrapError(error));
+            throw error;
+        }
+    },
+
+    /**
+     * Lists immediate child folders. Unlike other adapters, Google Drive is ID-based, not
+     * path-based - subPath (when non-empty) is itself a folder ID returned by a previous call,
+     * not a path string. Empty subPath means "start at this adapter's configured root".
+     */
+    async browseDirectories(config: GoogleDriveConfig, subPath: string = ""): Promise<DirectoryBrowseEntry[]> {
+        try {
+            const drive = createDriveClient(config);
+            const parentId = subPath || config.folderId || "root";
+
+            const query = `'${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+            const entries: DirectoryBrowseEntry[] = [];
+            let pageToken: string | undefined;
+
+            do {
+                const res = await drive.files.list({
+                    q: query,
+                    fields: "nextPageToken, files(id, name)",
+                    spaces: "drive",
+                    orderBy: "name",
+                    pageSize: 100,
+                    pageToken,
+                });
+                for (const f of res.data.files || []) {
+                    entries.push({ name: f.name || "Untitled", path: f.id! });
+                }
+                pageToken = res.data.nextPageToken || undefined;
+            } while (pageToken);
+
+            return entries;
+        } catch (error: unknown) {
+            log.error("Google Drive browseDirectories failed", { subPath }, wrapError(error));
             throw error;
         }
     },

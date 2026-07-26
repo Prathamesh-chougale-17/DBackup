@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useDateFormatter } from "@/hooks/use-date-formatter";
 import type { NotificationLogRow } from "./notification-log-columns";
 
 interface NotificationPreviewProps {
@@ -34,6 +35,7 @@ function parsePayload(json?: string | null): Record<string, unknown> | null {
 // ── Discord Embed Preview ──────────────────────────────────────
 
 function DiscordPreview({ entry }: NotificationPreviewProps) {
+  const { formatDate } = useDateFormatter();
   const payload = parsePayload(entry.renderedPayload);
   const embed = payload?.embeds
     ? (payload.embeds as Array<Record<string, unknown>>)[0]
@@ -76,7 +78,7 @@ function DiscordPreview({ entry }: NotificationPreviewProps) {
           <div className="flex items-baseline gap-2 mb-1">
             <span className="text-white font-medium text-sm">Backup Manager</span>
             <span className="bg-[#5865F2] text-white text-[10px] font-semibold px-1 py-px rounded">APP</span>
-            <span className="text-[#949BA4] text-xs">{new Date(entry.sentAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+            <span className="text-[#949BA4] text-xs">{formatDate(entry.sentAt, "p")}</span>
           </div>
           {/* Embed */}
           <div
@@ -115,7 +117,7 @@ function DiscordPreview({ entry }: NotificationPreviewProps) {
               )}
               {/* Timestamp */}
               <div className="text-[#949BA4] text-xs mt-3">
-                {new Date(entry.sentAt).toLocaleString()}
+                {formatDate(entry.sentAt, "Pp")}
               </div>
             </div>
           </div>
@@ -233,6 +235,7 @@ function EmailPreview({ entry }: NotificationPreviewProps) {
 // ── Telegram Preview ───────────────────────────────────────────
 
 function TelegramPreview({ entry }: NotificationPreviewProps) {
+  const { formatDate } = useDateFormatter();
   const fields = parseFields(entry.fields);
   return (
     <div className="bg-[#0E1621] rounded-lg p-4 max-w-sm">
@@ -257,7 +260,7 @@ function TelegramPreview({ entry }: NotificationPreviewProps) {
             </div>
           )}
           <div className="text-[#6D7F8F] text-[10px] mt-2 text-right">
-            {new Date(entry.sentAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            {formatDate(entry.sentAt, "p")}
           </div>
         </div>
       </div>

@@ -1,4 +1,5 @@
 import prisma from "@/lib/prisma";
+import { STORAGE_ROLES } from "@/lib/core/storage-roles";
 import { subDays, subMonths, addDays, startOfDay } from "date-fns";
 import { formatInTimeZone } from "date-fns-tz";
 import { registry } from "@/lib/core/registry";
@@ -8,6 +9,7 @@ import { registerAdapters } from "@/lib/adapters";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { checkStorageAlerts } from "@/services/storage/storage-alert-service";
+import { isBackupFile } from "@/lib/core/backup-files";
 
 export interface DashboardStats {
   totalJobs: number;
@@ -396,7 +398,7 @@ export async function refreshStorageStatsCache(): Promise<StorageVolumeEntry[]> 
   registerAdapters();
 
   const storageAdapters = await prisma.adapterConfig.findMany({
-    where: { type: "storage" },
+    where: { type: "storage", storageRole: STORAGE_ROLES.DESTINATION },
   });
 
   if (storageAdapters.length === 0) {
@@ -418,8 +420,8 @@ export async function refreshStorageStatsCache(): Promise<StorageVolumeEntry[]> 
         return !p.startsWith('.dbackup/') && !p.startsWith('/.dbackup/');
       });
 
-      // Filter out .meta.json sidecar files (they are not backup data)
-      const backupFiles = files.filter((f) => !f.name.endsWith(".meta.json"));
+      // Sidecars (.meta.json, .index) are not backup data and must not be counted.
+      const backupFiles = files.filter((f) => isBackupFile(f.name));
       const totalSize = backupFiles.reduce((sum, f) => sum + (f.size || 0), 0);
 
       return {
@@ -483,7 +485,7 @@ export async function refreshStorageStatsCache(): Promise<StorageVolumeEntry[]> 
  */
 async function getStorageVolumeFromDB(): Promise<StorageVolumeEntry[]> {
   const storageAdapters = await prisma.adapterConfig.findMany({
-    where: { type: "storage" },
+    where: { type: "storage", storageRole: STORAGE_ROLES.DESTINATION },
   });
 
   if (storageAdapters.length === 0) return [];

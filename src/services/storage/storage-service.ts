@@ -4,20 +4,26 @@ import { StorageAdapter, FileInfo, BackupMetadata } from "@/lib/core/interfaces"
 import { resolveAdapterConfig } from "@/lib/adapters/config-resolver";
 import { pipeline } from "stream/promises";
 import { createReadStream, createWriteStream, promises as fs } from "fs";
-import { getProfileMasterKey } from "@/services/backup/encryption-service";
 import { resolveDecryptionKey } from "@/services/restore/smart-recovery";
 import { createDecryptionStream } from "@/lib/crypto/stream";
+import { CompressionType } from "@/lib/crypto/compression";
 import { getTempDir } from "@/lib/temp-dir";
 import path from "path";
 import AdmZip from "adm-zip";
 import { registerAdapters } from "@/lib/adapters";
 import { logger } from "@/lib/logging/logger";
-import { wrapError } from "@/lib/logging/errors";
+import { EncryptionKeyRequiredError, ValidationError, getErrorMessage, wrapError } from "@/lib/logging/errors";
+import { isBackupFile, sidecarPathsFor, chainFolderOf, METADATA_SIDECAR_SUFFIX } from "@/lib/core/backup-files";
+import { dependentsOf, fileNameOf } from "./bulk-delete-order";
 
 const log = logger.child({ service: "StorageService" });
 
 // Fix: Ensure adapters are registered before service usage
 registerAdapters();
+
+import { describeBackupFromMetadata } from "./backup-file-fields";
+
+export { describeBackupFromMetadata } from "./backup-file-fields";
 
 export type RichFileInfo = FileInfo & {
     jobName?: string;
@@ -33,12 +39,64 @@ export type RichFileInfo = FileInfo & {
     trigger?: { type: string; actor?: string };
     checksum?: string;
     checksumMd5?: string;
+    /** True for seekable (v2) archives, which carry a file index and can be browsed and restored file by file. */
+    hasFileIndex?: boolean;
+    /** Whether the backup stores everything or only what changed. Set for every backup with metadata. */
+    backupType?: 'full' | 'incremental';
+    /** What the backup actually contains - drives the restore mode picker. */
+    combined?: { databases: number; directorySources: number };
+    /** Incremental chain membership. Absent on standalone full backups. */
+    chain?: { id: string; type: 'full' | 'incremental'; index: number };
+    /**
+     * Complete snapshot size. For an incremental this is larger than `size`, which is only
+     * what this archive physically stores - the rest lives in earlier archives of the chain.
+     */
+    logicalSize?: number;
     verification?: {
         verifiedAt: string;
         passed: boolean;
         trigger: 'manual' | 'post-upload' | 'scheduled';
     };
 };
+
+/**
+ * Schema version of the cached listing payload.
+ *
+ * The cache stores fully enriched rows, so a release that adds a field to `RichFileInfo`
+ * leaves every existing row without it - and reconciliation only enriches *newly seen*
+ * files, so those rows would never gain it. Bumping this version discards the payload once
+ * on first read after an upgrade and rebuilds it from the sidecars.
+ *
+ * Bump whenever `enrichSingleFile` starts writing a field the UI depends on.
+ * - 1: `combined` and `backupType` (restore scope picker, Type column)
+ * - 2: S3 list() now returns paths relative to the adapter's path prefix instead of full
+ *      bucket keys, so cached rows keyed by the old full-key path must be discarded. Also
+ *      populates compression/encryption from a v2 archive's `archive.*` fields, so rows
+ *      cached without them are rebuilt.
+ * - 3: the row the runner appends after an upload is now derived by the same code as the
+ *      explorer's, so rows it wrote without compression or encryption are rebuilt.
+ */
+export const CACHE_SCHEMA_VERSION = 3;
+
+interface CachedListing {
+    v: number;
+    files: RichFileInfo[];
+}
+
+/**
+ * Reads a cached listing. A bare array is a pre-versioning payload and reports version 0,
+ * which every current reader treats as a miss.
+ */
+function parseCachedListing(json: string): CachedListing {
+    const parsed = JSON.parse(json);
+    if (Array.isArray(parsed)) return { v: 0, files: parsed as RichFileInfo[] };
+    return parsed as CachedListing;
+}
+
+function serializeCachedListing(files: RichFileInfo[]): string {
+    return JSON.stringify({ v: CACHE_SCHEMA_VERSION, files } satisfies CachedListing);
+}
+
 
 // After this many hours a cached listing is considered stale and triggers background reconciliation.
 const CACHE_STALENESS_HOURS = 2;
@@ -54,35 +112,90 @@ export class StorageService {
         const adapter = registry.get(adapterConfig.adapterId) as StorageAdapter;
         const config = await resolveAdapterConfig(adapterConfig);
 
-        const metaPath = filePath + ".meta.json";
+        const metadata = await this.readLockMetadata(adapter, config, filePath);
+        return this.writeLockState(adapterConfigId, adapter, config, filePath, metadata, !metadata.locked);
+    }
 
-        let metadata: BackupMetadata;
+    /**
+     * Sets a backup's lock to an explicit state.
+     *
+     * Absolute rather than a toggle, because a bulk lock over a mixed selection has to
+     * converge on one state instead of flipping each row and staying mixed.
+     */
+    async setLocked(adapterConfigId: string, filePath: string, locked: boolean): Promise<boolean> {
+        const adapterConfig = await prisma.adapterConfig.findUnique({
+            where: { id: adapterConfigId }
+        });
 
+        if (!adapterConfig) throw new Error("Storage not found");
+
+        const adapter = registry.get(adapterConfig.adapterId) as StorageAdapter;
+        const config = await resolveAdapterConfig(adapterConfig);
+
+        return this.setLockedWith(adapterConfigId, adapter, config, filePath, locked);
+    }
+
+    /**
+     * Lock state change for a caller that already resolved the adapter and its config.
+     *
+     * A batch resolves both once. Going through `setLocked` per file would repeat a Prisma
+     * read and a secret decryption for every row.
+     */
+    async setLockedWith(
+        adapterConfigId: string,
+        adapter: StorageAdapter,
+        config: unknown,
+        filePath: string,
+        locked: boolean,
+        // A batch updates the cache once at the end instead of rewriting the whole
+        // listing blob after every file.
+        options: { deferCacheUpdate?: boolean } = {}
+    ): Promise<boolean> {
+        const metadata = await this.readLockMetadata(adapter, config, filePath);
+        if (metadata.locked === locked) return locked;
+        return this.writeLockState(adapterConfigId, adapter, config, filePath, metadata, locked, options);
+    }
+
+    private async readLockMetadata(adapter: StorageAdapter, config: unknown, filePath: string): Promise<BackupMetadata> {
+        const metaPath = filePath + METADATA_SIDECAR_SUFFIX;
         try {
             if (!adapter.read) throw new Error("Adapter does not support reading metadata");
-            const content = await adapter.read(config, metaPath);
+            const content = await adapter.read(config as never, metaPath);
             if (!content) throw new Error("Metadata file not found");
-            metadata = JSON.parse(content);
+            return JSON.parse(content);
         } catch (e: unknown) {
-             log.error("Toggle lock error", { metaPath }, wrapError(e));
-             const message = e instanceof Error ? e.message : "Unknown error";
-             throw new Error(`Could not read metadata for this backup: ${message}`);
+            log.error("Lock metadata read error", { metaPath }, wrapError(e));
+            const message = e instanceof Error ? e.message : "Unknown error";
+            throw new Error(`Could not read metadata for this backup: ${message}`);
         }
+    }
 
-        metadata.locked = !metadata.locked;
+    private async writeLockState(
+        adapterConfigId: string,
+        adapter: StorageAdapter,
+        config: unknown,
+        filePath: string,
+        metadata: BackupMetadata,
+        locked: boolean,
+        options: { deferCacheUpdate?: boolean } = {}
+    ): Promise<boolean> {
+        const metaPath = filePath + METADATA_SIDECAR_SUFFIX;
+        metadata.locked = locked;
 
-        const tempPath = path.join(getTempDir(), `meta-${Date.now()}.json`);
+        const tempPath = path.join(getTempDir(), `meta-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
         await fs.writeFile(tempPath, JSON.stringify(metadata, null, 2));
 
         try {
-             await adapter.upload(config, tempPath, metaPath);
+            await adapter.upload(config as never, tempPath, metaPath);
         } finally {
-             await fs.unlink(tempPath).catch(() => {});
+            await fs.unlink(tempPath).catch(() => {});
         }
 
-        await this.updateStorageListCacheEntry(adapterConfigId, filePath, { locked: metadata.locked });
+        if (!options.deferCacheUpdate) {
+            await this.updateStorageListCacheEntry(adapterConfigId, filePath, { locked });
+        }
 
-        return metadata.locked;
+        return locked;
     }
 
 
@@ -121,40 +234,84 @@ export class StorageService {
         await prisma.storageListCache.deleteMany({ where: { adapterConfigId } });
     }
 
-    async appendStorageListCacheEntry(adapterConfigId: string, entry: RichFileInfo): Promise<void> {
+    /**
+     * Loads the cached listing for mutation, or null when there is nothing usable.
+     *
+     * An outdated payload is dropped rather than patched: writing an entry back would
+     * stamp it with the current version while its other rows stay unenriched.
+     */
+    private async loadCurrentCache(adapterConfigId: string): Promise<RichFileInfo[] | null> {
         const cached = await prisma.storageListCache.findUnique({ where: { adapterConfigId } });
-        if (!cached) return;
-        const files = JSON.parse(cached.filesJson) as RichFileInfo[];
-        if (files.some(f => f.path === entry.path)) return;
-        files.push(entry);
+        if (!cached) return null;
+        const listing = parseCachedListing(cached.filesJson);
+        if (listing.v !== CACHE_SCHEMA_VERSION) {
+            await prisma.storageListCache.deleteMany({ where: { adapterConfigId } });
+            return null;
+        }
+        return listing.files;
+    }
+
+    /**
+     * Applies a change to the cached listing in a single write.
+     *
+     * The cache is one JSON blob per destination, so every entry-level helper is really a
+     * read-modify-write of the whole listing. Routing them all through here lets a batch
+     * that touches fifty files pay for one write instead of fifty.
+     *
+     * `mutate` returns null when nothing changed, which skips the write entirely.
+     */
+    async mutateStorageListCache(
+        adapterConfigId: string,
+        mutate: (files: RichFileInfo[]) => RichFileInfo[] | null
+    ): Promise<void> {
+        const files = await this.loadCurrentCache(adapterConfigId);
+        if (!files) return;
+
+        const next = mutate(files);
+        if (!next) return;
+
         await prisma.storageListCache.update({
             where: { adapterConfigId },
-            data: { filesJson: JSON.stringify(files), cachedAt: new Date() },
+            data: { filesJson: serializeCachedListing(next), cachedAt: new Date() },
         });
     }
 
+    async appendStorageListCacheEntry(adapterConfigId: string, entry: RichFileInfo): Promise<void> {
+        await this.mutateStorageListCache(adapterConfigId, (files) =>
+            files.some(f => f.path === entry.path) ? null : [...files, entry]
+        );
+    }
+
     async removeStorageListCacheEntry(adapterConfigId: string, filePath: string): Promise<void> {
-        const cached = await prisma.storageListCache.findUnique({ where: { adapterConfigId } });
-        if (!cached) return;
-        const files = JSON.parse(cached.filesJson) as RichFileInfo[];
-        const filtered = files.filter(f => f.path !== filePath);
-        if (filtered.length === files.length) return;
-        await prisma.storageListCache.update({
-            where: { adapterConfigId },
-            data: { filesJson: JSON.stringify(filtered), cachedAt: new Date() },
+        await this.removeStorageListCacheEntries(adapterConfigId, [filePath]);
+    }
+
+    /** Drops several entries in one write. */
+    async removeStorageListCacheEntries(adapterConfigId: string, filePaths: string[]): Promise<void> {
+        if (filePaths.length === 0) return;
+        const removing = new Set(filePaths);
+        await this.mutateStorageListCache(adapterConfigId, (files) => {
+            const filtered = files.filter(f => !removing.has(f.path));
+            return filtered.length === files.length ? null : filtered;
         });
     }
 
     async updateStorageListCacheEntry(adapterConfigId: string, filePath: string, updates: Partial<RichFileInfo>): Promise<void> {
-        const cached = await prisma.storageListCache.findUnique({ where: { adapterConfigId } });
-        if (!cached) return;
-        const files = JSON.parse(cached.filesJson) as RichFileInfo[];
-        const idx = files.findIndex(f => f.path === filePath);
-        if (idx === -1) return;
-        files[idx] = { ...files[idx], ...updates };
-        await prisma.storageListCache.update({
-            where: { adapterConfigId },
-            data: { filesJson: JSON.stringify(files), cachedAt: new Date() },
+        await this.updateStorageListCacheEntries(adapterConfigId, [filePath], updates);
+    }
+
+    /** Applies the same change to several entries in one write. */
+    async updateStorageListCacheEntries(adapterConfigId: string, filePaths: string[], updates: Partial<RichFileInfo>): Promise<void> {
+        if (filePaths.length === 0) return;
+        const updating = new Set(filePaths);
+        await this.mutateStorageListCache(adapterConfigId, (files) => {
+            let changed = false;
+            const next = files.map((file) => {
+                if (!updating.has(file.path)) return file;
+                changed = true;
+                return { ...file, ...updates };
+            });
+            return changed ? next : null;
         });
     }
 
@@ -171,50 +328,15 @@ export class StorageService {
         executionMap: Map<string, any>
     ): RichFileInfo {
         const sidecar = metadataMap.get(file.name);
-        let isEncrypted = file.name.endsWith('.enc');
-        let encryptionProfileId: string | undefined = undefined;
-        let compression: string | undefined = undefined;
-
         if (sidecar) {
-            let count = 0;
-            let label = "Unknown";
-            const isConfigBackup = sidecar.sourceType === "SYSTEM" || file.name.startsWith("config_backup_");
-
-            if (isConfigBackup) {
-                count = 1;
-                label = "System Config";
-            } else {
-                count = typeof sidecar.databases === 'object' ? (sidecar.databases as any).count : (typeof sidecar.databases === 'number' ? sidecar.databases : 0);
-                label = count === 0 ? "Unknown" : (count === 1 ? "Single DB" : `${count} DBs`);
-            }
-
-            if (sidecar.encryption?.enabled) isEncrypted = true;
-            encryptionProfileId = sidecar.encryption?.profileId;
-            compression = sidecar.compression;
-
-            return {
-                ...file,
-                jobName: sidecar.jobName || (isConfigBackup ? "Config Backup" : undefined),
-                sourceName: sidecar.sourceName || (isConfigBackup ? "System" : undefined),
-                sourceType: sidecar.sourceType || (isConfigBackup ? "SYSTEM" : undefined),
-                engineVersion: sidecar.engineVersion,
-                engineEdition: sidecar.engineEdition,
-                dbInfo: { count, label },
-                isEncrypted,
-                encryptionProfileId,
-                compression,
-                locked: sidecar.locked,
-                trigger: sidecar.trigger as { type: string; actor?: string } | undefined,
-                checksum: sidecar.checksum,
-                checksumMd5: sidecar.checksumMd5,
-                verification: sidecar.verification ? {
-                    verifiedAt: sidecar.verification.verifiedAt,
-                    passed: sidecar.verification.passed,
-                    trigger: sidecar.verification.trigger,
-                } : undefined,
-            };
+            return { ...file, ...describeBackupFromMetadata(file.name, sidecar) };
         }
 
+        // No sidecar: everything below is inferred from the filename and from what the job and
+        // execution records happen to say.
+        const isEncrypted = file.name.endsWith('.enc');
+        const encryptionProfileId: string | undefined = undefined;
+        let compression: string | undefined = undefined;
         if (file.name.endsWith('.gz')) compression = 'GZIP';
         else if (file.name.endsWith('.br')) compression = 'BROTLI';
 
@@ -298,14 +420,21 @@ export class StorageService {
             const p = f.path.replace(/\\/g, '/');
             return !p.startsWith('.dbackup/') && !p.startsWith('/.dbackup/');
         });
-        const remoteBackups = allRemoteFiles.filter(f => !f.name.endsWith('.meta.json'));
-        const remoteMetaFiles = allRemoteFiles.filter(f => f.name.endsWith('.meta.json'));
+        const remoteBackups = allRemoteFiles.filter(f => isBackupFile(f.name));
+        const remoteMetaFiles = allRemoteFiles.filter(f => f.name.endsWith(METADATA_SIDECAR_SUFFIX));
         const remotePathSet = new Set(remoteBackups.map(f => f.path));
 
         const cached = await prisma.storageListCache.findUnique({ where: { adapterConfigId } });
         if (!cached) return;
 
-        const cachedFiles = JSON.parse(cached.filesJson) as RichFileInfo[];
+        const cachedListing = parseCachedListing(cached.filesJson);
+        // Reconciling an outdated payload would only stamp it with the current version
+        // while leaving its rows unenriched. Drop it and let the next read rebuild.
+        if (cachedListing.v !== CACHE_SCHEMA_VERSION) {
+            await prisma.storageListCache.deleteMany({ where: { adapterConfigId } });
+            return;
+        }
+        const cachedFiles = cachedListing.files;
         const cachedPathSet = new Set(cachedFiles.map(f => f.path));
 
         const removedPaths = new Set([...cachedPathSet].filter(p => !remotePathSet.has(p)));
@@ -360,7 +489,7 @@ export class StorageService {
 
         await prisma.storageListCache.update({
             where: { adapterConfigId },
-            data: { filesJson: JSON.stringify(updatedFiles), cachedAt: new Date() },
+            data: { filesJson: serializeCachedListing(updatedFiles), cachedAt: new Date() },
         });
         log.debug("Reconciled storage cache", { adapterConfigId, removed: removedPaths.size, added: newFiles.length });
     }
@@ -374,11 +503,17 @@ export class StorageService {
         if (!bypassCache) {
             const cached = await prisma.storageListCache.findUnique({ where: { adapterConfigId } });
             if (cached) {
-                const ageHours = (Date.now() - cached.cachedAt.getTime()) / 3_600_000;
-                if (ageHours > CACHE_STALENESS_HOURS) {
-                    this.reconcileStorageListCache(adapterConfigId).catch(() => {});
+                const listing = parseCachedListing(cached.filesJson);
+                // A payload from an older release is missing fields the UI reads, and no
+                // amount of reconciling brings them back - fall through and rebuild.
+                if (listing.v === CACHE_SCHEMA_VERSION) {
+                    const ageHours = (Date.now() - cached.cachedAt.getTime()) / 3_600_000;
+                    if (ageHours > CACHE_STALENESS_HOURS) {
+                        this.reconcileStorageListCache(adapterConfigId).catch(() => {});
+                    }
+                    return this.applyTypeFilter(listing.files, typeFilter);
                 }
-                return this.applyTypeFilter(JSON.parse(cached.filesJson) as RichFileInfo[], typeFilter);
+                log.info("Discarding outdated storage listing cache", { adapterConfigId, cachedVersion: listing.v });
             }
         }
 
@@ -411,8 +546,8 @@ export class StorageService {
             return !p.startsWith('.dbackup/') && !p.startsWith('/.dbackup/');
         });
 
-        const backups = allFiles.filter(f => !f.name.endsWith('.meta.json'));
-        const metadataFiles = allFiles.filter(f => f.name.endsWith('.meta.json'));
+        const backups = allFiles.filter(f => isBackupFile(f.name));
+        const metadataFiles = allFiles.filter(f => f.name.endsWith(METADATA_SIDECAR_SUFFIX));
 
         const metadataMap = new Map<string, BackupMetadata>();
         if (adapter.read) {
@@ -469,7 +604,7 @@ export class StorageService {
         const results = backups.map(file => this.enrichSingleFile(file, metadataMap, jobMap, executionMap));
 
         // Persist to cache (full list without typeFilter applied)
-        const jsonStr = JSON.stringify(results);
+        const jsonStr = serializeCachedListing(results);
         prisma.storageListCache.upsert({
             where:  { adapterConfigId },
             create: { adapterConfigId, filesJson: jsonStr },
@@ -507,18 +642,95 @@ export class StorageService {
             throw new Error(`Failed to decrypt configuration for ${adapterConfigId}: ${(e as Error).message}`);
         }
 
+        // Refuse to gut an incremental chain. Later snapshots reference bytes that live in
+        // earlier archives, so deleting one member silently makes every snapshot built on
+        // it unrestorable - and the full archive is the largest row in the explorer, which
+        // makes it the obvious one to delete for space. Retention already deletes chains
+        // whole; manual deletion has to hold the same line.
+        const dependents = await this.chainDependentsOf(adapterConfigId, filePath, adapter, config);
+        if (dependents.length > 0) {
+            throw new Error(
+                `This backup is part of an incremental chain that ${dependents.length} later backup(s) still build on: ` +
+                `${dependents.slice(0, 3).join(", ")}${dependents.length > 3 ? ", ..." : ""}. ` +
+                `Delete the whole chain folder instead, or let retention remove it as a unit.`
+            );
+        }
+
         const mainDelete = await adapter.delete(config, filePath);
 
-        try {
-            const metaPath = filePath + ".meta.json";
-            await adapter.delete(config, metaPath);
-        } catch (e) {
-            log.warn("Failed to delete associated metadata file", { filePath }, wrapError(e));
+        // Every sidecar goes with it, otherwise orphans accumulate and later confuse
+        // listings and storage statistics.
+        for (const sidecar of sidecarPathsFor(filePath)) {
+            try {
+                await adapter.delete(config, sidecar);
+            } catch (e) {
+                log.warn("Failed to delete associated sidecar file", { filePath, sidecar }, wrapError(e));
+            }
         }
 
         await this.removeStorageListCacheEntry(adapterConfigId, filePath);
 
         return mainDelete;
+    }
+
+
+    /**
+     * Names the backups that would lose their data if `filePath` were deleted.
+     *
+     * A chain lives in its own folder, and every member after the one being deleted may
+     * carry references into it. Rather than parsing each index, anything in the same chain
+     * folder that sorts after this archive is treated as dependent - the folder layout is
+     * the chain, and being conservative here costs nothing but a refusal.
+     */
+    async chainDependentsOf(
+        adapterConfigId: string,
+        filePath: string,
+        adapter: StorageAdapter,
+        config: unknown,
+        alreadyDeleted: ReadonlySet<string> = new Set()
+    ): Promise<string[]> {
+        const folder = chainFolderOf(filePath);
+        if (!folder) return [];
+
+        try {
+            const siblings = await adapter.list(config as never, folder);
+            return dependentsOf(siblings.map((f) => f.name), fileNameOf(filePath), alreadyDeleted);
+        } catch (e) {
+            // Cannot prove it is safe, so do not claim it is.
+            log.warn("Could not check chain membership before delete", { adapterConfigId, filePath }, wrapError(e));
+            throw new Error("Could not verify whether this backup is part of an incremental chain. Refusing to delete it.");
+        }
+    }
+
+    /**
+     * Reads a backup's `.meta.json`, preferring the adapter's `read()` over a download.
+     *
+     * @returns The parsed sidecar, or null when there is none or it is unreadable - a
+     * backup predating sidecars is still downloadable, so this is never fatal.
+     */
+    private async readBackupMetaSidecar(
+        adapter: StorageAdapter,
+        config: unknown,
+        remotePath: string
+    ): Promise<BackupMetadata | null> {
+        const metaRemotePath = remotePath + METADATA_SIDECAR_SUFFIX;
+
+        if (adapter.read) {
+            try {
+                const content = await adapter.read(config, metaRemotePath);
+                if (content) return JSON.parse(content) as BackupMetadata;
+            } catch { /* fall through to the download below */ }
+        }
+
+        const tempMetaPath = path.join(getTempDir(), "dlmeta_" + Date.now() + ".json");
+        try {
+            if (!(await adapter.download(config, metaRemotePath, tempMetaPath).catch(() => false))) return null;
+            return JSON.parse(await fs.readFile(tempMetaPath, 'utf-8')) as BackupMetadata;
+        } catch {
+            return null;
+        } finally {
+            await fs.unlink(tempMetaPath).catch(() => { });
+        }
     }
 
     /**
@@ -550,31 +762,26 @@ export class StorageService {
        }
 
        if (decrypt) {
+            // Metadata before bytes: it is what says whether this file has a decrypted form
+            // at all, and finding out afterwards would mean having moved a gigabyte for
+            // nothing.
+            const meta = await this.readBackupMetaSidecar(adapter, config, remotePath);
+
+            // A seekable (v2) archive encrypts each entry on its own, so there is no single
+            // stream to run through a decipher and no decrypted form of the archive itself.
+            // This used to fall through every branch below and return the untouched archive,
+            // which presented an encrypted download as a successful decrypted one.
+            if (meta?.archive?.formatVersion === 2) {
+                throw new ValidationError(
+                    "This backup is a file archive - its entries are encrypted individually, so the archive itself has no decrypted form. Use 'Download Complete Snapshot' to get its contents as a .tar.gz.",
+                    { field: "decrypt" }
+                );
+            }
+
             const success = await adapter.download(config, remotePath, localDestination);
             if (!success) return { success: false };
 
-            const metaRemotePath = remotePath + ".meta.json";
-            const tempMetaPath = path.join(getTempDir(), "dlmeta_" + Date.now() + ".json");
-
             try {
-                let meta: any = null;
-
-                if (adapter.read) {
-                    try {
-                        const content = await adapter.read(config, metaRemotePath);
-                        if (content) meta = JSON.parse(content);
-                    } catch {}
-                }
-
-                if (!meta) {
-                     const metaSuccess = await adapter.download(config, metaRemotePath, tempMetaPath).catch(() => false);
-                     if (metaSuccess) {
-                         const content = await fs.readFile(tempMetaPath, 'utf-8');
-                         meta = JSON.parse(content);
-                         await fs.unlink(tempMetaPath).catch(() => {});
-                     }
-                }
-
                 let encryptionParams: { profileId: string, iv: string, authTag: string } | null = null;
 
                 if (meta && meta.encryption && typeof meta.encryption === 'object' && meta.encryption.enabled) {
@@ -584,44 +791,39 @@ export class StorageService {
                         authTag: meta.encryption.authTag
                     };
                 } else if (meta && meta.encryptionProfileId && meta.iv && meta.authTag) {
-                     encryptionParams = {
-                        profileId: meta.encryptionProfileId,
-                        iv: meta.iv,
-                        authTag: meta.authTag
+                    // Flat metadata, written before the nested `encryption` object existed.
+                    // These keys reach BackupMetadata only through its index signature, so
+                    // their shape has to be asserted here.
+                    const flat = meta as unknown as { encryptionProfileId: string; iv: string; authTag: string };
+                    encryptionParams = {
+                        profileId: flat.encryptionProfileId,
+                        iv: flat.iv,
+                        authTag: flat.authTag
                     };
                 }
 
                 if (encryptionParams) {
-                    let masterKey: Buffer;
-
-                    if (options?.rawKeyHex) {
-                        masterKey = Buffer.from(options.rawKeyHex, 'hex');
-                    } else if (options?.profileIdOverride) {
-                        masterKey = await getProfileMasterKey(options.profileIdOverride);
-                    } else {
-                        const encryptionMeta = {
+                    // One resolution path for all three cases - a key the user typed, a
+                    // profile they picked, or whatever the vault can offer. A supplied key
+                    // is tested here too, so a wrong one is reported as such rather than
+                    // producing a file that looks corrupt.
+                    const masterKey = await resolveDecryptionKey(
+                        {
                             enabled: true as const,
                             profileId: encryptionParams.profileId,
                             algorithm: 'aes-256-gcm' as const,
                             iv: encryptionParams.iv,
                             authTag: encryptionParams.authTag,
-                        };
-                        const compression = meta?.compression as 'GZIP' | 'BROTLI' | 'NONE' | undefined;
-                        try {
-                            masterKey = await resolveDecryptionKey(
-                                encryptionMeta,
-                                localDestination,
-                                compression,
-                                (msg, level) => {
-                                    if (level === 'error') log.error(msg, {});
-                                    else if (level === 'warning') log.warn(msg, {});
-                                    else log.info(msg, {});
-                                },
-                            );
-                        } catch {
-                            throw new Error(`ENCRYPTION_KEY_REQUIRED:${encryptionParams.profileId}`);
-                        }
-                    }
+                        },
+                        localDestination,
+                        meta?.compression as CompressionType | undefined,
+                        (msg, level) => {
+                            if (level === 'error') log.error(msg, {});
+                            else if (level === 'warning') log.warn(msg, {});
+                            else log.info(msg, {});
+                        },
+                        { rawKeyHex: options?.rawKeyHex, profileId: options?.profileIdOverride },
+                    );
 
                     const iv = Buffer.from(encryptionParams.iv, 'hex');
                     const authTag = Buffer.from(encryptionParams.authTag, 'hex');
@@ -641,11 +843,10 @@ export class StorageService {
 
                 return { success: true, isZip: false };
             } catch (e: unknown) {
-                if (e instanceof Error && e.message.startsWith("ENCRYPTION_KEY_REQUIRED:")) {
-                    throw e;
-                }
-                const message = e instanceof Error ? e.message : String(e);
-                throw new Error("Decryption failed: " + message);
+                // A missing key is a question for the user, not a decryption failure -
+                // relabelling it would hide the one error the UI knows how to answer.
+                if (e instanceof EncryptionKeyRequiredError) throw e;
+                throw new Error("Decryption failed: " + getErrorMessage(e));
             }
        }
 

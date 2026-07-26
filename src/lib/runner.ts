@@ -280,6 +280,7 @@ export async function performExecution(executionId: string, jobId: string) {
         startedAt: new Date(),
         execution: initialExe as any,
         destinations: [],
+        sources: [],
         abortSignal: abortController.signal,
         triggerInfo: initialExe.triggerType ? {
             type: initialExe.triggerType,
@@ -304,8 +305,9 @@ export async function performExecution(executionId: string, jobId: string) {
         await stepInitialize(ctx);
         checkCancelled();
 
-        // 2. Dump
-        setStage(PIPELINE_STAGES.DUMPING);
+        // 2. Dump. The stage is set inside stepExecuteDump, which knows whether it is
+        // dumping databases, collecting files, or both - so a file-only backup no longer
+        // reports "Dumping Databases".
         await stepExecuteDump(ctx);
         checkCancelled();
 

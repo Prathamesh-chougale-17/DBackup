@@ -4,6 +4,7 @@ import { prismaMock } from '@/lib/testing/prisma-mock';
 import { StorageService } from '@/services/storage/storage-service';
 import { registry } from '@/lib/core/registry';
 import { StorageAdapter, FileInfo } from '@/lib/core/interfaces';
+import { EncryptionKeyRequiredError } from '@/lib/logging/errors';
 
 // ── Module Mocks ───────────────────────────────────────────────
 
@@ -69,8 +70,12 @@ const fsMocks = {
 const mockPipeline = _mockPipeline as unknown as ReturnType<typeof vi.fn>;
 
 // Encryption
-const mockGetProfileMasterKey = vi.fn().mockResolvedValue(Buffer.alloc(32));vi.mock('@/services/backup/encryption-service', () => ({
+const mockGetProfileMasterKey = vi.fn().mockResolvedValue(Buffer.alloc(32));
+// The vault walk is part of the real resolver, which runs unmocked here.
+const mockGetEncryptionProfiles = vi.fn().mockResolvedValue([]);
+vi.mock('@/services/backup/encryption-service', () => ({
     getProfileMasterKey: (...args: any[]) => mockGetProfileMasterKey(...args),
+    getEncryptionProfiles: (...args: any[]) => mockGetEncryptionProfiles(...args),
 }));
 
 const mockCreateDecryptionStream = vi.fn().mockReturnValue({});
@@ -98,7 +103,10 @@ vi.mock('@/lib/logging/logger', () => ({
         }),
     },
 }));
-vi.mock('@/lib/logging/errors', () => ({
+// Only wrapError is stubbed - the error classes have to stay real, since the service
+// distinguishes a missing key from a decryption failure by instanceof.
+vi.mock('@/lib/logging/errors', async (importOriginal) => ({
+    ...await importOriginal<typeof import('@/lib/logging/errors')>(),
     wrapError: vi.fn((e: any) => e),
 }));
 
@@ -121,6 +129,7 @@ function makeDbConfig(overrides?: Record<string, any>) {
         primaryCredentialId: null,
         sshCredentialId: null,
         defaultRetentionPolicyId: null,
+        storageRole: 'DESTINATION',
         ...overrides,
     };
 }
@@ -204,6 +213,7 @@ describe('StorageService', () => {
                 primaryCredentialId: null,
                 sshCredentialId: null,
                 defaultRetentionPolicyId: null,
+                storageRole: 'DESTINATION',
             };
 
             // Prisma Mock
@@ -246,6 +256,7 @@ describe('StorageService', () => {
                 primaryCredentialId: null,
                 sshCredentialId: null,
                 defaultRetentionPolicyId: null,
+                storageRole: 'DESTINATION',
             });
 
             await expect(service.listFiles('db-conf'))
@@ -269,6 +280,7 @@ describe('StorageService', () => {
                 primaryCredentialId: null,
                 sshCredentialId: null,
                 defaultRetentionPolicyId: null,
+                storageRole: 'DESTINATION',
             });
 
             vi.mocked(registry.get).mockReturnValue(undefined);
@@ -418,6 +430,90 @@ describe('StorageService', () => {
             expect(result[0].name).toBe('backup.sql');
             expect(result[0].jobName).toBe('SuperJob');
             expect(result[0].dbInfo?.count).toBe(5);
+        });
+
+        it('should label a combined (DB + directory sources) archive using the combined metadata', async () => {
+            const mockFiles: FileInfo[] = [
+                { name: 'backup.tar', path: 'backup.tar', size: 1024, lastModified: new Date() },
+                { name: 'backup.tar.meta.json', path: 'backup.tar.meta.json', size: 100, lastModified: new Date() }
+            ];
+            const sidecarData = {
+                jobName: 'CombinedJob',
+                sourceName: 'MyDB + 2 directory source(s)',
+                sourceType: 'mysql',
+                databases: { count: 2, names: [] },
+                combined: { databases: 2, directorySources: 2 },
+            };
+            const adapter = makeAdapter({
+                list: vi.fn().mockResolvedValue(mockFiles),
+                read: vi.fn().mockResolvedValue(JSON.stringify(sidecarData)),
+            });
+            prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig({ config: '{}' }));
+            prismaMock.job.findMany.mockResolvedValue([]);
+            prismaMock.execution.findMany.mockResolvedValue([]);
+            vi.mocked(registry.get).mockReturnValue(adapter);
+
+            const result = await service.listFilesWithMetadata('conf-123');
+
+            expect(result[0].dbInfo).toEqual({ count: 2, label: '2 DBs + 2 Dirs' });
+        });
+
+        it('should label a directory-only combined archive without a misleading DB count', async () => {
+            const mockFiles: FileInfo[] = [
+                { name: 'backup.tar', path: 'backup.tar', size: 1024, lastModified: new Date() },
+                { name: 'backup.tar.meta.json', path: 'backup.tar.meta.json', size: 100, lastModified: new Date() }
+            ];
+            const sidecarData = {
+                jobName: 'DirOnlyJob',
+                sourceName: '1 directory source(s)',
+                sourceType: 'directory-only',
+                databases: { count: 0, names: [] },
+                combined: { databases: 0, directorySources: 1 },
+            };
+            const adapter = makeAdapter({
+                list: vi.fn().mockResolvedValue(mockFiles),
+                read: vi.fn().mockResolvedValue(JSON.stringify(sidecarData)),
+            });
+            prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig({ config: '{}' }));
+            prismaMock.job.findMany.mockResolvedValue([]);
+            prismaMock.execution.findMany.mockResolvedValue([]);
+            vi.mocked(registry.get).mockReturnValue(adapter);
+
+            const result = await service.listFilesWithMetadata('conf-123');
+
+            expect(result[0].dbInfo).toEqual({ count: 0, label: '1 Directory Source' });
+        });
+
+        it('should read compression and encryption from a v2 archive metadata block', async () => {
+            // A seekable (v2) archive applies both per entry, so the top-level compression and
+            // encryption fields are absent - the real state lives under `archive`. The explorer
+            // must fall back to it, otherwise a GZIP-compressed encrypted file backup shows
+            // neither in the listing.
+            const mockFiles: FileInfo[] = [
+                { name: 'backup.tar', path: 'backup.tar', size: 1024, lastModified: new Date() },
+                { name: 'backup.tar.meta.json', path: 'backup.tar.meta.json', size: 100, lastModified: new Date() }
+            ];
+            const sidecarData = {
+                jobName: 'FileBackup',
+                sourceType: 'postgres',
+                combined: { databases: 1, directorySources: 1 },
+                // No top-level compression/encryption - only the archive block carries them.
+                archive: { formatVersion: 2, indexFile: '.index', encrypted: true, profileId: 'prof-1', compression: 'GZIP', files: 130 },
+            };
+            const adapter = makeAdapter({
+                list: vi.fn().mockResolvedValue(mockFiles),
+                read: vi.fn().mockResolvedValue(JSON.stringify(sidecarData)),
+            });
+            prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig({ config: '{}' }));
+            prismaMock.job.findMany.mockResolvedValue([]);
+            prismaMock.execution.findMany.mockResolvedValue([]);
+            vi.mocked(registry.get).mockReturnValue(adapter);
+
+            const result = await service.listFilesWithMetadata('conf-123');
+
+            expect(result[0].compression).toBe('GZIP');
+            expect(result[0].isEncrypted).toBe(true);
+            expect(result[0].encryptionProfileId).toBe('prof-1');
         });
 
         it('should enrich file from execution metadata when no sidecar exists', async () => {
@@ -684,12 +780,26 @@ describe('StorageService', () => {
                 .rejects.toThrow('Failed to decrypt configuration for conf-123');
         });
 
-        it('should continue and warn when meta file deletion fails', async () => {
-            let callCount = 0;
+        it('deletes every sidecar alongside the backup', async () => {
+            const adapter = makeAdapter({ delete: vi.fn().mockResolvedValue(true) });
+            prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());
+            vi.mocked(registry.get).mockReturnValue(adapter);
+
+            await service.deleteFile('conf-123', 'test.sql');
+
+            expect(vi.mocked(adapter.delete).mock.calls.map((c) => c[1])).toEqual([
+                'test.sql',
+                'test.sql.meta.json',
+                'test.sql.index',
+            ]);
+        });
+
+        it('continues with the remaining sidecars when one deletion fails', async () => {
+            // A missing sidecar is normal (older backups have no .index), so a failure
+            // there must never abort the rest or fail the delete.
             const adapter = makeAdapter({
-                delete: vi.fn().mockImplementation(() => {
-                    callCount++;
-                    if (callCount === 2) throw new Error('Meta not found');
+                delete: vi.fn().mockImplementation((_config: unknown, target: string) => {
+                    if (target.endsWith('.meta.json')) throw new Error('Meta not found');
                     return Promise.resolve(true);
                 }),
             });
@@ -699,7 +809,7 @@ describe('StorageService', () => {
             const result = await service.deleteFile('conf-123', 'test.sql');
 
             expect(result).toBe(true); // main delete succeeded
-            expect(adapter.delete).toHaveBeenCalledTimes(2);
+            expect(vi.mocked(adapter.delete).mock.calls.map((c) => c[1])).toContain('test.sql.index');
         });
     });
 
@@ -758,10 +868,12 @@ describe('StorageService', () => {
             });
 
             it('should return success without decrypting when no meta or encryption params found', async () => {
+                // Metadata is fetched before the backup itself, so that a file with no
+                // decrypted form is recognised without moving its bytes first.
                 const adapter = makeAdapter({
                     download: vi.fn()
-                        .mockResolvedValueOnce(true)   // main file
-                        .mockResolvedValueOnce(false),  // meta file not found
+                        .mockResolvedValueOnce(false)  // meta file not found
+                        .mockResolvedValueOnce(true),  // main file
                     read: vi.fn().mockResolvedValue(null), // read returns null
                 });
                 prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());
@@ -834,7 +946,7 @@ describe('StorageService', () => {
                 expect(fsMocks.readFile).toHaveBeenCalled();
             });
 
-            it('should throw "Decryption failed" when decryption setup throws', async () => {
+            it('should ask for a key when the profile is gone and the vault holds no match', async () => {
                 const meta = { encryptionProfileId: 'p', iv: 'aabb', authTag: 'ccdd' };
                 const adapter = makeAdapter({
                     download: vi.fn().mockResolvedValue(true),
@@ -843,9 +955,13 @@ describe('StorageService', () => {
                 prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());
                 vi.mocked(registry.get).mockReturnValue(adapter);
                 mockGetProfileMasterKey.mockRejectedValueOnce(new Error('Key not found'));
+                mockGetEncryptionProfiles.mockResolvedValueOnce([]);
 
-                await expect(service.downloadFile('conf-123', 'remote.enc', '/local/out.sql', true))
-                    .rejects.toThrow('ENCRYPTION_KEY_REQUIRED:p');
+                const error = await service.downloadFile('conf-123', 'remote.enc', '/local/out.sql', true)
+                    .catch((e: unknown) => e);
+
+                expect(error).toBeInstanceOf(EncryptionKeyRequiredError);
+                expect((error as EncryptionKeyRequiredError).profileId).toBe('p');
             });
 
             it('should fall through to download fallback when adapter.read throws', async () => {
@@ -869,8 +985,8 @@ describe('StorageService', () => {
                 // adapter.read returns null, then meta download rejects → .catch(() => false) fires
                 const adapter = makeAdapter({
                     download: vi.fn()
-                        .mockResolvedValueOnce(true)   // main file
-                        .mockRejectedValueOnce(new Error('meta not found')), // meta download rejects
+                        .mockRejectedValueOnce(new Error('meta not found')) // meta download rejects
+                        .mockResolvedValueOnce(true),  // main file
                     read: vi.fn().mockResolvedValue(null),
                 });
                 prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());

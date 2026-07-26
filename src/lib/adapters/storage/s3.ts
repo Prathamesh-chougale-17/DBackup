@@ -1,10 +1,10 @@
-import { StorageAdapter, FileInfo, UploadOptions } from "@/lib/core/interfaces";
+import { StorageAdapter, FileInfo, DirectoryBrowseEntry, UploadOptions } from "@/lib/core/interfaces";
 import { S3GenericSchema, S3AWSSchema, S3R2Schema, S3HetznerSchema } from "@/lib/adapters/definitions";
 import { S3Client, ListObjectsV2Command, GetObjectCommand, DeleteObjectCommand, PutObjectCommand, HeadObjectCommand, HeadBucketCommand, StorageClass } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import { createReadStream, createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
-import { Transform } from "stream";
+import { Transform, Readable } from "stream";
 import path from "path";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { logger } from "@/lib/logging/logger";
@@ -35,6 +35,23 @@ class S3ClientFactory {
     static getTargetKey(config: S3InternalConfig, remotePath: string): string {
         const prefix = config.pathPrefix ? config.pathPrefix.replace(/^\/+|\/+$/g, '') : '';
         return prefix ? `${prefix}/${remotePath}` : remotePath;
+    }
+
+    /**
+     * Inverse of getTargetKey: turns a full bucket key into one relative to the adapter's
+     * configured path prefix.
+     *
+     * Every other storage adapter's list() already returns paths relative to its root, and
+     * the whole app - directory-backup relative paths, restore write-back, retention - relies
+     * on that. Object storage has no such root, so a raw key carries the prefix; stripping it
+     * here makes S3 obey the same contract instead of leaking the prefix into stored file
+     * paths (which surfaced as an extra folder named after the prefix on restore).
+     */
+    static stripPrefix(config: S3InternalConfig, key: string): string {
+        const prefix = config.pathPrefix ? config.pathPrefix.replace(/^\/+|\/+$/g, '') : '';
+        if (!prefix) return key;
+        const withSlash = `${prefix}/`;
+        return key.startsWith(withSlash) ? key.slice(withSlash.length) : key;
     }
 }
 
@@ -98,13 +115,63 @@ async function s3List(internalConfig: S3InternalConfig, dir: string = ""): Promi
 
         return response.Contents.map(obj => ({
             name: path.basename(obj.Key || ""),
-            path: obj.Key || "",
+            // Relative to the adapter's path prefix, so it matches every other adapter's
+            // list() and can be fed straight back to download/delete (which re-apply the
+            // prefix) without the prefix leaking into stored paths.
+            path: S3ClientFactory.stripPrefix(internalConfig, obj.Key || ""),
             size: obj.Size || 0,
             lastModified: obj.LastModified || new Date(),
             storageClass: obj.StorageClass || undefined,
         })).filter(f => f.name && f.size > 0); // Filter folders or empty keys
     } catch (error) {
         log.error("S3 list failed", { bucket: internalConfig.bucket, prefix: listPrefix }, wrapError(error));
+        throw error;
+    } finally {
+        client.destroy();
+    }
+}
+
+/**
+ * Lists one level of "folders" below a prefix.
+ *
+ * Object storage has no directories - a key is a flat string. Asking S3 for a delimiter
+ * makes it group keys by the next `/` and return those groups as CommonPrefixes, which is
+ * the same tree the console shows. Pagination matters here: a bucket with many prefixes
+ * returns them across several pages, and stopping at the first would silently hide folders.
+ */
+async function s3BrowseDirectories(
+    internalConfig: S3InternalConfig,
+    subPath: string = ""
+): Promise<DirectoryBrowseEntry[]> {
+    const client = S3ClientFactory.create(internalConfig);
+    const base = S3ClientFactory.getTargetKey(internalConfig, subPath);
+    const listPrefix = base && !base.endsWith("/") ? `${base}/` : base;
+
+    try {
+        const entries: DirectoryBrowseEntry[] = [];
+        let continuationToken: string | undefined;
+
+        do {
+            const response = await client.send(new ListObjectsV2Command({
+                Bucket: internalConfig.bucket,
+                Prefix: listPrefix,
+                Delimiter: "/",
+                ContinuationToken: continuationToken,
+            }));
+
+            for (const group of response.CommonPrefixes ?? []) {
+                if (!group.Prefix) continue;
+                const name = group.Prefix.slice(listPrefix.length).replace(/\/$/, "");
+                if (!name) continue;
+                entries.push({ name, path: subPath ? `${subPath}/${name}` : name });
+            }
+
+            continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+        } while (continuationToken);
+
+        return entries;
+    } catch (error) {
+        log.error("S3 browseDirectories failed", { bucket: internalConfig.bucket, subPath }, wrapError(error));
         throw error;
     } finally {
         client.destroy();
@@ -119,7 +186,9 @@ async function s3Download(
     _onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<boolean> {
     const client = S3ClientFactory.create(internalConfig);
-    const targetKey = remotePath; // Usually getting full path from list() result
+    // list() now returns prefix-relative paths, so the prefix is re-applied here - the same
+    // as upload does - rather than assuming the caller passes a full key.
+    const targetKey = S3ClientFactory.getTargetKey(internalConfig, remotePath);
 
     try {
         const command = new GetObjectCommand({
@@ -164,15 +233,54 @@ async function s3Download(
     }
 }
 
+/**
+ * Streams a byte range of an object via the HTTP Range header.
+ *
+ * Used by file-level restore to pull a single archive entry out of a large backup. The
+ * client is destroyed once the caller has consumed the stream, not before - destroying it
+ * eagerly would abort the transfer mid-flight.
+ */
+async function s3DownloadRange(
+    internalConfig: S3InternalConfig,
+    remotePath: string,
+    start: number,
+    end: number
+): Promise<NodeJS.ReadableStream> {
+    // An empty range is legal - a zero-length file's archive entry produces one - but S3
+    // has no way to express it, so it is answered locally.
+    if (end < start) return Readable.from([]);
+
+    const client = S3ClientFactory.create(internalConfig);
+    const targetKey = S3ClientFactory.getTargetKey(internalConfig, remotePath);
+    try {
+        const response = await client.send(new GetObjectCommand({
+            Bucket: internalConfig.bucket,
+            Key: targetKey,
+            Range: `bytes=${start}-${end}`,
+        }));
+
+        const body = response.Body as unknown as NodeJS.ReadableStream | undefined;
+        if (!body) throw new Error("Empty response body");
+
+        body.on("end", () => client.destroy());
+        body.on("error", () => client.destroy());
+        return body;
+    } catch (error) {
+        client.destroy();
+        log.error("S3 ranged download failed", { bucket: internalConfig.bucket, remotePath, start, end }, wrapError(error));
+        throw error;
+    }
+}
+
 async function s3Read(internalConfig: S3InternalConfig, remotePath: string): Promise<string | null> {
     const client = S3ClientFactory.create(internalConfig);
-    // Note: remotePath here is usually the full path/key from list(), so we don't apply prefix again
-    // unless list() returns relative paths. Current implementation of s3List returns full keys.
+    // list() returns prefix-relative paths, so the prefix is re-applied here.
+    const targetKey = S3ClientFactory.getTargetKey(internalConfig, remotePath);
 
     try {
         const command = new GetObjectCommand({
             Bucket: internalConfig.bucket,
-            Key: remotePath,
+            Key: targetKey,
         });
 
         const response = await client.send(command);
@@ -194,11 +302,13 @@ async function s3Delete(
     _onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<boolean> {
     const client = S3ClientFactory.create(internalConfig);
+    // list() returns prefix-relative paths, so the prefix is re-applied here.
+    const targetKey = S3ClientFactory.getTargetKey(internalConfig, remotePath);
 
     try {
         const command = new DeleteObjectCommand({
             Bucket: internalConfig.bucket,
-            Key: remotePath,
+            Key: targetKey,
         });
 
         await client.send(command);
@@ -317,6 +427,22 @@ export const S3GenericAdapter: StorageAdapter = {
         forcePathStyle: config.forcePathStyle,
         pathPrefix: config.pathPrefix
     }, ...args),
+    downloadRange: (config, ...args) => s3DownloadRange({
+        endpoint: config.endpoint,
+        region: config.region,
+        bucket: config.bucket,
+        credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        forcePathStyle: config.forcePathStyle,
+        pathPrefix: config.pathPrefix
+    }, ...args),
+    browseDirectories: (config, ...args) => s3BrowseDirectories({
+        endpoint: config.endpoint,
+        region: config.region,
+        bucket: config.bucket,
+        credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        forcePathStyle: config.forcePathStyle,
+        pathPrefix: config.pathPrefix
+    }, ...args),
     delete: (config, ...args) => s3Delete({
         endpoint: config.endpoint,
         region: config.region,
@@ -381,11 +507,25 @@ export const S3AWSAdapter: StorageAdapter = {
         region: config.region,
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix
+    }, ...args),
+    downloadRange: (config, ...args) => s3DownloadRange({
+        region: config.region,
+        bucket: config.bucket,
+        credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix
+    }, ...args),
+    browseDirectories: (config, ...args) => s3BrowseDirectories({
+        region: config.region,
+        bucket: config.bucket,
+        credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix
     }, ...args),
     delete: (config, ...args) => s3Delete({
         region: config.region,
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix
     }, ...args),
     test: (config) => s3Test({
         region: config.region,
@@ -443,12 +583,28 @@ export const S3R2Adapter: StorageAdapter = {
         region: "auto",
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix
+    }, ...args),
+    downloadRange: (config, ...args) => s3DownloadRange({
+        endpoint: r2Endpoint(config.accountId, config.jurisdiction),
+        region: "auto",
+        bucket: config.bucket,
+        credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix
+    }, ...args),
+    browseDirectories: (config, ...args) => s3BrowseDirectories({
+        endpoint: r2Endpoint(config.accountId, config.jurisdiction),
+        region: "auto",
+        bucket: config.bucket,
+        credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix
     }, ...args),
     delete: (config, ...args) => s3Delete({
         endpoint: r2Endpoint(config.accountId, config.jurisdiction),
         region: "auto",
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix
     }, ...args),
     test: (config) => s3Test({
         endpoint: r2Endpoint(config.accountId, config.jurisdiction),
@@ -504,12 +660,28 @@ export const S3HetznerAdapter: StorageAdapter = {
         region: config.region,
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix
+    }, ...args),
+    downloadRange: (config, ...args) => s3DownloadRange({
+        endpoint: `https://${config.region}.your-objectstorage.com`,
+        region: config.region,
+        bucket: config.bucket,
+        credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix
+    }, ...args),
+    browseDirectories: (config, ...args) => s3BrowseDirectories({
+        endpoint: `https://${config.region}.your-objectstorage.com`,
+        region: config.region,
+        bucket: config.bucket,
+        credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix
     }, ...args),
     delete: (config, ...args) => s3Delete({
         endpoint: `https://${config.region}.your-objectstorage.com`,
         region: config.region,
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix
     }, ...args),
     test: (config) => s3Test({
         endpoint: `https://${config.region}.your-objectstorage.com`,

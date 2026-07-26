@@ -1,4 +1,5 @@
 import prisma from "@/lib/prisma";
+import { runBulk, type BulkResult } from "@/lib/core/bulk";
 import { logger } from "@/lib/logging/logger";
 import { NotFoundError, ServiceError } from "@/lib/logging/errors";
 
@@ -115,4 +116,17 @@ export async function deleteNamingTemplate(id: string) {
 
   await prisma.namingTemplate.delete({ where: { id } });
   log.info("Naming template deleted", { id });
+}
+
+/**
+ * Deletes several naming templates, reporting per-entry outcomes.
+ *
+ * Each entry goes through the single-entry guard above, so a naming templates that is still in use
+ * is refused with its own reason while the rest of the batch continues.
+ */
+export async function deleteNamingTemplateMany(ids: string[]): Promise<BulkResult> {
+  const rows = await prisma.namingTemplate.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } });
+  const names = new Map(rows.map((row) => [row.id, row.name]));
+
+  return runBulk(ids, (id) => deleteNamingTemplate(id).then(() => undefined), (id) => names.get(id));
 }

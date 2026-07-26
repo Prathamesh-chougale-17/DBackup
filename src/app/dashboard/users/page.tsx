@@ -11,7 +11,7 @@ import { CreateGroupDialog } from "./create-group-dialog";
 import { CreateApiKeyDialog } from "@/components/api-keys/create-api-key-dialog";
 import { ApiKeyTable } from "@/components/api-keys/api-key-table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { getUserPermissions } from "@/lib/auth/access-control";
+import { getUserPermissions, getCurrentUserWithGroup } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
 import { redirect } from "next/navigation";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -36,6 +36,9 @@ export default async function UsersPage() {
     const hasWriteSettings = permissions.includes(PERMISSIONS.SETTINGS.WRITE);
 
     // Fetch data only if permission is granted, otherwise provide empty array to avoid server action errors
+    // The table needs this to keep the signed-in account out of a bulk selection. The
+    // action refuses it server-side too, this only avoids offering it.
+    const currentUser = await getCurrentUserWithGroup();
     const users = hasReadUsers ? await getUsers() : [];
     const groups = hasReadGroups ? await getGroups() : [];
     const ssoProviders = hasReadSettings ? await getSsoProviders() : [];
@@ -73,7 +76,7 @@ export default async function UsersPage() {
                                 </div>
                             </CardHeader>
                             <CardContent>
-                                <UserTable data={users} groups={groups} canManage={canManageUsers} />
+                                <UserTable data={users} groups={groups} canManage={canManageUsers} currentUserId={currentUser?.id ?? null} />
                             </CardContent>
                         </Card>
                     </TabsContent>

@@ -132,9 +132,14 @@ export function JobStatusChart({ data }: JobStatusChartProps) {
                 }}
               />
             </Pie>
+            {/* Recharts 3 drops className from Legend - the styling belongs on the content. */}
             <ChartLegend
-              content={<ChartLegendContent nameKey="status" />}
-              className="-translate-y-2 flex-wrap gap-x-4 gap-y-1 justify-center"
+              content={
+                <ChartLegendContent
+                  nameKey="status"
+                  className="-translate-y-2 flex-wrap gap-x-4 gap-y-1 justify-center"
+                />
+              }
             />
           </PieChart>
         </ChartContainer>

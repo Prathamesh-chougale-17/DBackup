@@ -1,9 +1,10 @@
 import prisma from "@/lib/prisma";
-import { RunnerContext, DestinationContext } from "../types";
+import { RunnerContext, DestinationContext, DirectorySourceContext } from "../types";
 import { registry } from "@/lib/core/registry";
 import { DatabaseAdapter, StorageAdapter } from "@/lib/core/interfaces";
 import { registerAdapters } from "@/lib/adapters";
 import { resolveAdapterConfig } from "@/lib/adapters/config-resolver";
+import { resolveExcludePatterns, parseJsonStringArray } from "@/lib/exclude-groups";
 import { RetentionConfiguration } from "@/lib/core/retention";
 
 // Ensure adapters are loaded
@@ -19,6 +20,10 @@ export async function stepInitialize(ctx: RunnerContext) {
             source: true,
             destinations: {
                 include: { config: true },
+                orderBy: { priority: 'asc' }
+            },
+            sources: {
+                include: { config: true, excludePatternPresets: true },
                 orderBy: { priority: 'asc' }
             },
             notifications: true,
@@ -37,8 +42,11 @@ export async function stepInitialize(ctx: RunnerContext) {
         throw new Error(`Job ${ctx.jobId} not found`);
     }
 
-    if (!job.source) {
-        throw new Error(`Job ${ctx.jobId} is missing source linkage`);
+    // A job needs at least one source: a database source, or one or more directory sources.
+    // Mirrors the JobService.createJob/updateJob validation (defense in depth for jobs created
+    // before that validation existed, or edited directly in the DB).
+    if (!job.source && (!job.sources || job.sources.length === 0)) {
+        throw new Error(`Job ${ctx.jobId} has no source configured (neither a database source nor directory sources)`);
     }
 
     if (!job.destinations || job.destinations.length === 0) {
@@ -60,10 +68,55 @@ export async function stepInitialize(ctx: RunnerContext) {
         ctx.execution = execution;
     }
 
-    // 3. Resolve Source Adapter
-    const sourceAdapter = registry.get(job.source.adapterId) as DatabaseAdapter;
-    if (!sourceAdapter) throw new Error(`Source adapter '${job.source.adapterId}' not found`);
-    ctx.sourceAdapter = sourceAdapter;
+    // 3. Resolve Source Adapter (optional - a directory-only job has no database source)
+    if (job.source) {
+        const sourceAdapter = registry.get(job.source.adapterId) as DatabaseAdapter;
+        if (!sourceAdapter) throw new Error(`Source adapter '${job.source.adapterId}' not found`);
+        ctx.sourceAdapter = sourceAdapter;
+    }
+
+    // 3b. Resolve Directory Sources (JobSource[]) - empty array for every job without one
+    ctx.sources = [];
+    for (const src of job.sources) {
+        const adapter = registry.get(src.config.adapterId) as StorageAdapter;
+        if (!adapter) {
+            ctx.log(`Warning: Directory source adapter '${src.config.adapterId}' for '${src.config.name}' not found. Skipping.`, 'warning');
+            continue;
+        }
+
+        // Exclude patterns are the union of every live-linked preset's current patterns (if any -
+        // re-read fresh here so editing a preset later applies retroactively, same as naming
+        // templates/schedule presets) and this source's own job-specific patterns.
+        //
+        // A preset's patterns come from the curated groups it references plus its own entries,
+        // resolved here rather than stored, so a group extended in a later release applies to
+        // existing jobs without anyone editing them.
+        const presetPatterns: string[] = src.excludePatternPresets.flatMap((p) => resolveExcludePatterns({
+            groups: parseJsonStringArray(p.groups),
+            excludedGroupPatterns: parseJsonStringArray(p.excludedGroupPatterns),
+            patterns: parseJsonStringArray(p.patterns),
+        }));
+        const ownPatterns: string[] = JSON.parse(src.excludePatterns || "[]");
+        const excludePatterns = [...new Set([...presetPatterns, ...ownPatterns])];
+
+        const sourceCtx: DirectorySourceContext = {
+            jobSourceId: src.id,
+            configId: src.config.id,
+            configName: src.config.name,
+            adapter,
+            config: await resolveAdapterConfig(src.config) as any,
+            // "/" is the form's sentinel for "the whole adapter" (see DirectoryBrowseDialog in job-form.tsx);
+            // "" is what every storage adapter's list()/download() actually treats as its own root.
+            remotePath: src.path === "/" ? "" : src.path,
+            excludePatterns,
+            priority: src.priority,
+        };
+        ctx.sources.push(sourceCtx);
+    }
+
+    if (job.sources.length > 0 && ctx.sources.length === 0) {
+        throw new Error(`Job ${ctx.jobId}: No valid directory source adapters could be resolved`);
+    }
 
     // 4. Resolve Destination Adapters
     ctx.destinations = [];
@@ -121,5 +174,6 @@ export async function stepInitialize(ctx: RunnerContext) {
     }
 
     const destNames = ctx.destinations.map(d => d.configName).join(', ');
-    ctx.log(`Initialization complete. Source: ${job.source.name}, Destinations: [${destNames}] (${ctx.destinations.length})`);
+    const sourceLabel = job.source?.name ?? (ctx.sources.length > 0 ? `${ctx.sources.length} directory source(s)` : 'none');
+    ctx.log(`Initialization complete. Source: ${sourceLabel}, Destinations: [${destNames}] (${ctx.destinations.length})`);
 }

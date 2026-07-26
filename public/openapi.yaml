@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: DBackup API
-  version: 2.10.1
+  version: 3.0.0
   description: |
     REST API for DBackup - a self-hosted database backup automation platform with encryption, compression, and smart retention.
 
@@ -483,6 +483,55 @@ paths:
                           type: integer
 
   # ─── Adapters ──────────────────────────────────────────────────
+  /adapters/check-snapshot:
+    post:
+      tags: [Adapters]
+      summary: Check Snapshot Availability
+      description: |
+        Asks a storage server whether it can produce point-in-time snapshots of its path.
+
+        Currently only SMB, via MS-FSRVP. The snapshot option cannot be enabled on an
+        adapter until this reports `supported: true`, and the same check runs again when
+        the adapter is saved.
+      operationId: checkAdapterSnapshot
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [adapterId, config]
+              properties:
+                adapterId:
+                  type: string
+                  example: smb
+                config:
+                  type: object
+                  description: Adapter connection configuration
+                primaryCredentialId:
+                  type: string
+                sshCredentialId:
+                  type: string
+      responses:
+        "200":
+          description: Probe result. Also returned when the server is unreachable - an unavailable snapshot service is an answer, not an error.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  supported:
+                    type: boolean
+                  message:
+                    type: string
+                    example: "\\\\fileserver\\data supports shadow copies (FSRVP 1-1)."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /adapters:
     get:
       tags: [Adapters]
@@ -505,6 +554,15 @@ paths:
             type: string
             enum: [database, storage, notification]
           description: Adapter category
+        - name: role
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [DESTINATION, SOURCE]
+          description: >-
+            Narrows storage adapters to one role (case-insensitive). Omit to receive both.
+            Ignored for other adapter types.
       responses:
         "200":
           description: Adapter list
@@ -2558,6 +2616,15 @@ components:
         updatedAt:
           type: string
           format: date-time
+        storageRole:
+          type: string
+          enum: [DESTINATION, SOURCE]
+          default: DESTINATION
+          description: >-
+            Storage adapters only. A config either receives backups (DESTINATION) or
+            provides folders to back up (SOURCE) - never both, because a destination writes
+            job and chain folders into its configured path while a source reads folders out
+            of it. Ignored for database and notification adapters.
 
     CreateAdapterRequest:
       type: object
@@ -2582,6 +2649,11 @@ components:
         config:
           type: object
           description: Adapter-specific configuration. See adapter documentation for fields.
+        storageRole:
+          type: string
+          enum: [DESTINATION, SOURCE]
+          default: DESTINATION
+          description: Storage adapters only - see AdapterConfig.storageRole. Ignored for other types.
 
     UpdateAdapterRequest:
       type: object
@@ -2591,6 +2663,12 @@ components:
         config:
           type: object
           description: Updated configuration (merged with existing)
+        storageRole:
+          type: string
+          enum: [DESTINATION, SOURCE]
+          description: >-
+            Storage adapters only. Rejected with 400 while a job still uses the adapter in
+            its current role, since the change would remove it from that job's picker.
 
     # ─── Storage ─────────────────────────────────────────────────
     FileInfo:
@@ -2613,15 +2691,25 @@ components:
 
     RestoreRequest:
       type: object
-      required: [file, targetSourceId]
+      required: [file]
       properties:
         file:
           type: string
           description: Backup file path
           example: "backups/mydb_2025-01-15.sql.gz.enc"
+        scope:
+          type: string
+          enum: [all, databases, files]
+          default: all
+          description: >-
+            Which half of a combined (database + directory) archive to restore. Omitting
+            `databaseMapping` or `directoryMapping` means "restore all of them", so a
+            restore that should leave one half untouched has to say so here.
         targetSourceId:
           type: string
-          description: Target database adapter ID
+          description: >-
+            Target database adapter ID. Required whenever the restore includes at least one
+            database - so not for a directory-only backup, nor at `scope: files`.
         targetDatabaseName:
           type: string
           description: Override target DB name (single-DB backups)

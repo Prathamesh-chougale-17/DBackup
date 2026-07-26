@@ -9,11 +9,12 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { deleteGroup } from "@/app/actions/auth/group"
+import { deleteGroup, bulkDeleteGroups } from "@/app/actions/auth/group"
 import { toast } from "sonner"
 import { DateDisplay } from "@/components/utils/date-display"
-import { DataTable } from "@/components/ui/data-table"
-import { useState } from "react"
+import { DataTable, type BulkAction } from "@/components/ui/data-table"
+import { unwrapBulkAction } from "@/lib/bulk-request"
+import { useMemo, useState } from "react"
 import { EditGroupDialog } from "@/app/dashboard/users/edit-group-dialog"
 import { Badge } from "@/components/ui/badge"
 import { GroupWithStats } from "@/types"
@@ -27,6 +28,27 @@ interface GroupTableProps {
 export function GroupTable({ data, canManage }: GroupTableProps) {
     const [editingGroup, setEditingGroup] = useState<GroupWithStats | null>(null)
     const router = useRouter()
+
+    const bulkActions = useMemo<BulkAction<GroupWithStats>[]>(() => {
+        if (!canManage) return []
+
+        return [
+            {
+                id: "delete",
+                labels: { verb: "delete", verbPast: "deleted", noun: "group" },
+                icon: Trash,
+                variant: "destructive",
+                itemName: (group) => group.name,
+                confirm: {
+                    title: (rows) => `Delete ${rows.length} group${rows.length === 1 ? "" : "s"}?`,
+                    description: () =>
+                        "This cannot be undone. A group that still has users assigned is kept and listed afterwards.",
+                    confirmLabel: "Delete",
+                },
+                run: (rows) => unwrapBulkAction(bulkDeleteGroups(rows.map((group) => group.id))),
+            },
+        ]
+    }, [canManage])
 
     const handleDelete = async (id: string) => {
         toast.promise(deleteGroup(id), {
@@ -119,7 +141,18 @@ export function GroupTable({ data, canManage }: GroupTableProps) {
 
     return (
         <>
-            <DataTable columns={columns} data={data} onRefresh={() => router.refresh()} />
+            <DataTable
+                columns={columns}
+                data={data}
+                onRefresh={() => router.refresh()}
+                enableRowSelection={canManage}
+                getRowId={(group) => group.id}
+                // SuperAdmin is refused by the action as well. This keeps it from being
+                // offered in the first place.
+                isRowSelectable={(group) => group.name !== "SuperAdmin"}
+                bulkActions={bulkActions}
+                onBulkActionComplete={() => router.refresh()}
+            />
             {editingGroup && (
                 <EditGroupDialog
                     group={editingGroup}

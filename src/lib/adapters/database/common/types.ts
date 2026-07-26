@@ -1,9 +1,12 @@
 /**
- * Types for Multi-DB TAR Archive Format
+ * Types for the Multi-DB TAR Archive Format (manifest v1)
  *
  * Multi-database backups are stored as TAR archives containing:
  * - manifest.json: Metadata about the archive and contained databases
  * - Individual dump files per database (format depends on adapter)
+ *
+ * Jobs with directory sources use the seekable v2 archive instead - its types live in
+ * src/lib/archive/types.ts.
  */
 
 /**
@@ -56,6 +59,8 @@ export interface CreateTarOptions {
     sourceType: string;
     /** Database engine version */
     engineVersion?: string;
+    /** Unused by createMultiDbTar() - v1 archives are compressed as a whole in 03-upload.ts. */
+    compression?: "NONE" | "GZIP" | "BROTLI";
 }
 
 /**

@@ -1,8 +1,8 @@
-import { StorageAdapter, FileInfo } from "@/lib/core/interfaces";
+import { StorageAdapter, FileInfo, DirectoryBrowseEntry } from "@/lib/core/interfaces";
 import { WebDAVSchema } from "@/lib/adapters/definitions";
 import { createClient, WebDAVClient, FileStat } from "webdav";
-import { createWriteStream } from "fs";
-import { Transform } from "stream";
+import { createReadStream, createWriteStream } from "fs";
+import { Transform, Readable } from "stream";
 import fs from "fs/promises";
 import path from "path";
 import { pipeline } from "stream/promises";
@@ -60,8 +60,24 @@ export const WebDAVAdapter: StorageAdapter = {
 
             if (onLog) onLog(`Starting WebDAV upload to: ${destination}`, "info", "storage");
 
-            const fileBuffer = await fs.readFile(localPath);
-            await client.putFileContents(destination, fileBuffer);
+            // Streamed, not read into a Buffer: a backup archive is routinely larger than
+            // the machine's memory, and buffering it here would fail exactly on the large
+            // backups that matter most. Every other adapter already uploads from a stream.
+            const { size } = await fs.stat(localPath);
+            let sent = 0;
+            const tracker = new Transform({
+                transform(chunk, _encoding, callback) {
+                    sent += chunk.length;
+                    if (onProgress && size > 0) onProgress(Math.min(100, Math.round((sent / size) * 100)));
+                    callback(null, chunk);
+                },
+            });
+
+            await pipeline(
+                createReadStream(localPath),
+                tracker,
+                client.createWriteStream(destination, { overwrite: true })
+            );
 
             if (onProgress) onProgress(100);
             if (onLog) onLog("WebDAV upload completed successfully", "info", "storage");
@@ -71,6 +87,15 @@ export const WebDAVAdapter: StorageAdapter = {
             if (onLog && error instanceof Error) onLog(`WebDAV upload failed: ${error.message}`, "error", "storage", error.stack);
             return false;
         }
+    },
+
+    async downloadRange(config: WebDAVConfig, remotePath: string, start: number, end: number): Promise<NodeJS.ReadableStream> {
+        // An empty range is legal - a zero-length file's archive entry produces one.
+        if (end < start) return Readable.from([]);
+
+        const client = getClient(config);
+        // The webdav client's range is inclusive on both ends, matching our contract.
+        return client.createReadStream(resolvePath(config, remotePath), { range: { start, end } });
     },
 
     async download(config: WebDAVConfig, remotePath: string, localPath: string, onProgress?: (processed: number, total: number) => void, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void): Promise<boolean> {
@@ -123,6 +148,28 @@ export const WebDAVAdapter: StorageAdapter = {
         } catch {
             // Quietly fail if file not found (expected for missing .meta.json)
             return null;
+        }
+    },
+
+    async browseDirectories(config: WebDAVConfig, subPath: string = ""): Promise<DirectoryBrowseEntry[]> {
+        try {
+            const client = getClient(config);
+            const prefix = config.pathPrefix || "";
+            const startDir = prefix
+                ? path.posix.join("/", prefix, subPath)
+                : (subPath ? path.posix.join("/", subPath) : "/");
+
+            // Depth 1: the collection's own children, which is exactly one tree level.
+            const items = await client.getDirectoryContents(startDir) as FileStat[];
+            return items
+                .filter((item) => item.type === "directory")
+                .map((item) => ({
+                    name: item.basename,
+                    path: subPath ? `${subPath}/${item.basename}` : item.basename,
+                }));
+        } catch (error: unknown) {
+            log.error("WebDAV browseDirectories failed", { url: config.url, subPath }, wrapError(error));
+            throw error;
         }
     },
 

@@ -2,6 +2,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 const VALID_KEY = "a".repeat(64);
 
+// Loading `@/lib/adapters/dto` means loading every adapter behind `registerAdapters` - ssh2, the
+// AWS and Google SDKs, the database drivers. That is seconds of work on its own, and the default
+// five-second budget is measured while the rest of the suite competes for the same cores, so the
+// first test here paid a cost that has nothing to do with what it asserts.
+vi.setConfig({ testTimeout: 30_000 });
+
 /**
  * Mirrors the reported PoC (read-only user retrieving decrypted adapter secrets):
  * a stored adapter whose secrets are encrypted must, once mapped through the
@@ -11,11 +17,26 @@ describe("toAdapterListItem (adapter list DTO)", () => {
     beforeEach(() => vi.stubEnv("ENCRYPTION_KEY", VALID_KEY));
     afterEach(() => vi.unstubAllEnvs());
 
-    async function getModules() {
-        vi.resetModules();
+    // Loaded once for the file, not once per test. `@/lib/adapters/dto` pulls in
+    // `registerAdapters`, and with it every adapter - ssh2, the AWS and Google SDKs, the database
+    // drivers. Resetting the module registry before each test made the suite re-evaluate that
+    // whole graph six times, which is fine on its own and intermittently overran the five-second
+    // timeout once the rest of the suite was competing for the same cores. Every test here stubs
+    // the same key, so one load serves them all.
+    let modules: ReturnType<typeof loadModules> | null = null;
+
+    async function loadModules() {
         const crypto = await import("@/lib/crypto");
         const dto = await import("@/lib/adapters/dto");
         return { ...crypto, ...dto };
+    }
+
+    function getModules() {
+        if (!modules) {
+            vi.resetModules();
+            modules = loadModules();
+        }
+        return modules;
     }
 
     function baseRow(config: string) {
@@ -35,6 +56,7 @@ describe("toAdapterListItem (adapter list DTO)", () => {
             lastStatus: "ONLINE",
             lastError: null,
             consecutiveFailures: 0,
+            storageRole: 'DESTINATION',
         };
     }
 

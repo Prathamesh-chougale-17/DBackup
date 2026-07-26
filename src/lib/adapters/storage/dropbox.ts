@@ -1,8 +1,9 @@
-import { StorageAdapter, FileInfo } from "@/lib/core/interfaces";
+import { StorageAdapter, FileInfo, DirectoryBrowseEntry } from "@/lib/core/interfaces";
 import { DropboxSchema } from "@/lib/adapters/definitions";
-import { Dropbox } from "dropbox";
+import { Dropbox, DropboxAuth } from "dropbox";
 import fs from "fs/promises";
 import { createReadStream } from "fs";
+import { Readable } from "stream";
 import path from "path";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { logger } from "@/lib/logging/logger";
@@ -20,6 +21,94 @@ interface DropboxConfig {
 // Dropbox limits simple upload to 150 MB
 const UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024; // 8 MB per chunk for session upload
 const SIMPLE_UPLOAD_LIMIT = 150 * 1024 * 1024; // 150 MB
+
+/**
+ * Turns a Dropbox SDK error into something a user can act on.
+ *
+ * The SDK's own message is just "Response failed with a 409 code" - the reason lives in the
+ * error body as a tag like `path/disallowed_name`. Without unwrapping it, a legitimate refusal
+ * (Dropbox never stores `.DS_Store`, `desktop.ini` or `Thumbs.db`) is indistinguishable from a
+ * broken connection.
+ */
+function dropboxErrorMessage(error: unknown): string {
+    const e = error as {
+        status?: number;
+        message?: string;
+        error?: { error_summary?: string; error?: { [".tag"]?: string } };
+    };
+
+    const summary = e?.error?.error_summary;
+    if (typeof summary === "string" && summary.length > 0) {
+        // error_summary looks like "path/disallowed_name/..." - the leading tags are the useful part.
+        const tag = summary.replace(/\/\.*$/, "").replace(/\.$/, "");
+        if (tag.includes("disallowed_name")) {
+            return `Dropbox does not allow this filename (${tag})`;
+        }
+        if (tag.includes("insufficient_space")) {
+            return "The Dropbox account is out of space";
+        }
+        return `Dropbox rejected the request: ${tag}`;
+    }
+
+    const base = e?.message ?? String(error);
+    return e?.status ? `${base} (HTTP ${e.status})` : base;
+}
+
+/**
+ * How long to wait before retrying a rate-limited Dropbox call, or null if the error is not
+ * a rate limit.
+ *
+ * Dropbox allows only one write per account at a time and answers concurrent writes with
+ * `429 too_many_write_operations`. With several files uploading at once - which restore does -
+ * some are always rejected, even though the account and the path are fine. The API hands back
+ * how long to back off, in a `Retry-After` header or a `retry_after` field on the error body;
+ * honouring it is Dropbox's documented remedy and turns concurrent writes into a queue instead
+ * of a pile of failures.
+ */
+function dropboxRetryAfterMs(error: unknown): number | null {
+    const e = error as { status?: number; headers?: unknown; error?: { error?: { retry_after?: number } } };
+    if (e?.status !== 429) return null;
+
+    let seconds: number | undefined;
+    const headers = e.headers as { get?: (k: string) => string | null } & Record<string, string> | undefined;
+    const rawHeader = typeof headers?.get === "function"
+        ? headers.get("retry-after")
+        : headers?.["retry-after"] ?? headers?.["Retry-After"];
+    if (rawHeader != null) {
+        const parsed = parseInt(String(rawHeader), 10);
+        if (Number.isFinite(parsed)) seconds = parsed;
+    }
+    if (seconds === undefined && typeof e.error?.error?.retry_after === "number") {
+        seconds = e.error.error.retry_after;
+    }
+
+    // A rate limit with no stated delay still needs a sane wait, not a busy loop.
+    return Math.max(1, seconds ?? 1) * 1000;
+}
+
+/**
+ * Runs a write operation, retrying when Dropbox rate-limits it.
+ *
+ * Retries only on 429 - any other failure surfaces at once. The wait is what Dropbox asks
+ * for, so concurrent uploads effectively take turns rather than failing.
+ */
+async function withWriteRetry<T>(
+    fn: () => Promise<T>,
+    label: string,
+    onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
+    maxRetries = 8
+): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await fn();
+        } catch (error: unknown) {
+            const waitMs = dropboxRetryAfterMs(error);
+            if (waitMs === null || attempt >= maxRetries) throw error;
+            if (onLog) onLog(`Dropbox is rate-limiting writes, retrying ${label} in ${Math.round(waitMs / 1000)}s`, "warning", "storage");
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+        }
+    }
+}
 
 /**
  * Patched fetch that adds `.buffer()` to the Response object.
@@ -73,6 +162,25 @@ function createDropboxClient(config: DropboxConfig): Dropbox {
     }
 
     return new Dropbox({
+        clientId: config.clientId,
+        clientSecret: config.clientSecret,
+        refreshToken: config.refreshToken,
+        fetch: dropboxFetch,
+    });
+}
+
+/**
+ * Standalone auth handle, for the few calls that bypass the SDK client.
+ *
+ * Kept separate from createDropboxClient() so the working upload and download paths are
+ * untouched - this only feeds the ranged read, which has to call the content API directly.
+ */
+function createDropboxAuth(config: DropboxConfig): DropboxAuth {
+    if (!config.refreshToken) {
+        throw new Error("Dropbox is not authorized. Please click 'Authorize with Dropbox' to connect your account.");
+    }
+
+    return new DropboxAuth({
         clientId: config.clientId,
         clientSecret: config.clientSecret,
         refreshToken: config.refreshToken,
@@ -165,14 +273,14 @@ export const DropboxAdapter: StorageAdapter = {
             const fileSize = stats.size;
 
             if (fileSize <= SIMPLE_UPLOAD_LIMIT) {
-                // Simple upload for files <= 150 MB
+                // Simple upload for files <= 150 MB. Overwrite mode makes a retry idempotent.
                 const contents = await fs.readFile(localPath);
-                await dbx.filesUpload({
+                await withWriteRetry(() => dbx.filesUpload({
                     path: dropboxPath,
                     contents,
                     mode: { ".tag": "overwrite" },
                     autorename: false,
-                });
+                }), dropboxPath, onLog);
             } else {
                 // Session upload for large files
                 const fileStream = createReadStream(localPath, { highWaterMark: UPLOAD_CHUNK_SIZE });
@@ -184,10 +292,10 @@ export const DropboxAdapter: StorageAdapter = {
 
                     if (!sessionId) {
                         // Start session
-                        const startRes = await dbx.filesUploadSessionStart({
+                        const startRes = await withWriteRetry(() => dbx.filesUploadSessionStart({
                             close: false,
                             contents: buffer,
-                        });
+                        }), dropboxPath, onLog);
                         sessionId = startRes.result.session_id;
                         offset = buffer.length;
                     } else {
@@ -195,22 +303,22 @@ export const DropboxAdapter: StorageAdapter = {
 
                         if (isLast) {
                             // Finish session
-                            await dbx.filesUploadSessionFinish({
-                                cursor: { session_id: sessionId, offset },
+                            await withWriteRetry(() => dbx.filesUploadSessionFinish({
+                                cursor: { session_id: sessionId!, offset },
                                 commit: {
                                     path: dropboxPath,
                                     mode: { ".tag": "overwrite" },
                                     autorename: false,
                                 },
                                 contents: buffer,
-                            });
+                            }), dropboxPath, onLog);
                         } else {
                             // Append to session
-                            await dbx.filesUploadSessionAppendV2({
-                                cursor: { session_id: sessionId, offset },
+                            await withWriteRetry(() => dbx.filesUploadSessionAppendV2({
+                                cursor: { session_id: sessionId!, offset },
                                 close: false,
                                 contents: buffer,
-                            });
+                            }), dropboxPath, onLog);
                         }
                         offset += buffer.length;
                     }
@@ -226,9 +334,51 @@ export const DropboxAdapter: StorageAdapter = {
             return true;
         } catch (error: unknown) {
             log.error("Dropbox upload failed", { remotePath }, wrapError(error));
-            if (onLog) onLog(`Dropbox upload failed: ${error instanceof Error ? error.message : String(error)}`, "error", "storage");
+            if (onLog) onLog(`Dropbox upload failed: ${dropboxErrorMessage(error)}`, "error", "storage");
             return false;
         }
+    },
+
+    /**
+     * Streams a byte range via the Dropbox content API.
+     *
+     * The SDK's filesDownload() buffers the whole object and offers no way to pass a
+     * Range header, so this calls the content endpoint directly. Auth still goes through
+     * the SDK client so the existing refresh-token flow keeps working.
+     */
+    async downloadRange(
+        config: DropboxConfig,
+        remotePath: string,
+        start: number,
+        end: number
+    ): Promise<NodeJS.ReadableStream> {
+        // An empty range is legal - a zero-length file's archive entry produces one.
+        if (end < start) return Readable.from([]);
+
+        const auth = createDropboxAuth(config);
+        await auth.checkAndRefreshAccessToken();
+        const accessToken = auth.getAccessToken();
+        if (!accessToken) throw new Error("Could not obtain a Dropbox access token");
+
+        const res = await fetch("https://content.dropboxapi.com/2/files/download", {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+                "Dropbox-API-Arg": JSON.stringify({ path: buildDropboxPath(config.folderPath, remotePath) }),
+                Range: `bytes=${start}-${end}`,
+            },
+        });
+
+        if (!res.ok || !res.body) {
+            throw new Error(`Dropbox ranged download failed with status ${res.status}`);
+        }
+        // 200 instead of 206 means the server ignored the Range and is sending the whole
+        // object. Failing loudly beats silently decrypting the wrong bytes.
+        if (res.status !== 206) {
+            throw new Error(`Dropbox ignored the Range header (status ${res.status})`);
+        }
+
+        return Readable.fromWeb(res.body as never);
     },
 
     async download(
@@ -295,6 +445,36 @@ export const DropboxAdapter: StorageAdapter = {
             return await listFilesRecursive(dbx, listPath, basePath);
         } catch (error: unknown) {
             log.error("Dropbox list failed", { dir }, wrapError(error));
+            throw error;
+        }
+    },
+
+    async browseDirectories(config: DropboxConfig, subPath: string = ""): Promise<DirectoryBrowseEntry[]> {
+        try {
+            const dbx = createDropboxClient(config);
+            const basePath = config.folderPath?.replace(/\/+$/, "") || "";
+            const listPath = subPath ? buildDropboxPath(config.folderPath, subPath) : basePath;
+
+            const entries: DirectoryBrowseEntry[] = [];
+            let result = await dbx.filesListFolder({ path: listPath, recursive: false, limit: 2000 });
+
+            const processEntries = (items: typeof result.result.entries) => {
+                for (const entry of items) {
+                    if (entry[".tag"] === "folder") {
+                        entries.push({ name: entry.name, path: subPath ? `${subPath}/${entry.name}` : entry.name });
+                    }
+                }
+            };
+            processEntries(result.result.entries);
+
+            while (result.result.has_more) {
+                result = await dbx.filesListFolderContinue({ cursor: result.result.cursor });
+                processEntries(result.result.entries);
+            }
+
+            return entries;
+        } catch (error: unknown) {
+            log.error("Dropbox browseDirectories failed", { subPath }, wrapError(error));
             throw error;
         }
     },

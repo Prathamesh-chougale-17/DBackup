@@ -10,6 +10,7 @@ import { AUDIT_ACTIONS, AUDIT_RESOURCES } from "@/lib/core/audit-types";
 import { logger } from "@/lib/logging/logger";
 import { wrapError, getErrorMessage } from "@/lib/logging/errors";
 import type { Permission } from "@/lib/auth/permissions";
+import { BulkIdsSchema } from "@/lib/core/bulk-schema";
 
 const log = logger.child({ action: "api-key" });
 
@@ -218,4 +219,60 @@ export async function updateApiKeyPermissions(data: { id: string; permissions: s
     log.error("Failed to update API key permissions", { id: data.id }, wrapError(error));
     return { success: false, error: getErrorMessage(error) || "Failed to update API key permissions" };
   }
+}
+
+/** Deletes several API keys, reporting per-key outcomes. */
+export async function bulkDeleteApiKeys(ids: string[]) {
+    await checkPermission(PERMISSIONS.API_KEYS.WRITE);
+    const currentUser = await getCurrentUserWithGroup();
+
+    const parsed = BulkIdsSchema.safeParse(ids);
+    if (!parsed.success) return { success: false as const, error: "Invalid request" };
+
+    try {
+        const result = await apiKeyService.deleteMany(parsed.data);
+        revalidatePath("/dashboard/users");
+
+        if (currentUser) {
+            await auditService.log(
+                currentUser.id,
+                AUDIT_ACTIONS.DELETE,
+                AUDIT_RESOURCES.API_KEY,
+                { bulk: true, requested: parsed.data.length, succeeded: result.succeeded.length, failed: result.failed.length }
+            );
+        }
+
+        return { success: true as const, data: result };
+    } catch (error: unknown) {
+        log.error("Failed to bulk delete API keys", {}, wrapError(error));
+        return { success: false as const, error: getErrorMessage(error) || "Failed to delete API keys" };
+    }
+}
+
+/** Enables or disables several API keys. Absolute, so a mixed selection converges. */
+export async function bulkToggleApiKeys(ids: string[], enabled: boolean) {
+    await checkPermission(PERMISSIONS.API_KEYS.WRITE);
+    const currentUser = await getCurrentUserWithGroup();
+
+    const parsed = BulkIdsSchema.safeParse(ids);
+    if (!parsed.success) return { success: false as const, error: "Invalid request" };
+
+    try {
+        const result = await apiKeyService.toggleMany(parsed.data, enabled);
+        revalidatePath("/dashboard/users");
+
+        if (currentUser) {
+            await auditService.log(
+                currentUser.id,
+                AUDIT_ACTIONS.UPDATE,
+                AUDIT_RESOURCES.API_KEY,
+                { bulk: true, enabled, requested: parsed.data.length, succeeded: result.succeeded.length, failed: result.failed.length }
+            );
+        }
+
+        return { success: true as const, data: result };
+    } catch (error: unknown) {
+        log.error("Failed to bulk toggle API keys", {}, wrapError(error));
+        return { success: false as const, error: getErrorMessage(error) || "Failed to update API keys" };
+    }
 }

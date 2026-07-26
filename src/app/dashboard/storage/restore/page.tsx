@@ -11,5 +11,7 @@ export default async function RestorePage() {
         redirect("/dashboard/storage");
     }
 
-    return <RestoreClient />;
+    // Decides whether the key recovery dialog may offer to save a typed key, since doing so
+    // creates a vault profile.
+    return <RestoreClient canManageVault={permissions.includes(PERMISSIONS.VAULT.WRITE)} />;
 }

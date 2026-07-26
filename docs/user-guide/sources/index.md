@@ -16,13 +16,25 @@ DBackup supports a wide variety of database engines.
 | [MSSQL](/user-guide/sources/mssql) | 2017, 2019, 2022 | `BACKUP DATABASE` | ✅ |
 | [Firebird](/user-guide/sources/firebird) | 3.x, 4.x, 5.x | `gbak` | ✅ (pre-configured aliases) |
 
+## Directory Sources
+
+The Connections page has a **Directory Sources** tab: storage adapters whose
+folders can be backed up as files rather than as a database dump. They use the same
+backends as [Storage Destinations](/user-guide/destinations/) but are configured as their
+own adapters, because the two roles use the configured path differently - a destination
+writes backup and chain folders into it, a source only reads folders out of it. An adapter
+is one or the other, never both.
+
+To use the same server for both, use **Create as Directory Source** on the destination's
+row (or the reverse here) and adjust the path on the copy.
+
 ## Database Explorer
 
 Beyond configuring sources for backups, DBackup includes a **Database Explorer** that lets you browse live databases, tables, and data directly from the UI — no separate database client needed. See [Database Explorer](/user-guide/features/database-explorer).
 
 ## Adding a Source
 
-1. Navigate to **Sources** → **Add Source**
+1. Navigate to **Connections** → **Databases** → **Add New**
 2. Select the database type
 3. Choose **Connection Mode**: Direct or SSH (see below)
 4. Fill in connection details (host, port, credentials)

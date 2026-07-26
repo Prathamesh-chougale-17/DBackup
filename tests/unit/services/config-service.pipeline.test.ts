@@ -342,18 +342,15 @@ describe('restoreFromStorage', () => {
     });
     (registry.get as any).mockReturnValue(adapter);
 
-    prismaMock.encryptionProfile.findUnique.mockResolvedValue({
-      id: encProfileId,
-      secretKey: 'ENC_' + 'a'.repeat(64),
-    } as any);
+    (encryptionService.getProfileMasterKey as any).mockResolvedValue(Buffer.alloc(32));
     (importConfiguration as any).mockResolvedValue(undefined);
 
     // No explicit decryptionProfileId; pipeline must derive it from flat meta
     await restoreFromStorage(storageConfigId, 'backups/config.json');
     await flushAsync();
 
-    // Profile was found and decryption executed
-    expect(prismaMock.encryptionProfile.findUnique).toHaveBeenCalled();
+    // The profile named by the flat metadata is the one asked for.
+    expect(encryptionService.getProfileMasterKey).toHaveBeenCalledWith(encProfileId);
     expect(prismaMock.execution.update).toHaveBeenCalled();
   });
 

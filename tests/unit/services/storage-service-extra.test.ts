@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PassThrough } from 'stream';
 import { prismaMock } from '@/lib/testing/prisma-mock';
-import { StorageService } from '@/services/storage/storage-service';
+import { StorageService, CACHE_SCHEMA_VERSION } from '@/services/storage/storage-service';
 import { registry } from '@/lib/core/registry';
 import { StorageAdapter, FileInfo } from '@/lib/core/interfaces';
 
@@ -118,6 +118,7 @@ function makeDbConfig(overrides?: Record<string, any>) {
         primaryCredentialId: null,
         sshCredentialId: null,
         defaultRetentionPolicyId: null,
+        storageRole: 'DESTINATION',
         ...overrides,
     };
 }
@@ -262,15 +263,72 @@ describe('StorageService - extra coverage', () => {
             expect(result).toBe(false);
         });
 
+        it('refuses to delete a chain member that later backups build on', async () => {
+            // Deleting the full archive of a chain silently makes every incremental after
+            // it unrestorable, and it is the biggest row in the explorer - the obvious one
+            // to remove for space.
+            const adapter = makeAdapter({
+                delete: vi.fn().mockResolvedValue(true),
+                list: vi.fn().mockResolvedValue([
+                    { name: 'full-2026-07-15.tar', path: 'job/chain-2026-07-15/full-2026-07-15.tar', size: 1, lastModified: new Date() },
+                    { name: 'inc-2026-07-16.tar', path: 'job/chain-2026-07-15/inc-2026-07-16.tar', size: 1, lastModified: new Date() },
+                ]),
+            });
+            prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());
+            vi.mocked(registry.get).mockReturnValue(adapter);
+
+            await expect(service.deleteFile('conf-123', 'job/chain-2026-07-15/full-2026-07-15.tar'))
+                .rejects.toThrow(/incremental chain/i);
+
+            expect(adapter.delete).not.toHaveBeenCalled();
+        });
+
+        it('allows deleting the newest member of a chain', async () => {
+            const adapter = makeAdapter({
+                delete: vi.fn().mockResolvedValue(true),
+                list: vi.fn().mockResolvedValue([
+                    { name: 'full-2026-07-15.tar', path: 'job/chain-2026-07-15/full-2026-07-15.tar', size: 1, lastModified: new Date() },
+                    { name: 'inc-2026-07-16.tar', path: 'job/chain-2026-07-15/inc-2026-07-16.tar', size: 1, lastModified: new Date() },
+                ]),
+            });
+            prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());
+            vi.mocked(registry.get).mockReturnValue(adapter);
+
+            await expect(service.deleteFile('conf-123', 'job/chain-2026-07-15/inc-2026-07-16.tar')).resolves.toBe(true);
+        });
+
+        it('leaves a flat full backup alone - nothing can depend on it', async () => {
+            const adapter = makeAdapter({ delete: vi.fn().mockResolvedValue(true), list: vi.fn() });
+            prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());
+            vi.mocked(registry.get).mockReturnValue(adapter);
+
+            await expect(service.deleteFile('conf-123', 'job/backup.tar')).resolves.toBe(true);
+            expect(adapter.list).not.toHaveBeenCalled();
+        });
+
+        it('refuses rather than guesses when the chain folder cannot be listed', async () => {
+            const adapter = makeAdapter({
+                delete: vi.fn().mockResolvedValue(true),
+                list: vi.fn().mockRejectedValue(new Error('connection refused')),
+            });
+            prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());
+            vi.mocked(registry.get).mockReturnValue(adapter);
+
+            await expect(service.deleteFile('conf-123', 'job/chain-2026-07-15/inc-1.tar'))
+                .rejects.toThrow(/could not verify/i);
+            expect(adapter.delete).not.toHaveBeenCalled();
+        });
+
         it('invalidates the cache entry for the deleted file', async () => {
             const adapter = makeAdapter({ delete: vi.fn().mockResolvedValue(true) });
             prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());
             vi.mocked(registry.get).mockReturnValue(adapter);
             prismaMock.storageListCache.findUnique.mockResolvedValue({
                 adapterConfigId: 'conf-123',
-                filesJson: JSON.stringify([
-                    { name: 'backup.sql', path: 'backup.sql', size: 100, lastModified: new Date() },
-                ]),
+                filesJson: JSON.stringify({
+                    v: CACHE_SCHEMA_VERSION,
+                    files: [{ name: 'backup.sql', path: 'backup.sql', size: 100, lastModified: new Date() }],
+                }),
                 cachedAt: new Date(),
             } as any);
             prismaMock.storageListCache.update.mockResolvedValue({} as any);
@@ -397,7 +455,7 @@ describe('StorageService - extra coverage', () => {
             ];
             prismaMock.storageListCache.findUnique.mockResolvedValue({
                 adapterConfigId: 'conf-123',
-                filesJson: JSON.stringify(cachedFiles),
+                filesJson: JSON.stringify({ v: CACHE_SCHEMA_VERSION, files: cachedFiles }),
                 cachedAt: new Date(), // fresh
             } as any);
 
@@ -415,7 +473,7 @@ describe('StorageService - extra coverage', () => {
             ];
             prismaMock.storageListCache.findUnique.mockResolvedValue({
                 adapterConfigId: 'conf-123',
-                filesJson: JSON.stringify(cachedFiles),
+                filesJson: JSON.stringify({ v: CACHE_SCHEMA_VERSION, files: cachedFiles }),
                 cachedAt: staleDate,
             } as any);
 
@@ -428,10 +486,57 @@ describe('StorageService - extra coverage', () => {
             expect(reconcileSpy).toHaveBeenCalledWith('conf-123');
         });
 
+        it('rebuilds instead of serving a cache written by an older version', async () => {
+            // A bare array is the pre-versioning payload: its rows lack fields the explorer
+            // reads (combined, backupType), and reconciling would never add them.
+            prismaMock.storageListCache.findUnique.mockResolvedValue({
+                adapterConfigId: 'conf-123',
+                filesJson: JSON.stringify([{ name: 'legacy.sql', path: 'legacy.sql', size: 100, lastModified: new Date().toISOString() }]),
+                cachedAt: new Date(), // fresh, but outdated in shape
+            } as any);
+
+            prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());
+            const adapter = makeAdapter({ list: vi.fn().mockResolvedValue([]) });
+            vi.mocked(registry.get).mockReturnValue(adapter);
+            prismaMock.job.findMany.mockResolvedValue([]);
+            prismaMock.execution.findMany.mockResolvedValue([]);
+
+            const result = await service.listFilesWithMetadata('conf-123');
+
+            expect(prismaMock.adapterConfig.findUnique).toHaveBeenCalled();
+            expect(result).toHaveLength(0);
+        });
+
+        it('discards a payload written by an older schema version', async () => {
+            // This is how a fixed enrichment reaches rows that are already cached. Reconciliation
+            // only enriches files it has not seen before, so a row cached with a field missing
+            // keeps that field missing forever - the version bump is what rebuilds it. Without
+            // this, correcting the mapping fixes only backups made after the upgrade.
+            prismaMock.storageListCache.findUnique.mockResolvedValue({
+                adapterConfigId: 'conf-123',
+                filesJson: JSON.stringify({
+                    v: CACHE_SCHEMA_VERSION - 1,
+                    files: [{ name: 'stale.sql', path: 'stale.sql', size: 100, lastModified: new Date().toISOString() }],
+                }),
+                cachedAt: new Date(),
+            } as any);
+            prismaMock.adapterConfig.findUnique.mockResolvedValue(makeDbConfig());
+            const adapter = makeAdapter({ list: vi.fn().mockResolvedValue([]) });
+            vi.mocked(registry.get).mockReturnValue(adapter);
+            prismaMock.job.findMany.mockResolvedValue([]);
+            prismaMock.execution.findMany.mockResolvedValue([]);
+
+            const result = await service.listFilesWithMetadata('conf-123');
+
+            // Listed from the destination again rather than served from the outdated payload.
+            expect(adapter.list).toHaveBeenCalled();
+            expect(result.some((f) => f.name === 'stale.sql')).toBe(false);
+        });
+
         it('bypasses cache when bypassCache=true', async () => {
             prismaMock.storageListCache.findUnique.mockResolvedValue({
                 adapterConfigId: 'conf-123',
-                filesJson: JSON.stringify([{ name: 'cached.sql', path: 'cached.sql', size: 100, lastModified: new Date().toISOString() }]),
+                filesJson: JSON.stringify({ v: CACHE_SCHEMA_VERSION, files: [{ name: 'cached.sql', path: 'cached.sql', size: 100, lastModified: new Date().toISOString() }] }),
                 cachedAt: new Date(),
             } as any);
 

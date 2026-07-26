@@ -1,7 +1,7 @@
 "use client";
 
 import { ColumnDef } from "@tanstack/react-table";
-import { ArrowUpDown, Clock, HardDrive, KeyRound, MousePointerClick } from "lucide-react";
+import { ArrowUpDown, Clock, FolderInput, HardDrive, KeyRound, MousePointerClick } from "lucide-react";
 import { AdapterIcon } from "@/components/adapter/adapter-icon";
 import { Button } from "@/components/ui/button";
 import { DateDisplay } from "@/components/utils/date-display";
@@ -9,6 +9,11 @@ import { formatBytes } from "@/lib/utils";
 import { NameCell } from "@/components/dashboard/storage/cells/name-cell";
 import { ActionsCell } from "@/components/dashboard/storage/cells/actions-cell";
 import { Badge } from "@/components/ui/badge";
+import type { RestoreMode } from "@/components/dashboard/storage/restore-scope";
+
+// Re-exported so the explorer's call sites keep importing their types from one place.
+export type { RestoreMode };
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 // This type is used to define the shape of our data.
 export type FileInfo = {
@@ -30,6 +35,16 @@ export type FileInfo = {
     storageClass?: string;
     checksum?: string;
     checksumMd5?: string;
+    /** True for backups that carry a file index, so individual files can be browsed and restored. */
+    hasFileIndex?: boolean;
+    /** Whether the backup stores everything or only what changed. */
+    backupType?: 'full' | 'incremental';
+    /** What the backup contains - drives which restore modes are offered. */
+    combined?: { databases: number; directorySources: number };
+    /** Incremental chain membership. Absent on standalone full backups. */
+    chain?: { id: string; type: 'full' | 'incremental'; index: number };
+    /** Complete snapshot size, which for an incremental exceeds the archive's own size. */
+    logicalSize?: number;
     verification?: {
         verifiedAt: string;
         passed: boolean;
@@ -38,7 +53,8 @@ export type FileInfo = {
 };
 
 interface ColumnsProps {
-    onRestore: (file: FileInfo) => void;
+    onRestore: (file: FileInfo, mode?: RestoreMode) => void;
+    onDownloadSnapshot: (file: FileInfo) => void;
     onDownload: (file: FileInfo, decrypt?: boolean) => void;
     onDelete: (file: FileInfo) => void;
     onToggleLock: (file: FileInfo) => void;
@@ -49,7 +65,7 @@ interface ColumnsProps {
     canDelete: boolean;
 }
 
-export const getColumns = ({ onRestore, onDownload, onDelete, onToggleLock, onGenerateLink, onVerify, canDownload, canRestore, canDelete }: ColumnsProps): ColumnDef<FileInfo>[] => [
+export const getColumns = ({ onRestore, onDownloadSnapshot, onDownload, onDelete, onToggleLock, onGenerateLink, onVerify, canDownload, canRestore, canDelete }: ColumnsProps): ColumnDef<FileInfo>[] => [
     {
         accessorKey: "name",
         header: ({ column }) => {
@@ -77,12 +93,43 @@ export const getColumns = ({ onRestore, onDownload, onDelete, onToggleLock, onGe
         cell: ({ row }) => {
             const name = row.original.sourceName;
             const type = row.original.sourceType;
-            if (!name || name === "Unknown") return <span className="text-muted-foreground">-</span>;
+            const combined = row.original.combined;
+            const dbInfo = row.original.dbInfo;
+
+            // A combined backup carries per-kind counts; a plain database backup has none, so
+            // it is treated as a single database source. The database name and the directory
+            // count are stacked (the sidecar has no directory names, only how many), which
+            // keeps every row consistent: a DB-only, a directory-only and a mixed backup all
+            // read their source the same way instead of one showing a name and another a count.
+            const dirCount = combined?.directorySources ?? 0;
+            const hasDb = type !== "directory-only" && (combined ? combined.databases > 0 : Boolean(name && name !== "Unknown"));
+            // How many databases the backup holds. The engine (postgres/mysql/...) is already
+            // clear from the icon and covered by the Source Type filter, so the badge carries
+            // the count instead - the one thing the row could not otherwise show.
+            const dbCount = combined ? combined.databases : (typeof dbInfo?.count === "number" ? dbInfo.count : (hasDb ? 1 : 0));
+
+            if (!hasDb && dirCount === 0) return <span className="text-muted-foreground">-</span>;
+
+            // Both kinds render the same way - icon, what it is, and how many - so neither
+            // reads as the more important one.
             return (
-                <div className="flex items-center gap-2 text-sm">
-                    <AdapterIcon adapterId={type ?? ""} className="h-3 w-3" />
-                    <span>{name}</span>
-                    {type && <Badge variant="outline" className="text-[10px] h-5 px-1.5">{type}</Badge>}
+                <div className="flex flex-col gap-0.5 text-sm">
+                    {hasDb && (
+                        <div className="flex items-center gap-2">
+                            <AdapterIcon adapterId={type ?? ""} className="h-3 w-3" />
+                            <span>{name}</span>
+                            {dbCount > 0 && (
+                                <Badge variant="outline" className="text-[10px] h-5 px-1.5">{dbCount} DB{dbCount === 1 ? "" : "s"}</Badge>
+                            )}
+                        </div>
+                    )}
+                    {dirCount > 0 && (
+                        <div className="flex items-center gap-2">
+                            <FolderInput className="h-3 w-3" />
+                            <span>Directory source{dirCount === 1 ? "" : "s"}</span>
+                            <Badge variant="outline" className="text-[10px] h-5 px-1.5">{dirCount} Dir{dirCount === 1 ? "" : "s"}</Badge>
+                        </div>
+                    )}
                 </div>
             );
         },
@@ -95,22 +142,16 @@ export const getColumns = ({ onRestore, onDownload, onDelete, onToggleLock, onGe
         header: "Job context",
         cell: ({ row }) => {
             const name = row.original.jobName;
-            const dbLabel = row.original.dbInfo?.label;
 
-            if ((!name || name === "Unknown") && (!dbLabel || dbLabel === "Unknown"))
-                return <span className="text-muted-foreground text-xs">-</span>;
+            // Just the job name. What the backup contains (database count, directory count) now
+            // lives in the Source column, so the composition badge that used to sit here was a
+            // duplicate.
+            if (!name || name === "Unknown") return <span className="text-muted-foreground text-xs">-</span>;
 
             return (
                 <div className="flex items-center gap-2 text-sm">
-                    {name && name !== "Unknown" && (
-                         <>
-                            <HardDrive className="h-3 w-3 text-muted-foreground" />
-                            <span>{name}</span>
-                         </>
-                    )}
-                    {dbLabel && dbLabel !== "Unknown" && (
-                        <Badge variant="secondary" className="text-[10px] h-5 px-1.5">{dbLabel}</Badge>
-                    )}
+                    <HardDrive className="h-3 w-3 text-muted-foreground" />
+                    <span>{name}</span>
                 </div>
             );
         },
@@ -199,9 +240,66 @@ export const getColumns = ({ onRestore, onDownload, onDelete, onToggleLock, onGe
         },
         cell: ({ row }) => {
             const size = parseFloat(row.getValue("size"));
-            const formatted = formatBytes(size);
+            const logical = row.original.logicalSize;
 
-            return <div className="font-medium font-mono text-xs text-right pr-4">{formatted}</div>;
+            // For an incremental the archive only stores what changed. Showing that number
+            // alone would suggest the snapshot is nearly empty, so the complete snapshot
+            // size is shown and the stored size moves into the tooltip.
+            const isPartial = typeof logical === "number" && logical > size;
+
+            return (
+                <div className="font-medium font-mono text-xs text-right pr-4">
+                    {isPartial ? (
+                        <TooltipProvider>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <span className="cursor-help border-b border-dotted border-muted-foreground/50">
+                                        {formatBytes(logical!)}
+                                    </span>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                    Complete snapshot. This archive stores {formatBytes(size)}; the rest is
+                                    referenced from earlier backups in its chain.
+                                </TooltipContent>
+                            </Tooltip>
+                        </TooltipProvider>
+                    ) : (
+                        formatBytes(size)
+                    )}
+                </div>
+            );
+        },
+    },
+    {
+        id: "backupType",
+        header: "Type",
+        cell: ({ row }) => {
+            // Every backup with metadata has a type; only ones from an incremental job
+            // also carry chain details worth explaining in a tooltip.
+            const backupType = row.original.backupType;
+            const chain = row.original.chain;
+            if (!backupType) return <span className="text-muted-foreground text-xs">-</span>;
+
+            return backupType === "full" ? (
+                <Badge variant="outline" className="text-[10px] h-5 px-1.5 border-emerald-200 text-emerald-700 dark:text-emerald-400 dark:border-emerald-900">
+                    Full
+                </Badge>
+            ) : (
+                <TooltipProvider>
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            <Badge variant="outline" className="text-[10px] h-5 px-1.5 border-amber-200 text-amber-700 dark:text-amber-400 dark:border-amber-900">
+                                Incremental
+                            </Badge>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                            {chain
+                                ? `Position ${chain.index} in its backup chain. Restoring it reads from the earlier archives in the same folder as well.`
+                                : "Stores only what changed since the previous backup."}
+                        </TooltipContent>
+                    </Tooltip>
+                </TooltipProvider>
+            );
         },
     },
     {
@@ -229,6 +327,7 @@ export const getColumns = ({ onRestore, onDownload, onDelete, onToggleLock, onGe
                 file={row.original}
                 onDownload={onDownload}
                 onRestore={onRestore}
+                onDownloadSnapshot={onDownloadSnapshot}
                 onDelete={onDelete}
                 onToggleLock={onToggleLock}
                 onGenerateLink={onGenerateLink}

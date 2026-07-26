@@ -1,4 +1,5 @@
 import prisma from "@/lib/prisma";
+import { runBulk, type BulkResult } from "@/lib/core/bulk";
 import { encrypt, decrypt, getSecretStatus } from "@/lib/crypto";
 import { logger } from "@/lib/logging/logger";
 import { ConflictError, NotFoundError, ValidationError, wrapError } from "@/lib/logging/errors";
@@ -303,4 +304,20 @@ export async function deleteCredentialProfile(id: string): Promise<void> {
 
     await prisma.credentialProfile.delete({ where: { id } });
     log.info("Credential profile deleted", { id });
+}
+
+/**
+ * Deletes several credential profiles, reporting per-profile outcomes.
+ *
+ * Each goes through the single-profile guard, so one still attached to an adapter is
+ * refused with its reference count while the rest of the batch continues.
+ */
+export async function deleteCredentialProfiles(ids: string[]): Promise<BulkResult> {
+    const profiles = await prisma.credentialProfile.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, name: true },
+    });
+    const names = new Map(profiles.map((profile) => [profile.id, profile.name]));
+
+    return runBulk(ids, (id) => deleteCredentialProfile(id), (id) => names.get(id));
 }

@@ -8,17 +8,33 @@ type FileWithReasons = {
     reasons: string[];
 };
 
+/** Marks a file the policy itself would have dropped, kept only to keep its chain intact. */
+const CHAIN_KEEP_REASON = 'Part of a retained incremental chain';
+
+export interface RetentionResult {
+    keep: FileInfo[];
+    delete: FileInfo[];
+    /**
+     * Subset of `keep` that the policy alone would have deleted - these survive only
+     * because another snapshot of their chain is still needed. Reported so a destination
+     * holding more backups than the policy says is explainable rather than surprising.
+     */
+    keptForChain: FileInfo[];
+}
+
 export class RetentionService {
     /**
      * Calculates which files to keep and which to delete based on the policy.
      * @param files List of backup files (metadata)
      * @param policy The retention policy configuration
      * @param timezone IANA timezone string used for day/week/month/year bucketing (defaults to 'UTC')
-     * @returns Object with lists of file paths to keep and delete
+     * @returns The files to keep and to delete, plus the ones kept only because a chain
+     *          they belong to is still needed - the reason a destination can hold more
+     *          backups than the policy asks for, which is otherwise invisible.
      */
-    static calculateRetention(files: FileInfo[], policy: RetentionConfiguration, timezone: string = 'UTC'): { keep: FileInfo[]; delete: FileInfo[] } {
+    static calculateRetention(files: FileInfo[], policy: RetentionConfiguration, timezone: string = 'UTC'): RetentionResult {
         if (!policy || policy.mode === 'NONE') {
-            return { keep: files, delete: [] };
+            return { keep: files, delete: [], keptForChain: [] };
         }
 
         // Separate locked files (Always keep, do not count towards policy)
@@ -36,13 +52,51 @@ export class RetentionService {
             this.applySmartPolicy(processedFiles, policy.smart, timezone);
         }
 
+        // Incremental chains can only be deleted whole. A later snapshot references bytes
+        // in earlier archives of its chain, so removing one member would silently gut the
+        // others. GFS still evaluates individual snapshots - keepDaily 7 means 7 days, not
+        // 7 chains - and a chain simply survives until every one of its snapshots expires.
+        this.protectIncompleteChains(processedFiles, lockedFiles);
+
         const keptFromPolicy = processedFiles.filter(f => f.keep).map(f => f.file);
         const deletedFromPolicy = processedFiles.filter(f => !f.keep).map(f => f.file);
+        const keptForChain = processedFiles
+            .filter(f => f.reasons.includes(CHAIN_KEEP_REASON))
+            .map(f => f.file);
 
         return {
             keep: [...keptFromPolicy, ...lockedFiles], // Add locked files to keep list
-            delete: deletedFromPolicy
+            delete: deletedFromPolicy,
+            keptForChain,
         };
+    }
+
+    /**
+     * Promotes every member of a chain to "keep" when at least one of its snapshots is
+     * being kept.
+     *
+     * The consequence is that slightly more is retained than the policy asks for: a chain
+     * lingers until its newest member ages out. That is predictable and explainable, and
+     * far preferable to the alternative, which is a retained snapshot whose data has been
+     * partially deleted underneath it.
+     */
+    private static protectIncompleteChains(files: FileWithReasons[], lockedFiles: FileInfo[]) {
+        const chainsToKeep = new Set<string>();
+
+        for (const entry of files) {
+            if (entry.keep && entry.file.chainId) chainsToKeep.add(entry.file.chainId);
+        }
+        // A locked backup pins its whole chain too, for the same reason.
+        for (const locked of lockedFiles) {
+            if (locked.chainId) chainsToKeep.add(locked.chainId);
+        }
+
+        for (const entry of files) {
+            if (entry.keep || !entry.file.chainId) continue;
+            if (!chainsToKeep.has(entry.file.chainId)) continue;
+            entry.keep = true;
+            entry.reasons.push(CHAIN_KEEP_REASON);
+        }
     }
 
     private static applySimplePolicy(files: FileWithReasons[], count: number) {

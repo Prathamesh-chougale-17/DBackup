@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { STORAGE_ROLES } from "@/lib/core/storage-roles";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -15,7 +16,7 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Edit, Play, Trash2, Clock, Lock, Webhook, Copy, FolderOpen } from "lucide-react";
+import { Edit, Play, Trash2, Clock, Lock, Webhook, Copy, FolderOpen, FolderInput, Pause } from "lucide-react";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -23,15 +24,15 @@ import {
     DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
 import { toast } from "sonner";
-import { JobForm, JobData, AdapterOption, EncryptionOption } from "@/components/dashboard/jobs/job-form";
+import { JobForm, JobData, JobSourceData, AdapterOption, EncryptionOption } from "@/components/dashboard/jobs/job-form";
 import { ApiTriggerDialog } from "@/components/dashboard/jobs/api-trigger-dialog";
 import { AdapterIcon } from "@/components/adapter/adapter-icon";
 import { Badge } from "@/components/ui/badge";
 import { Plus } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { getEncryptionProfiles } from "@/app/actions/backup/encryption";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type BulkAction } from "@/components/ui/data-table";
+import { requestBulk } from "@/lib/bulk-request";
 import { ColumnDef } from "@tanstack/react-table";
 import { useMemo } from "react";
 import { useUserPreferences } from "@/hooks/use-user-preferences";
@@ -49,7 +50,8 @@ interface JobDestinationWithConfig {
 
 // Extended Job type for display (includes related entity names)
 interface Job extends Omit<JobData, 'destinations'> {
-    source: { name: string, type: string, adapterId: string };
+    source: { name: string, type: string, adapterId: string } | null;
+    sources?: (JobSourceData & { config: { id: string; name: string; adapterId: string } })[];
     destinations: JobDestinationWithConfig[];
     createdAt: string;
     encryptionProfile?: { name: string };
@@ -61,15 +63,16 @@ interface Job extends Omit<JobData, 'destinations'> {
 interface JobsClientProps {
     canManage: boolean;
     canExecute: boolean;
+    sources: AdapterOption[];
+    destinations: AdapterOption[];
+    notificationChannels: AdapterOption[];
+    encryptionProfiles: EncryptionOption[];
 }
 
-export function JobsClient({ canManage, canExecute }: JobsClientProps) {
+export function JobsClient({ canManage, canExecute, sources, destinations, notificationChannels, encryptionProfiles }: JobsClientProps) {
     const [jobs, setJobs] = useState<Job[]>([]);
-    const [sources, setSources] = useState<AdapterOption[]>([]);
-    const [destinations, setDestinations] = useState<AdapterOption[]>([]);
-    const [notificationChannels, setNotificationChannels] = useState<AdapterOption[]>([]);
-    const [encryptionProfiles, setEncryptionProfiles] = useState<EncryptionOption[]>([]);
     const [isLoading, setIsLoading] = useState(true);
+    const directorySourceOptions = useMemo(() => destinations.filter((d) => d.storageRole === STORAGE_ROLES.SOURCE), [destinations]);
 
     const [isDialogOpen, setIsDialogOpen] = useState(false);
     const [editingJob, setEditingJob] = useState<Job | null>(null);
@@ -92,29 +95,10 @@ export function JobsClient({ canManage, canExecute }: JobsClientProps) {
         } catch { toast.error("Failed to fetch jobs"); }
     };
 
-    const fetchAdapters = async () => {
-        try {
-            const [s, d, n] = await Promise.all([
-                fetch("/api/adapters?type=database").then(r => r.json()),
-                fetch("/api/adapters?type=storage").then(r => r.json()),
-                fetch("/api/adapters?type=notification").then(r => r.json())
-            ]);
-            setSources(s);
-            setDestinations(d);
-            setNotificationChannels(n);
-
-            const encRes = await getEncryptionProfiles();
-            if (encRes.success && encRes.data) {
-                setEncryptionProfiles(encRes.data.map((p: any) => ({ id: p.id, name: p.name })));
-            }
-        } catch { toast.error("Failed to fetch adapters"); }
-    };
-
     useEffect(() => {
-        // Wrap in IIFE or just call them, but ensure async pattern is clean
         const init = async () => {
              setIsLoading(true);
-             await Promise.all([fetchJobs(), fetchAdapters()]);
+             await fetchJobs();
              setIsLoading(false);
         };
         init();
@@ -177,6 +161,47 @@ export function JobsClient({ canManage, canExecute }: JobsClientProps) {
         } catch { toast.error("Execution request failed"); }
     }, [router, autoRedirectOnJobStart]);
 
+    const bulkActions = useMemo<BulkAction<Job>[]>(() => {
+        if (!canManage) return [];
+
+        const runAction = (action: "delete" | "enable" | "disable", rows: Job[]) =>
+            requestBulk("/api/jobs/bulk", { action, ids: rows.map((job) => job.id) });
+
+        return [
+            {
+                id: "enable",
+                labels: { verb: "enable", verbPast: "enabled", noun: "job" },
+                icon: Play,
+                // Nothing to do when every selected job already runs.
+                isAvailable: (rows) => rows.some((job) => !job.enabled),
+                itemName: (job) => job.name,
+                run: (rows) => runAction("enable", rows),
+            },
+            {
+                id: "pause",
+                labels: { verb: "pause", verbPast: "paused", noun: "job" },
+                icon: Pause,
+                isAvailable: (rows) => rows.some((job) => job.enabled),
+                itemName: (job) => job.name,
+                run: (rows) => runAction("disable", rows),
+            },
+            {
+                id: "delete",
+                labels: { verb: "delete", verbPast: "deleted", noun: "job" },
+                icon: Trash2,
+                variant: "destructive",
+                itemName: (job) => job.name,
+                confirm: {
+                    title: (rows) => `Delete ${rows.length} job${rows.length === 1 ? "" : "s"}?`,
+                    description: () =>
+                        "This cannot be undone. Backups already written to storage are not affected.",
+                    confirmLabel: "Delete",
+                },
+                run: (rows) => runAction("delete", rows),
+            },
+        ];
+    }, [canManage]);
+
     const columns = useMemo<ColumnDef<Job>[]>(() => [
         {
             accessorKey: "name",
@@ -202,12 +227,30 @@ export function JobsClient({ canManage, canExecute }: JobsClientProps) {
         {
             accessorKey: "source.name",
             header: "Source",
-            cell: ({ row }) => (
-                <div className="flex items-center gap-1.5">
-                    <AdapterIcon adapterId={row.original.source.adapterId} className="h-3.5 w-3.5" />
-                    {row.original.source.name}
-                </div>
-            )
+            cell: ({ row }) => {
+                const source = row.original.source;
+                const dirSources = row.original.sources || [];
+                if (!source && dirSources.length === 0) {
+                    return <span className="text-muted-foreground text-sm">-</span>;
+                }
+                return (
+                    <div className="flex flex-col gap-0.5">
+                        {source && (
+                            <div className="flex items-center gap-1.5 text-sm">
+                                <AdapterIcon adapterId={source.adapterId} className="h-3.5 w-3.5" />
+                                {source.name}
+                            </div>
+                        )}
+                        {dirSources.map((s, i) => (
+                            <div key={`${s.configId}-${s.path}-${i}`} className="flex items-center gap-1.5 text-sm">
+                                <FolderInput className="h-3.5 w-3.5" />
+                                {s.config?.name || s.configId}
+                                <span className="text-muted-foreground truncate max-w-40">{s.path}</span>
+                            </div>
+                        ))}
+                    </div>
+                );
+            }
         },
         {
             id: "destinations",
@@ -398,13 +441,17 @@ export function JobsClient({ canManage, canExecute }: JobsClientProps) {
                         data={jobs}
                         searchKey="name"
                         onRefresh={fetchJobs}
+                        enableRowSelection={canManage}
+                        getRowId={(job) => job.id}
+                        bulkActions={bulkActions}
+                        onBulkActionComplete={fetchJobs}
                     />
                 </CardContent>
             </Card>
 
 
             <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-                <DialogContent className="max-w-175">
+                <DialogContent className="max-w-4xl sm:max-w-4xl">
                     <DialogHeader>
                         <DialogTitle>{editingJob ? "Edit Backup Job" : "Create New Backup Job"}</DialogTitle>
                         <DialogDescription>
@@ -417,6 +464,7 @@ export function JobsClient({ canManage, canExecute }: JobsClientProps) {
                                 <JobForm
                                     sources={sources}
                                     destinations={destinations}
+                                    directorySourceOptions={directorySourceOptions}
                                     notifications={notificationChannels}
                                     encryptionProfiles={encryptionProfiles}
                                     initialData={editingJob}

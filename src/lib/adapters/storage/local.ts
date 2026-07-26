@@ -1,10 +1,11 @@
-import { StorageAdapter, FileInfo } from "@/lib/core/interfaces";
+import { StorageAdapter, FileInfo, DirectoryBrowseEntry } from "@/lib/core/interfaces";
 import { calculateFileChecksum } from "@/lib/crypto/checksum";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { LocalStorageSchema } from "@/lib/adapters/definitions";
 import fs from "fs/promises";
 import path from "path";
 import { createReadStream, createWriteStream } from "fs";
+import { Readable } from "stream";
 import { execFile } from "child_process";
 import { promisify } from "util";
 
@@ -15,12 +16,29 @@ import { wrapError, AdapterError } from "@/lib/logging/errors";
 
 const log = logger.child({ adapter: "local-filesystem" });
 
-// Helper to prevent path traversal
+/**
+ * Resolves a remote path against the adapter's configured root, refusing anything that
+ * escapes it.
+ *
+ * Every remote path in DBackup is relative to the adapter's own root, so a leading slash
+ * means "the root of this adapter", never the root of the host filesystem. It has to be
+ * stripped before resolving: `path.resolve(base, "/restore")` yields `/restore`, because an
+ * absolute second argument discards the base entirely - which would reject perfectly
+ * ordinary target paths like `/restore` that the UI itself suggests. Every other adapter
+ * already behaves this way by using `path.posix.join()`.
+ *
+ * Stripping is safe: the containment check below still runs on the resolved result, so
+ * `/../etc/passwd` and `/restore/../../etc/passwd` are both still rejected.
+ */
 function resolveSafePath(basePath: string, relativePath: string): string {
     const resolvedBase = path.resolve(basePath);
-    const resolvedTarget = path.resolve(resolvedBase, relativePath);
+    const relativeToRoot = relativePath.replace(/^[/\\]+/, "");
+    const resolvedTarget = path.resolve(resolvedBase, relativeToRoot);
 
-    if (!resolvedTarget.startsWith(resolvedBase)) {
+    // Compared against `base + separator`, not the bare base: a plain prefix check would
+    // accept a sibling directory whose name merely starts with the base name (base
+    // "/srv/data" would let "/srv/dataEVIL/secret" through).
+    if (resolvedTarget !== resolvedBase && !resolvedTarget.startsWith(resolvedBase + path.sep)) {
         throw new AdapterError("local-filesystem", "path-validation", `Access denied: Illegal path traversal detected. Base: ${resolvedBase}, Target: ${resolvedTarget}`);
     }
     return resolvedTarget;
@@ -70,6 +88,18 @@ export const LocalFileSystemAdapter: StorageAdapter = {
             if (onLog && error instanceof Error) onLog(`Local upload failed: ${error.message}`, 'error', 'general', error.stack);
             return false;
         }
+    },
+
+    async downloadRange(
+        config: { basePath: string },
+        remotePath: string,
+        start: number,
+        end: number
+    ): Promise<NodeJS.ReadableStream> {
+        const sourcePath = resolveSafePath(config.basePath, remotePath);
+        // An empty range is legal - a zero-length file's archive entry produces one.
+        if (end < start) return Readable.from([]);
+        return createReadStream(sourcePath, { start, end });
     },
 
     async download(
@@ -149,8 +179,8 @@ export const LocalFileSystemAdapter: StorageAdapter = {
 
             for (const entry of entries) {
                 if (entry.isFile()) {
-                    // With recursive: true, entry.name is just the filename, entry.path is the directory
-                    const fullPath = path.join(entry.parentPath || entry.path, entry.name); // Node 20+ uses parentPath
+                    // With recursive: true, entry.name is just the filename and parentPath is its directory.
+                    const fullPath = path.join(entry.parentPath, entry.name);
                     const relativePath = path.relative(config.basePath, fullPath);
                     const stats = await fs.stat(fullPath);
 
@@ -173,6 +203,25 @@ export const LocalFileSystemAdapter: StorageAdapter = {
             log.error("Local list failed", { remotePath }, wrapError(error));
             throw error;
         }
+    },
+
+    async browseDirectories(config: { basePath: string }, subPath: string = ""): Promise<DirectoryBrowseEntry[]> {
+        const dirPath = resolveSafePath(config.basePath, subPath);
+        let entries;
+        try {
+            entries = await fs.readdir(dirPath, { withFileTypes: true });
+        } catch (error) {
+            const nodeErr = error as NodeJS.ErrnoException;
+            if (nodeErr.code === "ENOENT") return [];
+            log.error("Local browseDirectories failed", { subPath }, wrapError(error));
+            throw error;
+        }
+        return entries
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => ({
+                name: entry.name,
+                path: subPath ? `${subPath}/${entry.name}` : entry.name,
+            }));
     },
 
     async delete(config: { basePath: string }, remotePath: string): Promise<boolean> {

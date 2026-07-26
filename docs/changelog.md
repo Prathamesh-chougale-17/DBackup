@@ -2,6 +2,156 @@
 
 All notable changes to DBackup are documented here.
 
+## v3.0.0 - File & Folder Backups, Incremental Chains, and General Improvements & Fixes
+*Released: July 26, 2026*
+
+> **Note:** File backups introduce artefacts that did not exist before. A combined (database +
+> directory source) backup is a seekable archive - compression and encryption are applied per entry
+> rather than to the archive as a whole, which is what lets a single file be restored without
+> fetching the rest - and it carries a `<backup>.index` sidecar next to the usual `.meta.json`. An
+> incremental job stores its snapshots in `<job>/chain-<timestamp>/` instead of flat. Tooling that
+> walks a destination and expects two files per backup will meet a third one next to these.
+> Nothing existing changes: database-only backups keep their format, their layout and their restore
+> path. Only the reverse matters - a backup written by this version cannot be read by an older one.
+
+> **Download your Recovery Kits again.** The kit was rebuilt from scratch for this release: one
+> tool instead of two scripts, a menu that finds your backups and asks what to do with them,
+> launchers for all three systems, and support for the new file-backup and incremental formats.
+> An older kit cannot read a file backup at all. Your key has not changed, so the new kit is a drop-in
+> replacement - Vault > Encryption > Recovery Kit, then tick the profiles it should cover.
+
+### ✨ Features
+
+- **ui**: Tables now support **bulk operations**. Tick several rows and act on all of them at once - delete backups, connections, jobs, users and vault entries, pause or resume jobs, lock or unlock backups. The confirmation lists what it is about to touch, entries that cannot be included say why, and anything that fails is reported per entry instead of stopping the rest.
+- **jobs**: Backup jobs can now back up **directories and files**, not just databases. A job can have one or more directory sources - any storage adapter can serve as one - alongside or instead of a database, collected into a single archive per run. Folders are picked from a checkbox tree, and reusable **Exclude Pattern Presets** keep glob lists in one place - editing a preset applies to every source that links it.
+- **backup**: File backups use a new **seekable archive format**. Compression and encryption are applied to each entry rather than to the archive as a whole, and a `<backup>.index` sidecar lists every file with its size, timestamp and checksum. That is what makes it possible to browse a backup without downloading it and to restore one file out of a 100 GB archive. Encrypted archives derive a fresh key per archive with counter-based nonces, keep no cleartext paths or checksums anywhere, and pack small files into shared bundles.
+- **restore**: The restore page covers everything in a backup: pick individual databases, whole directory sources, single folders or single files, each with its own target. Files can go back to their original location, into any configured destination, or come down as a `.tar.gz`. A backup holding both databases and files asks up front which half you want.
+- **storage**: Storage adapters can serve **byte ranges**, so restoring one file transfers that file instead of the whole backup. Implemented for every destination except SMB, which falls back to fetching the archive once.
+- **storage**: File backups offer a **Download Decrypted Contents** action instead of a plain decrypted download, since a seekable archive has no single stream to decrypt. It unpacks the archive - and the rest of its chain, for an incremental - into a `.tar.gz`. Asking for a decrypted download of one through the API instead fails with an explanation rather than quietly returning ciphertext.
+- **jobs**: Directory sources can be backed up **incrementally**, storing only what changed since the last run. Opt-in per job, with a configurable full-backup interval and an option to detect changes by content instead of timestamps. Each chain lives in its own folder and is retained and deleted as a unit, so a snapshot can never lose the archives it depends on.
+- **templates**: Naming templates gained a `{chain}` token that places an incremental backup's chain position (`full-000`, `inc-001`) anywhere in the filename. Left out of a template, the position is prepended automatically as before. Used but empty (any non-incremental job), it disappears together with the `_` or `-` next to it.
+- **smb**: Directory sources on SMB shares can be read from a **VSS shadow copy** instead of the live share, so open files are readable and the backup reflects a single point in time. Uses MS-FSRVP and needs no agent on the file server. The option only unlocks once the server confirms it can deliver one, and a run whose snapshot turns out to be unavailable fails rather than quietly backing up the live share.
+- **vault**: The Recovery Kit is now **one tool that asks what you want**. Start it - by double-clicking a launcher on Windows, macOS or Linux - and it scans its own folder, lists the backups it found, and offers to restore them. It recognises every format DBackup writes, so nobody has to work out whether they are holding a database dump, a file backup or an incremental chain before they can begin, and it reads `master.key` itself instead of asking for the key to be pasted on a command line. The two separate scripts and the two half-finished helper launchers they came with are gone. The command line is unchanged for scripting and over SSH, and now takes a folder wherever it took an archive.
+- **vault**: A Recovery Kit can carry the keys of **several encryption profiles at once**, ticked off a list when you download it. A backup records which profile encrypted it, so the tool picks the right key by itself - there is no longer a kit per profile to keep apart and match to the right job. Untick profiles for a kit that only opens part of your backups, and note that a kit holding every key opens every backup.
+- **vault**: The Recovery Kit can restore a single database out of a backup that holds several, by name - in the wizard as a pick-list, on the command line as an argument. It already worked for a database inside a file backup but was undiscoverable, and was not possible at all for a database-only backup.
+- **vault**: The Recovery Kit unpacks a database backup holding several databases into one dump per database, and everything it restores - dumps, files, whole chains - lands in the same `restored` folder. Previously a multi-database backup came back as a `.tar` to take apart by hand, and it landed next to its own encrypted file rather than where every other kind of restore went.
+- **vault**: The Recovery Kit tool streams every entry it extracts, so recovering a backup that holds a 50 GB file needs no more memory than one holding text files, and a file only appears once its authentication tag and checksum both verify.
+- **storage**: The folder browser used when configuring a directory source now works for **every** storage adapter. SMB, FTP, WebDAV and S3-compatible storage previously left the Browse button disabled and the path had to be typed by hand - not for any protocol reason, it had simply never been implemented for them. On object storage the tree lists key prefixes, matching what the provider's console shows.
+- **destinations**: New "Create as Directory Source" action (and its reverse) copies a storage adapter into the opposite role including its credentials, so one server can serve both purposes without being set up twice.
+- **jobs**: Creating and editing a backup job now opens a dedicated page instead of a modal, giving the folder tree room to work.
+- **vault**: A backup whose encryption profile was deleted can be reopened by pasting the key itself. The key is checked against that specific backup before anything is stored - for a file backup the check is exact, since its index carries an authentication tag - and is then saved as a new vault profile. That is what makes it work everywhere afterwards, including for restores that run unattended and have nobody to ask. Pasting a key that is already in the vault points at the existing profile instead of creating a second one. Requires permission to manage the vault.
+- **auth**: New `DISABLE_EMAIL_LOGIN` environment variable switches off password sign-in, leaving SSO and passkeys. The endpoints are rejected server-side rather than only hidden, and administrators keep creating users and resetting passwords from the Users page. Set it only after the first administrator and an SSO provider exist, since there is no bootstrap exception.
+- **SSO**: New `OIDC_AUTO_REDIRECT` environment variable takes a provider ID and sends visitors straight to that provider instead of showing the login page. It is skipped after a failed sign-in and right after signing out, and an ID matching no enabled provider logs an error at startup rather than stopping the application.
+- **Authelia**: New pre-configured SSO adapter. Enter the Authelia URL and the endpoints are discovered automatically, no manual entry through the generic adapter.
+
+### 🐛 Bug Fixes
+
+- **connections**: Fixed deleting a connection that is still used by a notification template failing with a raw database error instead of naming what still depends on it.
+- **sftp**: Fixed transfers running one request per round trip, which capped a single file at about 3 MB/s over a 20 ms link regardless of bandwidth. Uploads and downloads now keep 64 chunks in flight. Downloads took the slow path unless a caller asked for progress reporting, which decided the transfer algorithm by accident. They now use the fast one either way.
+- **sftp**: Fixed a destination with a configured path failing with a permission error on a path nobody entered (`Permission denied /volume1` for a configured `/volume1/Transfer/restore`). Creating a directory walked *upwards* until it found one that exists, which on a NAS means climbing to the filesystem root, since an account can usually write inside its share without being able to stat the volume above it. The configured path is now treated as a precondition and only folders below it are created. When it is unreachable, the error names that path, says which segment of it stops being visible, and - where SFTP is confined below the filesystem root, which is what `ChrootDirectory` in `sshd_config` and most NAS and hosted SFTP setups do - names a rewritten path after confirming that the server actually has it.
+- **webdav**: Fixed uploads reading the whole backup into memory before sending it, which made a backup larger than the machine's RAM fail on this destination alone. Uploads now stream, as every other destination already did.
+- **backup**: Fixed the storage listing cache update after an upload being fired without awaiting it, which left its failures unhandled and could let it outlive the backup run that produced it.
+- **auth**: Removed two debug statements that wrote the full better-auth context object to the browser console on every login attempt.
+- **notifications**: Fixed the notification preview showing timestamps in the browser locale instead of the user's configured timezone and format.
+- **storage**: Fixed the download link dialog, the SSO provider editor and the adapter type picker scrolling with the native scrollbar instead of the styled one.
+- **auth**: Fixed two-factor authentication failing since v2.10.1 with an empty error in the UI and an `Unknown argument 'failedVerificationCount'` database error in the logs. The Better Auth update added lockout tracking to the two-factor record, but the matching columns were never added to the schema, so both enabling 2FA and verifying TOTP or backup codes failed. Failed attempts are now counted and the lockout works as intended. ([#130](https://github.com/Skyfay/DBackup/issues/130))
+- **dropbox**: Fixed uploads failing outright when Dropbox's API returned a rate limit error, and a disallowed filename being reported the same way as any other failure. A rate-limited upload now retries automatically, and a bad filename says so.
+- **vault**: Fixed the Recovery Kit shipping a `master.key` that nothing read. Every documented command told the user to paste the key instead, which put it in shell history and in the process list. The tool reads the file itself now, and no launcher carries the key.
+- **vault**: Fixed the Recovery Kit's Linux and macOS helper arriving without its executable bit and only ever starting the database half of the kit. There are working launchers for all three systems now, and they start the whole tool.
+
+### 🔒 Security
+
+- **local-filesystem**: Tightened the path containment check, which accepted a sibling directory whose name merely started with the configured base path (a job pointed at `/srv/data` could reach `/srv/dataEVIL`).
+- **S3**: Fixed `pathPrefix` not being applied to downloads, range reads and deletes on S3-compatible storage, which could let those operations reach outside the configured prefix root.
+- **dependencies**: Updated Next.js to 16.2.12, closing eight advisories including a middleware bypass, server-side request forgery in Server Actions and in rewrites, and cache confusion of response bodies.
+- **dependencies**: Pinned `sharp`, `postcss` and `brace-expansion` to patched releases, resolving eleven further advisories inherited through transitive dependencies.
+
+### 🎨 Improvements
+
+- **ui**: The shared table component was split into a toolbar, a pager and a selection column, so the file that every list in the app renders through no longer carries all of it at once.
+- **restore**: Encryption keys are now resolved the same way everywhere. Database restores, file restores, storage downloads and config restores previously each had their own idea of what to try when the profile a backup names no longer exists, which meant the same backup could be recoverable in one place and a dead end in another. All of them now run the same sequence: a key you supplied, then the profile the backup names, then every profile in the vault tested against the backup. A key you supplied is verified rather than trusted, so a wrong one is reported as wrong instead of producing a file that looks corrupt.
+- **restore**: Every place that opens an encrypted backup now asks for a key the same way, through one dialog. Browsing, analysing, restoring and downloading each used to answer a missing key differently - a prompt in one place, a bare error in another, silence in a third. The answer belongs to the whole page rather than to the one request that happened to ask, so it carries over to browsing folders, the dry run, the download and the restore itself, and into the background job that the restore starts.
+- **restore**: Reading the file index of a backup no longer downloads it several times over. The restore page asks for the same index once per directory source plus once for the dry run, and each request used to fetch and decrypt the index sidecar separately - including logging the same failure once per request.
+- **storage**: Restore downloads, plain and decrypted alike, are now prepared server-side behind a short-lived, user-bound token and streamed by the browser's own download manager instead of being buffered in the page, so a large archive no longer risks exhausting the browser's memory.
+- **settings**: New **Max Concurrent Files** system setting (default 4, up to 16) controls how many files a job transfers in parallel while collecting or restoring a directory source.
+- **backup**: Files already in a compressed format are no longer recompressed. Video, audio, images, archives, ZIP containers such as `.docx` and `.apk`, web fonts and encrypted files are stored as-is even when the job has compression enabled, because a second pass gains a fraction of a percent while costing the CPU time plus a complete extra write and read through a temporary file. Nothing is left out of the backup, and restore, download and the Recovery Kit read a mixed archive without any change - including kits downloaded earlier.
+- **backup**: Brotli now compresses at quality 10 instead of its maximum of 11, which more than halves the time it takes for 2.5% larger output. Existing archives stay readable, since the level is recorded in the compressed stream itself.
+- **SSO**: Provider icons now come from one shared map instead of four copies that had drifted apart. Keycloak showed a generic globe everywhere except the add dialog.
+
+### 🔄 Changed
+
+- **rsync**: Transfers no longer compress in transit. `-z` costs CPU on both ends and changes nothing about what is stored - each archive entry is compressed in the packing stage afterwards - so it was the same work done twice, and it only pays off on data that compresses, which a backup source usually is not. Connections on a slow link with compressible data can add `-z` back under "Additional rsync options".
+
+- **templates**: The built-in "Standard" naming template now ends with `{chain}`, so an incremental backup reads `Job_2026-07-24_09-18-04_inc-001` instead of `inc-001-Job_2026-07-24_09-18-04`. Templates you created yourself are left untouched, as is a Standard template that was already edited.
+- **navigation**: Sources, Destinations and Notifications are now one page, **Connections**, with a tab per kind: Databases, Directory Sources, Backup Destinations and Notifications. Adapters are grouped by what they are rather than by the direction a job happens to use them in - which is what made a database "a source" even when restoring into it. The old routes redirect to the matching tab, and the active tab lives in the URL so links and bookmarks keep working.
+- **destinations**: A storage adapter now has one exclusive role, backup destination or directory source, instead of two independent toggles. They cannot be combined because a destination owns its configured path - the runner writes job and chain folders into it - while a source only reads folders out of it, so one adapter doing both would let a job back up its own archives. Existing adapters are migrated automatically.
+- **retention**: The retention log now names backups that survive only because their incremental chain is still in use, so a destination holding more than its policy allows is explainable instead of looking broken.
+- **charts**: Upgraded Recharts from 2 to 3. Every chart renders the same data as before, with one visible difference: Recharts 3 no longer guarantees that legend entries follow the order of the data, so the Job Status legend may list its statuses differently.
+
+### 🗑️ Removed
+
+- **storage**: Removed the separate "Browse files" button and dialog from the Storage Explorer - browsing and per-file restore now live on the restore page.
+
+### 📝 Documentation
+
+- **website**: Reframed the File & Folder Backup and Restore cards and answered the scope question in the FAQ: what the feature is for, and that an agentless full run stages the tree on the DBackup host, wants roughly twice the source size in free space, and moves every byte across the network twice - with restic and Borg named as the better tool for bulk media libraries.
+- **wiki**: New **Archive Format** reference documenting the archive layout, key derivation and index format byte by byte, so a backup stays recoverable independently of DBackup - including the TAR header detail that trips up hand-written readers on entries past 8 GiB.
+- **wiki**: New **Backup Modes** guide covering incremental backups, chain storage, how retention interacts with chains, and when DBackup falls back to a full backup.
+- **wiki**: Updated the Recovery Kit, Storage Explorer, Restore, SMB and adapter overview guides for file backups, shadow copies and the Connections page.
+- **wiki**: New **File & Folder Backups** page with a per-adapter table of what each one supports - whether restoring a single file fetches just that file or has to download the whole archive first. It also spells out that the file tree shown when restoring comes from the backup's index sidecar and therefore works for every adapter. It also states what the feature is for and where it stops - an agentless full run stages the tree on the DBackup host, so it wants roughly twice the source size in free space and moves every byte across the network twice, with restic and Borg named as the better tool for bulk media libraries - and which adapter to pick, including what actually decides transfer speed and why the Parallel Transfers ceilings differ.
+- **wiki**: The reverse proxy section now states that `DISABLE_HTTPS=true` is needed in almost every proxy setup. DBackup serves HTTPS with a self-signed certificate by default, which a proxy rejects - usually as a 502 with nothing helpful in the log.
+- **api**: Documented the restore endpoint's `scope` parameter, `storageRole` on the adapter schemas, and the new snapshot-availability and adapter-role endpoints.
+- **website**: Repositioned for database **and** file backups - hero, tagline, features, integrations, FAQ, footer and page metadata now cover directory sources.
+- **blog**: New post on why incremental backups store whole changed files instead of deduplicated chunks, what that costs in storage, and when a chunk-based tool is the better choice.
+- **README**: Added a File & Folder Backup feature section, a Directory Sources overview, and file-level restore to the recovery section.
+- **wiki**: The documentation home page now covers file backups, incremental chains, per-adapter directory source support, and how the archive format keeps the no-lock-in promise.
+- **wiki**: Backup Modes explains why whole changed files are stored rather than deduplicated chunks, with the storage cost spelled out per situation.
+- **wiki**: Fixed the opening paragraph of the Backup Modes page, which had a sentence split across the intro note.
+- **wiki**: Compression now lists every format that is stored without compression, grouped by kind. File & Folder Backups links to it.
+
+### 🧪 Tests
+
+- **ui**: Coverage for bulk operations: the ordering that lets a whole incremental chain be deleted while a partial selection is still refused, the locked-backup guard, one scheduler refresh per batch instead of one per job, and the permission guards on every new bulk endpoint including the per-type check that stops a mixed connection selection from widening someone's access.
+- **lint-guards**: New guard that fails the build when the Recovery Kit's tool is missing from the repository or from the Docker image. A kit is assembled by reading it off disk and falls back to a placeholder when it is absent, so nothing else would have noticed.
+
+- Fixed the adapter DTO tests intermittently timing out in a full run. They reset the module registry before each of six tests, which re-evaluated the entire adapter graph - every storage, database and notification SDK - six times over. The graph now loads once per file.
+
+- **backup**: Round-trip coverage for the archive format against awkward inputs - paths past 100 characters, unicode, spaces, empty files - verified with real `tar` and the standalone recovery kit, since "an unencrypted archive extracts with `tar -xf`" and "the kit reads what the writer emits" are promises only running them can prove.
+- **backup**: Regression coverage for the format's edge cases: TAR entries at the 8 GiB size boundary, incremental chains spanning several archives, chain-aware retention and deletion, restore path guards, and the SMB shadow copy lifecycle including release on failure and cancellation.
+- **lint-guards**: New guards that fail the build when code enumerates storage adapters without filtering by role, or links to the retired Sources/Destinations/Notifications routes.
+- **lint-guards**: New guard that fails the build when the published list of already-compressed formats drifts from the code. The list ships as code so a release can extend it, and that is exactly how a table in the docs quietly stops being true.
+- **lint-guards**: New design system guards covering raw overflow containers, locale date formatting, ScrollArea max-height placement and palette colors without a dark mode variant. The last two carry a baseline count that may only go down, so the existing backlog is tolerated but nothing new is added.
+- **lint-guards**: The no-console guard no longer exempts Client Components. The exemption assumed the logger needed Node APIs, which it never did, and it was hiding 21 console calls.
+- **charts**: New render tests for the chart wrapper and all four chart types, asserting that the series, axes, grid, pie sectors and the legend's mapping back through the chart config actually reach the DOM. The chart components had no coverage at all, which made the Recharts 3 upgrade a change nothing could verify.
+- **restore**: New coverage for key resolution: the order it tries things in, that a key you supplied is reported as wrong rather than quietly replaced by another, and that an archive index seals against every key but the right one. Plus a regression test that a backup with no usable key asks for one instead of reporting an empty archive.
+- **vault**: New coverage for key recovery, including that a key which does not open the backup is never stored, that an existing profile is reused rather than duplicated, and that a generated profile name steps around one already taken.
+- **restore**: New coverage for the key prompt's own state machine: that a retry running into the same prompt keeps the dialog open with a reason instead of closing as though it had worked, that the answer is remembered for the rest of the page, and that a raw key never travels with an ordinary request.
+- **vault**: New coverage for the recovery tool's own helpers, now that they can be imported instead of driven through a terminal: that a menu row always fits the width it is given at four different terminal sizes, that a wrong key's output is told apart from each dump format's opening bytes, and that the decrypted output is never named over its own input.
+- **vault**: New coverage for multi-key kits: that each profile gets a file named after it, that two profiles sharing a name stay apart, that the index maps a backup's profile to its key, and - in the tool - that the right key is picked by profile id, that a keys folder without an index still works by trying them, and that a kit whose keys all fail says which it tried.
+- **vault**: New coverage for the generated kit itself: that it ships the tool rather than a placeholder, that the launchers arrive executable, and that the README gives the terminal command and the macOS workaround.
+- **vault**: New coverage for restoring one named database out of both backup formats, and for an unknown name being answered with the list of databases the backup does contain.
+- **vault**: New coverage for a multi-database backup coming out as one dump per database with no archive left behind, and for every kind of restore defaulting to the same output folder.
+- **vault**: New coverage for the Recovery Kit's new entry points: that a chain folder is accepted directly and resolves to its newest snapshot, encrypted or not, that a folder holding several backups names them instead of guessing, that the key is read from `master.key` rather than handed over, and that a whole-file database backup comes out decrypted and decompressed in one pass with nothing written when the key is wrong.
+
+### 🔧 CI/CD
+
+- **lint**: Upgraded ESLint from 9 to 10 in the app and the website, ahead of the v9 end of life on August 6, 2026. The rule set and its findings are unchanged.
+- **types**: Updated `@types/mssql` from 9 to 12, which had been three majors behind the installed `mssql` 12.7 and was type checking the adapter against an API that no longer exists.
+- **types**: Updated `@types/node` from 20 to 24, matching the Node version the container and CI actually run. The local filesystem adapter dropped a `Dirent.path` fallback that no supported Node version reaches.
+- **tests**: Upgraded Vite from 7 to 8, where Rolldown replaces esbuild and Rollup, together with `@vitejs/plugin-react` 6 which requires it. Vite backs only the Vitest runner here, so the application build is untouched.
+- **tests**: Dropped the `vite-tsconfig-paths` plugin in favour of the `resolve.tsconfigPaths` option that Vite 8 provides natively.
+- **dependencies**: Picked up the pending patch and minor releases across the app and the website - Better Auth 1.6.25, React 19.2.8, the Radix UI primitives, `react-hook-form`, `@hookform/resolvers`, `lucide-react`, `dropbox`, `basic-ftp` and the AWS SDK. Better Auth was checked field by field against `schema.prisma` first, since the 1.6.23 update was the one that added two-factor columns the schema never got.
+- **scripts**: `pnpm update:check` no longer ends in `Command failed with exit code 1`, and no longer warns about the `pnpm.overrides` in `docs/` and `website/`. It now checks the three projects the way they are actually installed instead of treating them as one workspace.
+- **tests**: Upgraded `vitest-mock-extended` from 3 to 5, which had been built against Vitest 3 while the suite runs on Vitest 4. It backs the Prisma mock that 87 test files share, so the version it targets should match the runner.
+
+### 🐳 Docker
+
+- **Image**: `skyfay/dbackup:v3.0.0`
+- **Also tagged as**: `latest`, `v3`
+- **CI Image**: `skyfay/dbackup:ci`
+- **Platforms**: linux/amd64, linux/arm64
+
+
 ## v2.10.1 - Webhook GET/HEAD Support, SSO Improvements, and Multiple Bug Fixes
 *Released: July 18, 2026*
 

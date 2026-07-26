@@ -85,8 +85,9 @@ export function StorageHistoryModal({
     return formatDate(dateStr, "P");
   };
 
-  const formatTooltipDate = (dateStr: string) => {
-    return formatDate(dateStr, "Pp");
+  // Recharts 3 hands the tooltip label in as a ReactNode rather than a string.
+  const formatTooltipDate = (dateStr: React.ReactNode) => {
+    return formatDate(String(dateStr), "Pp");
   };
 
   const currentSize = data.length > 0 ? data[data.length - 1].size : 0;

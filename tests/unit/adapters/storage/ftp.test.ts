@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { FTPAdapter } from "@/lib/adapters/storage/ftp";
 
 // --- Hoisted mocks ---
-const { mockAccess, mockClose, mockUploadFrom, mockDownloadTo, mockList, mockRemove, mockSize, mockEnsureDir, mockCd, mockTrackProgress } = vi.hoisted(() => ({
+const { mockAccess, mockClose, mockUploadFrom, mockDownloadTo, mockList, mockRemove, mockSize, mockEnsureDir, mockCd, mockTrackProgress, mockConstructed } = vi.hoisted(() => ({
     mockAccess: vi.fn(),
     mockClose: vi.fn(),
     mockUploadFrom: vi.fn().mockResolvedValue(undefined),
@@ -13,10 +13,15 @@ const { mockAccess, mockClose, mockUploadFrom, mockDownloadTo, mockList, mockRem
     mockEnsureDir: vi.fn().mockResolvedValue(undefined),
     mockCd: vi.fn().mockResolvedValue(undefined),
     mockTrackProgress: vi.fn(),
+    mockConstructed: [] as { closed: boolean }[],
 }));
 
 vi.mock("basic-ftp", () => {
     class MockClient {
+        // basic-ftp's Client refuses a second operation while one is in flight; the pool has to
+        // hand every parallel transfer its own instance, so the test counts instances.
+        closed = false;
+        constructor() { mockConstructed.push(this); }
         ftp = { verbose: false };
         access = mockAccess;
         close = mockClose;
@@ -88,6 +93,71 @@ describe("FTPAdapter", () => {
         mockEnsureDir.mockResolvedValue(undefined);
         mockCd.mockResolvedValue(undefined);
         mockTrackProgress.mockReturnValue(undefined);
+        mockConstructed.length = 0;
+    });
+
+    // ===== openSession() =====
+
+    describe("openSession() pooling", () => {
+        it("never runs two transfers through one client", async () => {
+            // basic-ftp's Client holds a single control connection and rejects a second operation
+            // while one is in flight with "User launched a task while another one is still
+            // running". That is not a recoverable error: it closes the client, so one collision
+            // takes every other transfer queued behind it down as well - which is how a restore
+            // ended up with 112 of 129 files failing.
+            const inUse = new Set<unknown>();
+            let overlapped = false;
+            // `this` is the client the call actually ran on, which is the whole question here.
+            mockUploadFrom.mockImplementation(async function (this: unknown) {
+                if (inUse.has(this)) overlapped = true;
+                inUse.add(this);
+                await new Promise((r) => setTimeout(r, 5));
+                inUse.delete(this);
+            });
+
+            const session = await FTPAdapter.openSession!(config, undefined, { concurrency: 3 });
+            const results = await Promise.all(
+                Array.from({ length: 9 }, (_, i) => session.upload(`/tmp/f${i}`, `Job/f${i}`))
+            );
+            await session.close();
+
+            expect(results.every(Boolean)).toBe(true);
+            expect(overlapped).toBe(false);
+            expect(mockConstructed.length).toBeLessThanOrEqual(3);
+        });
+
+        it("opens a single client when no concurrency is requested", async () => {
+            const session = await FTPAdapter.openSession!(config);
+
+            await session.upload("/tmp/a", "Job/a");
+            await session.upload("/tmp/b", "Job/b");
+            await session.close();
+
+            expect(mockConstructed.length).toBe(1);
+        });
+
+        it("serves downloads over the session's clients too", async () => {
+            const session = await FTPAdapter.openSession!(config, undefined, { concurrency: 2 });
+
+            await Promise.all([
+                session.download!("Job/a", "/tmp/a"),
+                session.download!("Job/b", "/tmp/b"),
+            ]);
+            await session.close();
+
+            expect(mockDownloadTo).toHaveBeenCalledTimes(2);
+            expect(mockConstructed.length).toBeLessThanOrEqual(2);
+        });
+
+        it("closes every client it opened", async () => {
+            const session = await FTPAdapter.openSession!(config, undefined, { concurrency: 2 });
+
+            await Promise.all([session.upload("/tmp/a", "Job/a"), session.upload("/tmp/b", "Job/b")]);
+            const opened = mockConstructed.length;
+            await session.close();
+
+            expect(mockClose).toHaveBeenCalledTimes(opened);
+        });
     });
 
     // ===== upload() =====

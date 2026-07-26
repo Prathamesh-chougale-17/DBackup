@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type BulkAction } from "@/components/ui/data-table";
+import { requestBulk } from "@/lib/bulk-request";
 import { ColumnDef } from "@tanstack/react-table";
 import { Loader2, KeyRound, Plus, Trash2, Pencil, Eye, AlertTriangle, Copy } from "lucide-react";
 import {
@@ -176,6 +177,26 @@ export function CredentialProfilesList({ canReveal }: { canReveal: boolean }) {
             .catch(() => toast.error("Failed to copy"));
     };
 
+    const bulkActions = useMemo<BulkAction<CredentialProfileSummary>[]>(() => [
+        {
+            id: "delete",
+            labels: { verb: "delete", verbPast: "deleted", noun: "credential profile" },
+            icon: Trash2,
+            variant: "destructive",
+            itemName: (profile) => profile.name,
+            confirm: {
+                title: (rows) => `Delete ${rows.length} credential profile${rows.length === 1 ? "" : "s"}?`,
+                description: () =>
+                    "This cannot be undone. A profile still attached to a connection is kept and listed afterwards.",
+                confirmLabel: "Delete",
+            },
+            run: (rows) => requestBulk("/api/credentials/bulk", {
+                action: "delete",
+                ids: rows.map((profile) => profile.id),
+            }),
+        },
+    ], []);
+
     const columns: ColumnDef<CredentialProfileSummary>[] = [
         {
             accessorKey: "name",
@@ -292,6 +313,10 @@ export function CredentialProfilesList({ canReveal }: { canReveal: boolean }) {
                         searchKey="name"
                         filterableColumns={FILTERABLE_COLUMNS}
                         onRefresh={fetchProfiles}
+                        enableRowSelection
+                        getRowId={(profile) => profile.id}
+                        bulkActions={bulkActions}
+                        onBulkActionComplete={fetchProfiles}
                     />
                 )}
             </CardContent>

@@ -29,6 +29,8 @@ Complete reference for all environment variables in DBackup.
 | `PUID` | User ID the container runs as (for volume permissions) | `1001` |
 | `PGID` | Group ID the container runs as (for volume permissions) | `1001` |
 | `DBACKUP_AUTO_LOCK` | Set to `1` in the CI image to automatically lock every backup triggered via the API | - |
+| `DISABLE_EMAIL_LOGIN` | Set to `true` to switch off password sign-in | `false` |
+| `OIDC_AUTO_REDIRECT` | SSO provider ID to redirect to instead of showing the login page | - |
 
 ### Notes
 
@@ -48,6 +50,41 @@ Complete reference for all environment variables in DBackup.
   - `info` - Normal operation logs (default, recommended for production)
   - `warn` - Only warnings and errors
   - `error` - Only errors
+
+## Login Variables
+
+These two live in the environment rather than in the settings UI on purpose: both can lock you out of your own instance, so the lever has to be reachable without logging in.
+
+### `DISABLE_EMAIL_LOGIN`
+
+Set to `true` to reject password sign-in. The login page then offers only SSO and passkeys, and the endpoints are closed server-side rather than just hidden.
+
+Administrators keep creating users and resetting passwords from the Users page, because an account often has to exist before it can link to an SSO identity.
+
+::: warning Order matters on a new instance
+There is no bootstrap exception. On a fresh instance, create the first administrator and configure your SSO provider **before** setting this variable - otherwise there is no way to sign in and no way to create an account.
+:::
+
+To undo it, remove the variable and restart.
+
+### `OIDC_AUTO_REDIRECT`
+
+Set to the **provider ID** of an SSO provider to send visitors straight to it instead of showing the login page. Find the value under **Users** → **SSO / OIDC**; it is the same ID that appears in the provider's callback URL.
+
+```bash
+OIDC_AUTO_REDIRECT=authentik-742
+```
+
+The redirect is skipped in two situations, both deliberate:
+
+- **After sign-in fails at the provider.** The error is shown instead, otherwise the failure would loop and hide its own message.
+- **Right after signing out.** Without this, the still-valid session at the identity provider signs you straight back in and signing out becomes impossible.
+
+If the ID matches no provider, or the provider is disabled, DBackup logs an error at startup and runs with the redirect switched off - it does not refuse to start, because that would take the instance down exactly when you need to reach the login page.
+
+::: warning No way past it from the browser
+While this is set there is no query parameter or key combination that reaches the login form. If the identity provider is unreachable or misconfigured, remove the variable and restart.
+:::
 
 ## Generating Secrets
 
@@ -69,7 +106,7 @@ openssl rand -base64 32
 
 ## Startup Validation
 
-DBackup validates all environment variables at startup using Zod schemas (`src/lib/env-validation.ts`).
+DBackup validates all environment variables at startup using Zod schemas (`src/lib/server/env-validation.ts`).
 
 - **Required variables** (`ENCRYPTION_KEY`, `BETTER_AUTH_SECRET`): Missing or invalid values produce a clear error box in the logs and **abort startup**.
 - **Optional variables**: Invalid values (e.g., non-URL in `BETTER_AUTH_URL`, non-numeric `PORT`) are logged as warnings but don't prevent startup.

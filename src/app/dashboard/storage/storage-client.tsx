@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { SortingState, ColumnFiltersState } from "@tanstack/react-table";
-import { ChevronsUpDown, HardDrive, RefreshCw } from "lucide-react";
+import { ChevronsUpDown, HardDrive, RefreshCw, Trash2, Lock, LockOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AdapterIcon } from "@/components/adapter/adapter-icon";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -31,10 +31,11 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type BulkAction } from "@/components/ui/data-table";
+import { requestBulk } from "@/lib/bulk-request";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
-import { getColumns, FileInfo } from "./columns";
+import { getColumns, FileInfo, RestoreMode } from "./columns";
 import { lockBackup } from "@/app/actions/storage/lock";
 import { DownloadLinkModal } from "@/components/dashboard/storage/download-link-modal";
 import { IntegrityModal } from "@/components/dashboard/storage/integrity-modal";
@@ -42,8 +43,13 @@ import { StorageHistoryTab } from "@/components/dashboard/storage/storage-histor
 import { StorageSettingsTab } from "@/components/dashboard/storage/storage-settings-tab";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EncryptionKeyResolutionDialog, type KeyResolutionResult } from "@/components/common/encryption-key-resolution-dialog";
+import { keyOverrideBody, useEncryptionKeyRecovery } from "@/hooks/use-encryption-key-recovery";
 import type { StorageHistoryTabRef } from "@/components/dashboard/storage/storage-history-tab";
 import type { StorageSettingsTabRef } from "@/components/dashboard/storage/storage-settings-tab";
+import { logger } from "@/lib/logging/logger";
+import { wrapError } from "@/lib/logging/errors";
+
+const log = logger.child({ component: "StorageClient" });
 
 interface AdapterConfig {
     id: string;
@@ -57,9 +63,11 @@ interface StorageClientProps {
     canDownload: boolean;
     canRestore: boolean;
     canDelete: boolean;
+    /** Whether this user may create vault profiles, which key recovery does. */
+    canManageVault?: boolean;
 }
 
-export function StorageClient({ canDownload, canRestore, canDelete }: StorageClientProps) {
+export function StorageClient({ canDownload, canRestore, canDelete, canManageVault = false }: StorageClientProps) {
     const [destinations, setDestinations] = useState<AdapterConfig[]>([]);
     const [selectedDestination, setSelectedDestination] = useState<string>("");
     const [open, setOpen] = useState(false);
@@ -86,15 +94,17 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
     // Integrity Modal State
     const [verifyModalFile, setVerifyModalFile] = useState<FileInfo | null>(null);
 
-    // Encryption Key Resolution Dialog State (decrypted download fallback)
-    const [decryptKeyDialogOpen, setDecryptKeyDialogOpen] = useState(false);
-    const [pendingDecryptFile, setPendingDecryptFile] = useState<FileInfo | null>(null);
-    const [pendingDecryptProfileId, setPendingDecryptProfileId] = useState<string>("");
-    const [decryptDialogLoading, setDecryptDialogLoading] = useState(false);
+
+    // Opens whenever a download reports that no available key opens the backup.
+    const keyRecovery = useEncryptionKeyRecovery();
+    /** Which backup the open dialog is about, so a typed key can be checked against it. */
+    const [pendingKeyFile, setPendingKeyFile] = useState<FileInfo | null>(null);
 
     const fetchAdapters = useCallback(async () => {
         try {
-            const storageRes = await fetch("/api/adapters?type=storage");
+            // Only destinations hold backups. A directory source would otherwise be offered here
+            // and list its own contents as backup rows, delete button included.
+            const storageRes = await fetch("/api/adapters?type=storage&role=DESTINATION");
             if (storageRes.ok) {
                 const storageData = await storageRes.json();
                 setDestinations(storageData);
@@ -106,7 +116,7 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
                 }
             }
         } catch (e) {
-            console.error(e);
+            log.error("Failed to load storage destinations", {}, wrapError(e));
         }
     }, [searchParams]);
 
@@ -167,68 +177,49 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
     const performDecryptedDownload = useCallback(async (file: FileInfo, keyResolution: KeyResolutionResult | null) => {
         if (!canDownload) return;
         const baseUrl = `/api/storage/${selectedDestination}/download`;
-        const fileParam = encodeURIComponent(file.path);
 
         try {
-            let response: Response;
+            // Fetch and decrypt server-side first; this call returns JSON, never the backup.
+            // That is what lets the key dialog still work while the transfer itself stays a
+            // plain browser download - a decrypted backup can be many gigabytes, and pulling
+            // it through the page would mean holding all of it in this tab.
+            const response = await fetch(baseUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ file: file.path, prepare: true, ...keyOverrideBody(keyResolution) }),
+            });
 
-            if (keyResolution?.type === "rawKey") {
-                response = await fetch(baseUrl, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ file: file.path, rawKeyHex: keyResolution.keyHex }),
-                });
-            } else {
-                const url = `${baseUrl}?file=${fileParam}&decrypt=true`
-                    + (keyResolution?.type === "profile" ? `&profileIdOverride=${encodeURIComponent(keyResolution.profileId)}` : "");
-                response = await fetch(url);
+            if (await keyRecovery.intercept(response, (result) => performDecryptedDownload(file, result))) {
+                setPendingKeyFile(file);
+                return;
             }
 
             if (response.ok) {
-                const blob = await response.blob();
-                const disposition = response.headers.get("Content-Disposition") ?? "";
-                const filenameMatch = disposition.match(/filename="([^"]+)"/);
-                const filename = filenameMatch?.[1] ?? file.name.replace(/\.enc$/, "");
-                const objectUrl = URL.createObjectURL(blob);
+                const payload = await response.json().catch(() => ({}));
+                if (!payload?.data?.token) throw new Error(payload.error ?? "Download failed");
+
                 const anchor = document.createElement("a");
-                anchor.href = objectUrl;
-                anchor.download = filename;
+                anchor.href = `${baseUrl}?token=${encodeURIComponent(payload.data.token)}`;
                 anchor.click();
-                URL.revokeObjectURL(objectUrl);
-                setDecryptKeyDialogOpen(false);
-            } else if (response.status === 422) {
-                const data: { code?: string; profileId?: string; error?: string } = await response.json().catch(() => ({}));
-                if (data.code === "ENCRYPTION_KEY_REQUIRED") {
-                    setPendingDecryptFile(file);
-                    setPendingDecryptProfileId(data.profileId ?? "");
-                    setDecryptKeyDialogOpen(true);
-                } else {
-                    toast.error(data.error ?? "Download failed");
-                }
             } else {
                 const data: { error?: string } = await response.json().catch(() => ({}));
                 toast.error(data.error ?? "Download failed");
             }
         } catch {
             toast.error("Download failed");
-        } finally {
-            setDecryptDialogLoading(false);
         }
-    }, [canDownload, selectedDestination]);
+    }, [canDownload, selectedDestination]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const handleKeyResolutionConfirm = useCallback(async (result: KeyResolutionResult) => {
-        if (!pendingDecryptFile) return;
-        setDecryptDialogLoading(true);
-        await performDecryptedDownload(pendingDecryptFile, result);
-    }, [pendingDecryptFile, performDecryptedDownload]);
-
-    const handleRestoreClick = useCallback((file: FileInfo) => {
+    const handleRestoreClick = useCallback((file: FileInfo, mode?: RestoreMode) => {
         if (!canRestore) {
             toast.error("Permission denied");
             return;
         }
         const encoded = btoa(JSON.stringify(file));
-        router.push(`/dashboard/storage/restore?destinationId=${encodeURIComponent(selectedDestination)}&file=${encodeURIComponent(encoded)}`);
+        // The mode is only passed for backups holding both databases and directories -
+        // everything else has exactly one thing to restore and needs no choice.
+        const modeParam = mode && mode !== "all" ? `&mode=${mode}` : "";
+        router.push(`/dashboard/storage/restore?destinationId=${encodeURIComponent(selectedDestination)}&file=${encodeURIComponent(encoded)}${modeParam}`);
     }, [canRestore, selectedDestination, router]);
 
     const handleDeleteClick = useCallback((file: FileInfo) => {
@@ -293,8 +284,104 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
         }
     };
 
+    /**
+     * Downloads a complete snapshot rather than the raw archive.
+     *
+     * An incremental archive only stores what changed, so downloading the file itself
+     * would hand the user a delta. This assembles the full contents from the chain.
+     */
+    const handleDownloadSnapshot = useCallback(async (file: FileInfo, keyResolution?: KeyResolutionResult) => {
+        if (!canDownload) {
+            toast.error("You do not have permission to download backups");
+            return;
+        }
+
+        const toastId = toast.loading(`Preparing ${file.name}...`);
+        try {
+            // Prepare, then let the browser fetch it. A whole snapshot is exactly the case
+            // where buffering the response in the tab falls over - it can be many gigabytes,
+            // and the browser's download manager writes it straight to disk instead.
+            const res = await fetch(`/api/storage/${selectedDestination}/restore-files`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ file: file.path, target: { kind: "download" }, prepare: true, ...keyOverrideBody(keyResolution) }),
+            });
+
+            // Unpacking the archive needs its key, so this can ask for one just like a
+            // decrypted download can.
+            if (await keyRecovery.intercept(res, (result) => handleDownloadSnapshot(file, result))) {
+                setPendingKeyFile(file);
+                toast.dismiss(toastId);
+                return;
+            }
+
+            const payload = await res.json().catch(() => ({ error: "Download failed" }));
+            if (!res.ok || !payload?.data?.token) {
+                throw new Error(payload.error || "Download failed");
+            }
+
+            const anchor = document.createElement("a");
+            anchor.href = `/api/storage/${selectedDestination}/restore-files?token=${encodeURIComponent(payload.data.token)}`;
+            anchor.download = payload.data.fileName;
+            anchor.click();
+
+            toast.success("Download started - see your browser downloads for progress", { id: toastId });
+        } catch (e: unknown) {
+            toast.error(e instanceof Error ? e.message : String(e), { id: toastId });
+        }
+    }, [canDownload, selectedDestination]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const bulkActions = useMemo<BulkAction<FileInfo>[]>(() => {
+        if (!canDelete || !selectedDestination) return [];
+
+        const runAction = (action: "delete" | "lock" | "unlock", rows: FileInfo[]) =>
+            requestBulk(`/api/storage/${selectedDestination}/files/bulk`, {
+                action,
+                paths: rows.map((file) => file.path),
+            });
+
+        return [
+            {
+                id: "lock",
+                labels: { verb: "lock", verbPast: "locked", noun: "backup" },
+                icon: Lock,
+                isAvailable: (rows) => rows.some((file) => !file.locked),
+                itemName: (file) => file.name,
+                ineligible: (file) => (file.locked ? "Already locked" : null),
+                run: (rows) => runAction("lock", rows),
+            },
+            {
+                id: "unlock",
+                labels: { verb: "unlock", verbPast: "unlocked", noun: "backup" },
+                icon: LockOpen,
+                isAvailable: (rows) => rows.some((file) => file.locked),
+                itemName: (file) => file.name,
+                ineligible: (file) => (file.locked ? null : "Not locked"),
+                run: (rows) => runAction("unlock", rows),
+            },
+            {
+                id: "delete",
+                labels: { verb: "delete", verbPast: "deleted", noun: "backup" },
+                icon: Trash2,
+                variant: "destructive",
+                itemName: (file) => file.name,
+                // A locked backup was deliberately protected. The server refuses it too,
+                // this only makes the refusal visible before the request goes out.
+                ineligible: (file) => (file.locked ? "Locked, unlock it first" : null),
+                confirm: {
+                    title: (rows) => `Delete ${rows.length} backup${rows.length === 1 ? "" : "s"}?`,
+                    description: () =>
+                        "This permanently removes the archives and their metadata from this destination. It cannot be undone.",
+                    confirmLabel: "Delete",
+                },
+                run: (rows) => runAction("delete", rows),
+            },
+        ];
+    }, [canDelete, selectedDestination]);
+
     const columns = useMemo(() => getColumns({
         onRestore: handleRestoreClick,
+        onDownloadSnapshot: handleDownloadSnapshot,
         onDownload: handleDownload,
         onDelete: handleDeleteClick,
         onToggleLock: handleToggleLock,
@@ -303,7 +390,7 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
         canDownload,
         canRestore,
         canDelete
-    }), [handleRestoreClick, handleDownload, handleDeleteClick, handleToggleLock, handleGenerateLink, handleVerify, canDownload, canRestore, canDelete]);
+    }), [handleRestoreClick, handleDownloadSnapshot, handleDownload, handleDeleteClick, handleToggleLock, handleGenerateLink, handleVerify, canDownload, canRestore, canDelete]);
 
     const filterableColumns = useMemo(() => {
         const jobs = Array.from(new Set(files.map(f => f.jobName).filter(Boolean).filter(n => n !== "Unknown"))) as string[];
@@ -433,7 +520,10 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
                                 <CardTitle>Backups</CardTitle>
                             </CardHeader>
                             <CardContent>
-                                {loading ? (
+                                {/* Only the very first load swaps the table for a skeleton. A
+                                    refresh keeps the table mounted, otherwise the unmount
+                                    would discard any row selection mid-flow. */}
+                                {loading && files.length === 0 ? (
                                     <div className="space-y-4">
                                         {/* Toolbar skeleton */}
                                         <div className="flex items-center gap-2">
@@ -470,6 +560,11 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
                                     </div>
                                 ) : (
                                     <DataTable
+                                        // A file is identified by its path, which is only
+                                        // unique within one destination. Remounting on a
+                                        // switch keeps a selection from carrying over into
+                                        // a bucket where those paths mean something else.
+                                        key={selectedDestination}
                                         columns={columns}
                                         data={files}
                                         filterableColumns={filterableColumns}
@@ -478,6 +573,11 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
                                         columnFilters={columnFilters}
                                         onColumnFiltersChange={setColumnFilters}
                                         onRefresh={() => selectedDestination && fetchFiles(selectedDestination, showSystemConfigs)}
+                                        isLoading={loading}
+                                        enableRowSelection={canDelete}
+                                        getRowId={(file) => file.path}
+                                        bulkActions={bulkActions}
+                                        onBulkActionComplete={() => { if (selectedDestination) fetchFiles(selectedDestination, showSystemConfigs); }}
                                     />
                                 )}
                             </CardContent>
@@ -564,14 +664,17 @@ export function StorageClient({ canDownload, canRestore, canDelete }: StorageCli
 
             {/* Encryption Key Resolution Dialog (decrypted download fallback) */}
             <EncryptionKeyResolutionDialog
-                open={decryptKeyDialogOpen}
+                open={keyRecovery.open}
                 onOpenChange={(o) => {
-                    setDecryptKeyDialogOpen(o);
-                    if (!o) { setPendingDecryptFile(null); setPendingDecryptProfileId(""); }
+                    keyRecovery.onOpenChange(o);
+                    if (!o) setPendingKeyFile(null);
                 }}
-                profileIdHint={pendingDecryptProfileId}
-                onConfirm={handleKeyResolutionConfirm}
-                loading={decryptDialogLoading}
+                profileIdHint={keyRecovery.profileIdHint}
+                backup={pendingKeyFile ? { storageConfigId: selectedDestination, file: pendingKeyFile.path } : undefined}
+                canManageVault={canManageVault}
+                onConfirm={keyRecovery.onConfirm}
+                loading={keyRecovery.loading}
+                error={keyRecovery.error}
             />
         </div>
     );

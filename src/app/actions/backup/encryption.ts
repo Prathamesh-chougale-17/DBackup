@@ -5,10 +5,13 @@ import { headers } from "next/headers";
 import { checkPermission, getUserPermissions } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
 import * as encryptionService from "@/services/backup/encryption-service";
+import { recoverEncryptionKey } from "@/services/backup/key-recovery";
+import { archiveIndexService } from "@/services/backup/archive-index-service";
 import { revalidatePath } from "next/cache";
 import { auditService } from "@/services/audit-service";
 import { AUDIT_ACTIONS, AUDIT_RESOURCES } from "@/lib/core/audit-types";
 import { getErrorMessage } from "@/lib/logging/errors";
+import { BulkIdsSchema } from "@/lib/core/bulk-schema";
 
 /**
  * Returns all encryption profiles.
@@ -142,6 +145,11 @@ export async function deleteEncryptionProfile(id: string) {
         // Warning: This action is destructive and might brick backups.
         // The service does the deletion. Caller should warn user.
         await encryptionService.deleteEncryptionProfile(id);
+        // A parsed archive index outlives the key that opened it. Left cached, a backup
+        // would keep listing its contents for another five minutes while every restore of
+        // it failed - so the vault change drops them here rather than in the service, which
+        // the index service already depends on.
+        archiveIndexService.clear();
         if (session.user) {
             await auditService.log(
                 session.user.id,
@@ -158,5 +166,93 @@ export async function deleteEncryptionProfile(id: string) {
         return { success: true };
     } catch (e: unknown) {
         return { success: false, error: getErrorMessage(e) };
+    }
+}
+
+/**
+ * Tests a key the user supplied against one backup and, if it fits, stores it in the vault.
+ *
+ * This is what the recovery dialog calls. Importing rather than using the key once is
+ * deliberate: it is the only way the key also reaches the flows that have nobody to ask -
+ * a background restore, a scheduled config restore, the next request of this same page.
+ *
+ * Requires VAULT:WRITE, because it creates a profile.
+ */
+export async function recoverEncryptionKeyAction(
+    storageConfigId: string,
+    file: string,
+    keyHex: string,
+    name?: string
+) {
+    await checkPermission(PERMISSIONS.VAULT.WRITE);
+
+    const headersList = await headers();
+    const session = await auth.api.getSession({ headers: headersList });
+    if (!session) return { success: false, error: "Unauthorized" };
+
+    try {
+        const result = await recoverEncryptionKey(storageConfigId, file, keyHex, name);
+
+        if (result.status === "rejected") {
+            return { success: false, error: "This key does not open this backup." };
+        }
+
+        // Only a fresh profile is worth an audit entry - reusing one that was already there
+        // changed nothing.
+        if (result.status === "imported" && session.user) {
+            await auditService.log(
+                session.user.id,
+                AUDIT_ACTIONS.CREATE,
+                AUDIT_RESOURCES.SYSTEM,
+                { type: "EncryptionProfile", name: result.profileName, method: "Recovery" },
+                result.profileId
+            );
+        }
+
+        revalidatePath("/dashboard/vault");
+        return { success: true, data: result };
+    } catch (e: unknown) {
+        return { success: false, error: getErrorMessage(e) };
+    }
+}
+
+/**
+ * Deletes several encryption profiles.
+ *
+ * The archive index cache is cleared once after the batch rather than per profile. A
+ * parsed index outlives the key that opened it, so it has to go, but flushing it inside
+ * the loop would discard work the remaining deletions still benefit from.
+ */
+export async function bulkDeleteEncryptionProfiles(ids: string[]) {
+    const headersList = await headers();
+    const session = await auth.api.getSession({ headers: headersList });
+    if (!session) return { success: false as const, error: "Unauthorized" };
+
+    await checkPermission(PERMISSIONS.VAULT.WRITE);
+
+    const parsed = BulkIdsSchema.safeParse(ids);
+    if (!parsed.success) return { success: false as const, error: "Invalid request" };
+
+    try {
+        const result = await encryptionService.deleteEncryptionProfiles(parsed.data);
+
+        if (result.succeeded.length > 0) archiveIndexService.clear();
+
+        if (session.user) {
+            await auditService.log(
+                session.user.id,
+                AUDIT_ACTIONS.DELETE,
+                AUDIT_RESOURCES.SYSTEM,
+                { type: "EncryptionProfile", bulk: true, requested: parsed.data.length, succeeded: result.succeeded.length, failed: result.failed.length }
+            );
+        }
+
+        revalidatePath("/dashboard/vault");
+        revalidatePath("/dashboard/settings");
+        revalidatePath("/dashboard/jobs");
+
+        return { success: true as const, data: result };
+    } catch (e: unknown) {
+        return { success: false as const, error: getErrorMessage(e) };
     }
 }

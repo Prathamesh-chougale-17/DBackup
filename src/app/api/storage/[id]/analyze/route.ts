@@ -11,6 +11,10 @@ import fs from "fs";
 import { headers } from "next/headers";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
+import { archiveIndexService } from "@/services/backup/archive-index-service";
+import { keyRequiredResponse } from "@/lib/server/key-required-response";
+import { EncryptionKeyRequiredError } from "@/lib/logging/errors";
+import type { BackupMetadata } from "@/lib/core/interfaces";
 
 registerAdapters();
 
@@ -27,7 +31,13 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
         checkPermissionWithContext(ctx, PERMISSIONS.STORAGE.RESTORE);
 
         const body = await req.json();
-        const { file, type } = body;
+        // profileIdOverride: the vault profile the user picked after being asked for a key.
+        // Every request that opens this backup carries it, because the one that raised the
+        // question is rarely the last one that needs the answer.
+        const { file, type, profileIdOverride } = body;
+        const keyOverride = typeof profileIdOverride === "string" && profileIdOverride
+            ? { profileId: profileIdOverride }
+            : undefined;
 
         if (!file || typeof file !== 'string' || file.includes('..') || file.startsWith('/')) {
             return NextResponse.json({ error: "Invalid file path" }, { status: 400 });
@@ -62,39 +72,71 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
         tempFile = path.join(tempDir, path.basename(file));
         const sConf = await resolveAdapterConfig(storageConfig);
 
-        // OPTIMIZATION: Try to read sidecar metadata first
+        // OPTIMIZATION: Try to read sidecar metadata first. For combined (manifest v2)
+        // archives the metadata sidecar points at the archive's index sidecar, which
+        // describes every database and directory source without touching the archive - so
+        // a listing never costs a multi-gigabyte download.
+        let seekableArchiveMeta: BackupMetadata | null = null;
+
         if (storageAdapter.read) {
             try {
                 const metaPath = file + ".meta.json";
                 const metaContent = await storageAdapter.read(sConf, metaPath);
                 if (metaContent) {
                     const meta = JSON.parse(metaContent);
-                    if (meta.databases) {
-                         if (Array.isArray(meta.databases.names) && meta.databases.names.length > 0) {
-                              return NextResponse.json({ databases: meta.databases.names });
-                         }
-                         if (Array.isArray(meta.databases) && meta.databases.length > 0) {
-                              return NextResponse.json({ databases: meta.databases });
-                         }
+
+                    if ((meta as BackupMetadata).archive?.formatVersion === 2) {
+                        seekableArchiveMeta = meta as BackupMetadata;
+                        const summary = await archiveIndexService.summarize(params.id, file, seekableArchiveMeta, keyOverride);
+                        if (summary) return NextResponse.json(summary);
+                        // Sidecar missing or unreadable. Deliberately NOT falling through to
+                        // the legacy shortcuts below - they only understand databases and
+                        // would silently drop this archive's directory sources. The embedded
+                        // index is read from the downloaded archive instead.
                     }
-                    // For multi-DB TAR archives, return the embedded database list
-                    if (meta.multiDb?.databases?.length > 0) {
-                        return NextResponse.json({ databases: meta.multiDb.databases });
-                    }
-                    // For server-based adapters (not sqlite) with empty names,
-                    // use the source type to signal the frontend that this is a DB restore
-                    const serverAdapters = ['mysql', 'mariadb', 'postgres', 'mongodb', 'mssql', 'redis', 'valkey'];
-                    if (meta.sourceType && serverAdapters.includes(meta.sourceType.toLowerCase())) {
-                        return NextResponse.json({ databases: [], sourceType: meta.sourceType });
+
+                    if (!seekableArchiveMeta && !(meta.combined && meta.combined.directorySources > 0)) {
+                        if (meta.databases) {
+                             if (Array.isArray(meta.databases.names) && meta.databases.names.length > 0) {
+                                  return NextResponse.json({ databases: meta.databases.names });
+                             }
+                             if (Array.isArray(meta.databases) && meta.databases.length > 0) {
+                                  return NextResponse.json({ databases: meta.databases });
+                             }
+                        }
+                        // For multi-DB TAR archives, return the embedded database list
+                        if (meta.multiDb?.databases?.length > 0) {
+                            return NextResponse.json({ databases: meta.multiDb.databases });
+                        }
+                        // For server-based adapters (not sqlite) with empty names,
+                        // use the source type to signal the frontend that this is a DB restore
+                        const serverAdapters = ['mysql', 'mariadb', 'postgres', 'mongodb', 'mssql', 'redis', 'valkey'];
+                        if (meta.sourceType && serverAdapters.includes(meta.sourceType.toLowerCase())) {
+                            return NextResponse.json({ databases: [], sourceType: meta.sourceType });
+                        }
                     }
                 }
-            } catch (_e) {
-                // Fallthrough
+            } catch (e: unknown) {
+                // A missing key has to escape this catch. It is the one failure here that is
+                // answerable, and the fallbacks below cannot help anyway: reading the
+                // archive's embedded index needs exactly the key the sidecar already
+                // refused. Swallowing it downloaded the whole archive to fail again, then
+                // reported the backup as containing nothing.
+                if (e instanceof EncryptionKeyRequiredError) throw e;
+                // Anything else falls through to the download and the embedded index.
             }
         }
 
         const downloadSuccess = await storageAdapter.download(sConf, file, tempFile);
         if (!downloadSuccess) return NextResponse.json({ error: "Download failed" }, { status: 500 });
+
+        // Seekable (v2) archive whose index sidecar could not be read. Every archive also
+        // carries a copy of its index as its last member, so the listing still works - it
+        // just costs the download that the sidecar exists to avoid.
+        if (seekableArchiveMeta) {
+            const summary = await archiveIndexService.summarizeFromArchive(tempFile, seekableArchiveMeta, keyOverride);
+            if (summary) return NextResponse.json(summary);
+        }
 
         let databases: string[] = [];
 
@@ -124,6 +166,11 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
         return NextResponse.json({ databases });
 
     } catch (e: unknown) {
+        // A backup nobody holds the key for is answerable, so it is reported rather than
+        // rendered as an archive with nothing in it.
+        const keyRequired = keyRequiredResponse(e);
+        if (keyRequired) return keyRequired;
+
         const message = e instanceof Error ? e.message : "Unknown error";
         return NextResponse.json({ error: message }, { status: 500 });
     } finally {

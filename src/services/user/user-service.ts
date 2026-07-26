@@ -1,5 +1,6 @@
 import prisma from "@/lib/prisma";
 import { AUDIT_ACTIONS } from "@/lib/core/audit-types";
+import { runBulk, type BulkResult } from "@/lib/core/bulk";
 
 export const userService = {
   /**
@@ -130,6 +131,24 @@ export const userService = {
         id: userId,
       },
     });
+  },
+
+  /**
+   * Deletes several users, reporting per-user outcomes.
+   *
+   * Every user goes through `deleteUser`, so the last-SuperAdmin and last-user guards are
+   * re-evaluated after each deletion rather than against the state the batch started in.
+   * That is what keeps "delete everyone" from emptying the instance: the guard trips on
+   * whoever is left, not on who was there when the request arrived.
+   */
+  async deleteUsers(userIds: string[]): Promise<BulkResult> {
+    const users = await prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, name: true, email: true },
+    });
+    const names = new Map(users.map((user) => [user.id, user.name || user.email]));
+
+    return runBulk(userIds, (id) => this.deleteUser(id).then(() => undefined), (id) => names.get(id));
   },
 
   /**

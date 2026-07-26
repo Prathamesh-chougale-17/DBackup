@@ -4,10 +4,11 @@ import { tabsMarkdownPlugin } from 'vitepress-plugin-tabs'
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
   title: "DBackup | Docs",
-  description: "Self-hosted database backup automation with encryption, compression, and retention policies",
+  description: "Self-hosted backup automation for databases and files with encryption, compression, and retention policies",
   lang: 'en-US',
   cleanUrls: true, // Remove .html from URLs for better SEO
   lastUpdated: true, // Show last updated timestamp (uses git commit timestamps)
+  srcExclude: ['CLAUDE.md'], // Contributor guide, not a published docs page
   sitemap: {
     hostname: 'https://docs.dbackup.app'
   },
@@ -28,26 +29,26 @@ export default defineConfig({
     ['link', { rel: 'icon', type: 'image/png', sizes: '256x256', href: '/favicon/favicon-256x256.png' }],
     ['link', { rel: 'apple-touch-icon', sizes: '180x180', href: '/favicon/favicon-256x256.png' }], // iOS uses closest size
     // SEO Meta Tags
-    ['meta', { name: 'keywords', content: 'database backup, mysql backup, postgresql backup, mongodb backup, automated backup, encryption, compression, self-hosted, docker' }],
+    ['meta', { name: 'keywords', content: 'database backup, file backup, folder backup, incremental backup, mysql backup, postgresql backup, mongodb backup, automated backup, encryption, compression, self-hosted, docker' }],
     ['meta', { name: 'author', content: 'Skyfay' }],
     ['meta', { name: 'robots', content: 'index, follow' }],
     // Open Graph / Facebook
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:url', content: 'https://docs.dbackup.app' }],
-    ['meta', { property: 'og:title', content: 'DBackup - Database Backup Automation' }],
-    ['meta', { property: 'og:description', content: 'Self-hosted database backup automation with encryption, compression, and retention policies for MySQL, PostgreSQL, MongoDB, and more.' }],
+    ['meta', { property: 'og:title', content: 'DBackup - Database & File Backup Automation' }],
+    ['meta', { property: 'og:description', content: 'Self-hosted backup automation for databases and files with encryption, compression, and retention policies for MySQL, PostgreSQL, MongoDB, directories, and more.' }],
     ['meta', { property: 'og:image', content: 'https://docs.dbackup.app/overview.png' }],
     // Twitter Card
     ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
     ['meta', { name: 'twitter:url', content: 'https://docs.dbackup.app' }],
-    ['meta', { name: 'twitter:title', content: 'DBackup - Database Backup Automation' }],
-    ['meta', { name: 'twitter:description', content: 'Self-hosted database backup automation with encryption, compression, and retention policies.' }],
+    ['meta', { name: 'twitter:title', content: 'DBackup - Database & File Backup Automation' }],
+    ['meta', { name: 'twitter:description', content: 'Self-hosted backup automation for databases and files with encryption, compression, and retention policies.' }],
     // Structured Data (JSON-LD)
     ['script', { type: 'application/ld+json' }, JSON.stringify({
       '@context': 'https://schema.org',
       '@type': 'SoftwareApplication',
       'name': 'DBackup',
-      'description': 'Self-hosted database backup automation with encryption, compression, and retention policies',
+      'description': 'Self-hosted backup automation for databases and files with encryption, compression, and retention policies',
       'applicationCategory': 'DeveloperApplication',
       'operatingSystem': 'Docker, Linux',
       'offers': {
@@ -172,6 +173,8 @@ export default defineConfig({
           text: 'Features',
           collapsed: false,
           items: [
+            { text: 'File & Folder Backups', link: '/user-guide/features/file-backups' },
+            { text: 'Backup Modes', link: '/user-guide/features/backup-modes' },
             { text: 'Storage Explorer', link: '/user-guide/features/storage-explorer' },
             { text: 'Database Explorer', link: '/user-guide/features/database-explorer' },
             { text: 'Backup Verification', link: '/user-guide/features/backup-verification' },
@@ -253,6 +256,7 @@ export default defineConfig({
           collapsed: false,
           items: [
             { text: 'Environment Variables', link: '/developer-guide/reference/environment' },
+            { text: 'Archive Format', link: '/developer-guide/reference/archive-format' },
             { text: 'Database Schema', link: '/developer-guide/reference/schema' },
             { text: 'Supported Versions', link: '/developer-guide/reference/versions' },
             { text: 'Testing Guide', link: '/developer-guide/reference/testing' }

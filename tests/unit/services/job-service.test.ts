@@ -16,6 +16,12 @@ describe('JobService', () => {
     beforeEach(() => {
         service = new JobService();
         vi.clearAllMocks();
+        // Every create/update validates its destinations against the adapter table. Tests
+        // that care about the role override this; the rest just need a valid destination.
+        prismaMock.adapterConfig.findMany.mockResolvedValue([
+            { id: 'dest-1', name: 'Backup NAS', type: 'storage', storageRole: 'DESTINATION' },
+            { id: 'd-1', name: 'Backup NAS 2', type: 'storage', storageRole: 'DESTINATION' },
+        ] as any);
     });
 
     describe('createJob', () => {
@@ -60,6 +66,11 @@ describe('JobService', () => {
                     pgCompression: "",
                     notificationEvents: "ALWAYS",
                     skipVerification: false,
+                    // Incremental backups default to off - an existing job must never
+                    // silently start producing chains.
+                    backupMode: "FULL",
+                    fullEveryDays: 7,
+                    verifyByHash: false,
                     notifications: {
                         connect: [{ id: 'notif-1' }]
                     },
@@ -113,8 +124,8 @@ describe('JobService', () => {
         it('should return list of jobs ordered by creation date', async () => {
             // Arrange
             const mockJobs = [
-                { id: '1', name: 'Job 1' },
-                { id: '2', name: 'Job 2' }
+                { id: '1', name: 'Job 1', sources: [] },
+                { id: '2', name: 'Job 2', sources: [] }
             ];
             prismaMock.job.findMany.mockResolvedValue(mockJobs as any);
 
@@ -142,7 +153,7 @@ describe('JobService', () => {
 
     describe('getJobById', () => {
         it('should return a job when found', async () => {
-            const mockJob = { id: 'job-1', name: 'Test Job', source: {}, destinations: [], notifications: [] };
+            const mockJob = { id: 'job-1', name: 'Test Job', source: {}, destinations: [], notifications: [], sources: [] };
             prismaMock.job.findUnique.mockResolvedValue(mockJob as any);
 
             const result = await service.getJobById('job-1');
@@ -175,6 +186,229 @@ describe('JobService', () => {
                     destinations: [],
                 })
             ).rejects.toThrow('A job with the name "Duplicate" already exists.');
+
+            expect(prismaMock.job.create).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('createJob - sources validation', () => {
+        beforeEach(() => {
+            // A prior describe block leaves a non-null mockResolvedValue on findFirst
+            // (clearAllMocks() only clears call history, not implementations) - reset explicitly.
+            prismaMock.job.findFirst.mockResolvedValue(null);
+        });
+
+        it('throws when neither sourceId nor sources are provided', async () => {
+            await expect(
+                service.createJob({
+                    name: 'No Source Job',
+                    schedule: '0 0 * * *',
+                    destinations: [{ configId: 'dest-1', priority: 0, retention: '{}' }],
+                })
+            ).rejects.toThrow('Job must have at least one source');
+
+            expect(prismaMock.job.create).not.toHaveBeenCalled();
+        });
+
+        it('creates a directory-only job when sources are provided without a database source', async () => {
+            prismaMock.adapterConfig.findMany.mockResolvedValue([
+                { id: 'storage-1', name: 'SFTP Server', type: 'storage', storageRole: 'SOURCE' },
+                { id: 'dest-1', name: 'Backup NAS', type: 'storage', storageRole: 'DESTINATION' },
+            ] as any);
+            prismaMock.job.create.mockResolvedValue({ id: 'dir-only-job' } as any);
+
+            const result = await service.createJob({
+                name: 'Directory Only Job',
+                schedule: '0 0 * * *',
+                destinations: [{ configId: 'dest-1', priority: 0, retention: '{}' }],
+                sources: [{ configId: 'storage-1', priority: 0, path: '/data', excludePatterns: ['*.tmp'] }],
+            });
+
+            expect(result).toEqual({ id: 'dir-only-job' });
+            expect(prismaMock.job.create).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    data: expect.objectContaining({
+                        sourceId: null,
+                        sources: {
+                            create: [{
+                                configId: 'storage-1',
+                                priority: 0,
+                                path: '/data',
+                                excludePatterns: '["*.tmp"]',
+                                excludePatternPresets: { connect: [] },
+                            }],
+                        },
+                    }),
+                })
+            );
+        });
+
+        it('throws when a directory source points at a destination adapter', async () => {
+            prismaMock.adapterConfig.findMany.mockResolvedValue([
+                { id: 'storage-1', name: 'Backup NAS', type: 'storage', storageRole: 'DESTINATION' },
+                { id: 'dest-1', name: 'Backup NAS', type: 'storage', storageRole: 'DESTINATION' },
+            ] as any);
+
+            await expect(
+                service.createJob({
+                    name: 'Bad Source Role Job',
+                    schedule: '0 0 * * *',
+                    destinations: [{ configId: 'dest-1', priority: 0, retention: '{}' }],
+                    sources: [{ configId: 'storage-1', priority: 0, path: '/data' }],
+                })
+            ).rejects.toThrow('is not a directory source');
+
+            expect(prismaMock.job.create).not.toHaveBeenCalled();
+        });
+
+        it('throws when combining a database source that does not support directory-source combination', async () => {
+            prismaMock.adapterConfig.findMany.mockResolvedValue([
+                { id: 'storage-1', name: 'SFTP Server', type: 'storage', storageRole: 'SOURCE' },
+                { id: 'dest-1', name: 'Backup NAS', type: 'storage', storageRole: 'DESTINATION' },
+            ] as any);
+            // sqlite has no dumpOne capability - not combinable in v1
+            prismaMock.adapterConfig.findUnique.mockResolvedValue({ id: 'src-sqlite', adapterId: 'sqlite' } as any);
+
+            await expect(
+                service.createJob({
+                    name: 'Sqlite Plus Directory Job',
+                    schedule: '0 0 * * *',
+                    sourceId: 'src-sqlite',
+                    destinations: [{ configId: 'dest-1', priority: 0, retention: '{}' }],
+                    sources: [{ configId: 'storage-1', priority: 0, path: '/data' }],
+                })
+            ).rejects.toThrow('does not support combined backups with directory sources');
+
+            expect(prismaMock.job.create).not.toHaveBeenCalled();
+        });
+
+        it('creates a combined job when the database adapter supports directory-source combination', async () => {
+            prismaMock.adapterConfig.findMany.mockResolvedValue([
+                { id: 'storage-1', name: 'SFTP Server', type: 'storage', storageRole: 'SOURCE' },
+                { id: 'dest-1', name: 'Backup NAS', type: 'storage', storageRole: 'DESTINATION' },
+            ] as any);
+            // mysql exposes dumpOne - combinable
+            prismaMock.adapterConfig.findUnique.mockResolvedValue({ id: 'src-mysql', adapterId: 'mysql' } as any);
+            prismaMock.job.create.mockResolvedValue({ id: 'combined-job' } as any);
+
+            const result = await service.createJob({
+                name: 'MySQL Plus Directory Job',
+                schedule: '0 0 * * *',
+                sourceId: 'src-mysql',
+                destinations: [{ configId: 'dest-1', priority: 0, retention: '{}' }],
+                sources: [{ configId: 'storage-1', priority: 0, path: '/data' }],
+            });
+
+            expect(result).toEqual({ id: 'combined-job' });
+        });
+    });
+
+    describe('updateJob - directory source identity', () => {
+        it('keeps the id of a source that is still configured', async () => {
+            // The id is the `src` key in every archive index and what the chain planner
+            // compares. Regenerating it on an unrelated edit would force a full backup and
+            // orphan the origin of every older backup.
+            prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock));
+            prismaMock.job.findUnique.mockResolvedValue({ id: 'job-1', sourceId: null, sources: [{ id: 'jsrc-keep' }] } as any);
+            prismaMock.adapterConfig.findMany.mockResolvedValue([
+                { id: 'storage-1', name: 'SFTP', type: 'storage', storageRole: 'SOURCE' },
+            ] as any);
+            prismaMock.jobSource.findMany.mockResolvedValue([
+                { id: 'jsrc-keep', jobId: 'job-1', configId: 'storage-1', path: '/data' },
+            ] as any);
+            prismaMock.job.update.mockResolvedValue({ id: 'job-1' } as any);
+
+            await service.updateJob('job-1', {
+                name: 'Renamed Job',
+                sources: [{ configId: 'storage-1', priority: 0, path: '/data', excludePatterns: [] }],
+            } as any);
+
+            expect(prismaMock.jobSource.deleteMany).not.toHaveBeenCalled();
+            expect(prismaMock.jobSource.create).not.toHaveBeenCalled();
+            expect(prismaMock.jobSource.update).toHaveBeenCalledWith(
+                expect.objectContaining({ where: { id: 'jsrc-keep' } })
+            );
+        });
+
+        it('creates only the source that is genuinely new', async () => {
+            prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock));
+            prismaMock.job.findUnique.mockResolvedValue({ id: 'job-1', sourceId: null, sources: [{ id: 'jsrc-keep' }] } as any);
+            prismaMock.adapterConfig.findMany.mockResolvedValue([
+                { id: 'storage-1', name: 'SFTP', type: 'storage', storageRole: 'SOURCE' },
+            ] as any);
+            prismaMock.jobSource.findMany.mockResolvedValue([
+                { id: 'jsrc-keep', jobId: 'job-1', configId: 'storage-1', path: '/data' },
+            ] as any);
+            prismaMock.job.update.mockResolvedValue({ id: 'job-1' } as any);
+
+            await service.updateJob('job-1', {
+                name: 'Job',
+                sources: [
+                    { configId: 'storage-1', priority: 0, path: '/data', excludePatterns: [] },
+                    { configId: 'storage-1', priority: 1, path: '/more', excludePatterns: [] },
+                ],
+            } as any);
+
+            expect(prismaMock.jobSource.create).toHaveBeenCalledTimes(1);
+            expect(prismaMock.jobSource.create).toHaveBeenCalledWith(
+                expect.objectContaining({ data: expect.objectContaining({ path: '/more' }) })
+            );
+        });
+
+        it('deletes a source the user actually removed', async () => {
+            prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock));
+            prismaMock.job.findUnique.mockResolvedValue({ id: 'job-1', sourceId: null, sources: [{ id: 'jsrc-keep' }] } as any);
+            prismaMock.adapterConfig.findMany.mockResolvedValue([
+                { id: 'storage-1', name: 'SFTP', type: 'storage', storageRole: 'SOURCE' },
+            ] as any);
+            prismaMock.jobSource.findMany.mockResolvedValue([
+                { id: 'jsrc-keep', jobId: 'job-1', configId: 'storage-1', path: '/data' },
+                { id: 'jsrc-gone', jobId: 'job-1', configId: 'storage-1', path: '/old' },
+            ] as any);
+            prismaMock.job.update.mockResolvedValue({ id: 'job-1' } as any);
+
+            await service.updateJob('job-1', {
+                name: 'Job',
+                sources: [{ configId: 'storage-1', priority: 0, path: '/data', excludePatterns: [] }],
+            } as any);
+
+            expect(prismaMock.jobSource.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['jsrc-gone'] } } });
+        });
+    });
+
+    describe('createJob - destination validation', () => {
+        it('throws when a destination points at a directory source adapter', async () => {
+            // The mirror of the source-role check: writing backups into a tree that is
+            // also being read would make the job collect its own archives.
+            prismaMock.adapterConfig.findMany.mockResolvedValue([
+                { id: 'dest-1', name: 'Scripts', type: 'storage', storageRole: 'SOURCE' },
+            ] as any);
+            prismaMock.adapterConfig.findUnique.mockResolvedValue({ id: 'src-1', adapterId: 'mysql' } as any);
+
+            await expect(
+                service.createJob({
+                    name: 'Bad Destination Job',
+                    schedule: '0 0 * * *',
+                    sourceId: 'src-1',
+                    destinations: [{ configId: 'dest-1', priority: 0, retention: '{}' }],
+                })
+            ).rejects.toThrow('is not a backup destination');
+
+            expect(prismaMock.job.create).not.toHaveBeenCalled();
+        });
+
+        it('throws when a destination references an adapter that does not exist', async () => {
+            prismaMock.adapterConfig.findMany.mockResolvedValue([] as any);
+            prismaMock.adapterConfig.findUnique.mockResolvedValue({ id: 'src-1', adapterId: 'mysql' } as any);
+
+            await expect(
+                service.createJob({
+                    name: 'Ghost Destination Job',
+                    schedule: '0 0 * * *',
+                    sourceId: 'src-1',
+                    destinations: [{ configId: 'gone', priority: 0, retention: '{}' }],
+                })
+            ).rejects.toThrow('Destination references unknown adapter');
 
             expect(prismaMock.job.create).not.toHaveBeenCalled();
         });
@@ -316,6 +550,7 @@ describe('JobService', () => {
                 { configId: 'dest-1', priority: 0, retention: '{}' },
                 { configId: 'dest-2', priority: 1, retention: '{"keep":5}' },
             ],
+            sources: [],
         };
 
         it('throws when the source job is not found', async () => {

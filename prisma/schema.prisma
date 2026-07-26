@@ -19,7 +19,15 @@ model AdapterConfig {
   jobsSource       Job[]    @relation("Source")
   jobsNotification Job[]    @relation("Notifications")
   jobDestinations  JobDestination[]
+  jobSources       JobSource[]                   @relation("JobSourceConfig")
   notificationTemplateChannels NotificationTemplateChannel[]
+
+  // Storage adapters only (app enforces this): a config is either a backup destination or
+  // a directory backup source, never both. A destination owns its configured root - backups
+  // and their chain folders are written into it - while a source only reads the folders
+  // picked for it. Sharing one config would let a job back up its own archives.
+  // DESTINATION | SOURCE, see STORAGE_ROLES in src/lib/core/storage-roles.ts.
+  storageRole String @default("DESTINATION")
 
   // Credential profile references (Phase 1: nullable; app enforces required-ness based on adapter type)
   primaryCredentialId String?
@@ -100,12 +108,26 @@ model SchedulePreset {
   jobs        Job[]
 }
 
+model ExcludePatternPreset {
+  id          String      @id @default(cuid())
+  name        String      @unique
+  description String?
+  patterns    String      // JSON array of the preset's OWN glob patterns, on top of any groups below
+  groups      String      @default("[]") // JSON array of curated group ids from src/lib/exclude-groups.ts - referenced, not copied, so releases can extend them
+  excludedGroupPatterns String @default("[]") // JSON array of individual group patterns this preset opts out of
+  isDefault   Boolean     @default(false) // Pre-selected on newly added directory sources; several may be default
+  isSystem    Boolean     @default(false)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  jobSources  JobSource[]
+}
+
 model Job {
   id                  String             @id @default(uuid())
   name                String
   schedule            String
   enabled             Boolean            @default(true)
-  sourceId            String
+  sourceId            String?
   databases           String             @default("[]") // JSON array of database names to back up (e.g. ["db1","db2"])
   encryptionProfileId String?
   encryptionProfile   EncryptionProfile? @relation(fields: [encryptionProfileId], references: [id])
@@ -119,11 +141,16 @@ model Job {
   updatedAt           DateTime           @updatedAt
   executions          Execution[]
   destinations        JobDestination[]
-  source              AdapterConfig      @relation("Source", fields: [sourceId], references: [id])
+  source              AdapterConfig?     @relation("Source", fields: [sourceId], references: [id], onDelete: Restrict)
+  sources             JobSource[]
   notifications       AdapterConfig[]    @relation("Notifications")
   notificationEvents  String             @default("ALWAYS") // Legacy: "ALWAYS", "FAILURE_ONLY", "SUCCESS_ONLY" - kept for backward compat
   notificationTemplates JobNotificationTemplate[]
   skipVerification    Boolean            @default(false)
+  // Incremental backups (directory sources only - database dumps are always full).
+  backupMode          String             @default("FULL")  // "FULL" | "INCREMENTAL"
+  fullEveryDays       Int                @default(7)       // Forces a fresh chain this often
+  verifyByHash        Boolean            @default(false)   // Hash every file instead of trusting size+mtime
 }
 
 model NotificationTemplate {
@@ -177,6 +204,24 @@ model JobDestination {
   @@unique([jobId, configId])
 }
 
+model JobSource {
+  id                     String                @id @default(uuid())
+  jobId                  String
+  configId               String
+  priority               Int                   @default(0) // Collection/manifest ordering
+  path                   String                // Remote path on the storage adapter to pull from
+  excludePatterns        String                @default("[]") // JSON array of job-specific extra glob patterns (in addition to any linked presets' patterns)
+  excludePatternPresets  ExcludePatternPreset[] // Live-linked templates - re-read fresh at execution time (see 01-initialize.ts); patterns from every linked preset are unioned
+  useStagingCache        Boolean               @default(false) // Reserved for a later phase (persistent rsync mirror); unused for now
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+
+  job    Job           @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  config AdapterConfig @relation("JobSourceConfig", fields: [configId], references: [id], onDelete: Restrict)
+
+  @@unique([jobId, configId, path])
+}
+
 model Execution {
   id           String    @id @default(uuid())
   jobId        String?
@@ -190,6 +235,12 @@ model Execution {
   metadata     String?
   triggerType  String?   // "Manual" | "Scheduler" | "Api"
   triggerLabel String?   // e.g. user name, API key name, "Scheduler"
+  // Incremental chain bookkeeping. All null for a standalone full backup.
+  backupType   String?   // "Full" | "Incremental"
+  chainId      String?   // Shared by the full and every incremental built on it
+  baseArchive  String?   // Filename of the predecessor, not an Execution id
+  chainIndex   Int?      // Position in the chain, full = 0
+  logicalSize  BigInt?   // Full snapshot size, as opposed to `size` which is what was stored
   job          Job?      @relation(fields: [jobId], references: [id])
 }
 
@@ -235,12 +286,15 @@ model Group {
 }
 
 model TwoFactor {
-  id          String  @id
-  secret      String
-  backupCodes String
-  userId      String  @unique
-  verified    Boolean @default(false)
-  user        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                      String    @id
+  secret                  String
+  backupCodes             String
+  userId                  String    @unique
+  verified                Boolean   @default(false)
+  // Rate limiting fields required by better-auth >= 1.6 two-factor plugin.
+  failedVerificationCount Int       @default(0)
+  lockedUntil             DateTime?
+  user                    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model Passkey {

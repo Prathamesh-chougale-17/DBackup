@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { STORAGE_ROLES, isStorageRole, type StorageRole } from "@/lib/core/storage-roles";
+import { validateSnapshotConfig } from "@/lib/adapters/snapshot-validation";
 import prisma from "@/lib/prisma";
 import { encryptConfig, decryptConfig, mergeSecrets } from "@/lib/crypto";
 import { toAdapterListItem } from "@/lib/adapters/dto";
@@ -6,25 +8,16 @@ import { headers } from "next/headers";
 import { auditService } from "@/services/audit-service";
 import { AUDIT_ACTIONS, AUDIT_RESOURCES } from "@/lib/core/audit-types";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
-import { PERMISSIONS, Permission } from "@/lib/auth/permissions";
+import { getWritePermissionForAdapterType } from "@/lib/auth/permissions";
 import { logger } from "@/lib/logging/logger";
-import { wrapError, getErrorMessage, ValidationError, NotFoundError } from "@/lib/logging/errors";
+import { wrapError, getErrorMessage, ValidationError, NotFoundError, ConflictError } from "@/lib/logging/errors";
 import { registerAdapters } from "@/lib/adapters";
 import { validateCredentialAssignments } from "@/lib/adapters/credential-validation";
+import { deleteAdapter } from "@/services/adapters/adapter-service";
 
 registerAdapters();
 
 const log = logger.child({ route: "adapters/[id]" });
-
-// Helper to get write permission based on adapter type
-function getWritePermissionForType(type: string): Permission {
-    switch (type) {
-        case 'database': return PERMISSIONS.SOURCES.WRITE;
-        case 'storage': return PERMISSIONS.DESTINATIONS.WRITE;
-        case 'notification': return PERMISSIONS.NOTIFICATIONS.WRITE;
-        default: return PERMISSIONS.SOURCES.WRITE; // Fallback to strictest
-    }
-}
 
 export async function DELETE(
     req: NextRequest,
@@ -45,38 +38,9 @@ export async function DELETE(
         if (!adapter) {
             return NextResponse.json({ success: false, error: "Adapter not found" }, { status: 404 });
         }
-        checkPermissionWithContext(ctx, getWritePermissionForType(adapter.type));
+        checkPermissionWithContext(ctx, getWritePermissionForAdapterType(adapter.type));
 
-        // Check for usage in Jobs (Source or Destination)
-        const linkedJobs = await prisma.job.findMany({
-            where: {
-                OR: [
-                    { sourceId: params.id },
-                    { destinations: { some: { configId: params.id } } }
-                ]
-            },
-            select: { name: true }
-        });
-
-        if (linkedJobs.length > 0) {
-            return NextResponse.json({
-                success: false, // Ensure success field is present for consistency
-                error: `Cannot delete. This adapter is used in the following jobs: ${linkedJobs.map(j => j.name).join(', ')}`
-            }, { status: 400 });
-        }
-
-        // Technically notifications (Many-to-Many) might be handled automatically by Prisma for implicit relations,
-        // or might throw depending on underlying DB constraints.
-        // But let's rely on Prisma catch for other cases or strict FKs.
-
-        // Clean up related storage snapshots (no FK relation, manual cleanup)
-        await prisma.storageSnapshot.deleteMany({
-            where: { adapterConfigId: params.id },
-        });
-
-        const deletedAdapter = await prisma.adapterConfig.delete({
-            where: { id: params.id },
-        });
+        const deletedAdapter = await deleteAdapter(params.id);
 
         if (ctx) {
             await auditService.log(
@@ -90,6 +54,10 @@ export async function DELETE(
 
         return NextResponse.json({ success: true });
     } catch (error: unknown) {
+        // Still referenced is the caller's problem to fix, not a server fault.
+        if (error instanceof ConflictError) {
+            return NextResponse.json({ success: false, error: error.message }, { status: 400 });
+        }
         log.error("Delete adapter error", { adapterId: params.id }, wrapError(error));
         return NextResponse.json({
             success: false,
@@ -112,15 +80,15 @@ export async function PUT(
         // RBAC: Check permission based on adapter type
         const existingAdapter = await prisma.adapterConfig.findUnique({
             where: { id: params.id },
-            select: { type: true, adapterId: true, lastError: true, config: true }
+            select: { type: true, adapterId: true, lastError: true, config: true, storageRole: true }
         });
         if (!existingAdapter) {
             return NextResponse.json({ success: false, error: "Adapter not found" }, { status: 404 });
         }
-        checkPermissionWithContext(ctx, getWritePermissionForType(existingAdapter.type));
+        checkPermissionWithContext(ctx, getWritePermissionForAdapterType(existingAdapter.type));
 
         const body = await req.json();
-        const { name, config, metadata, primaryCredentialId, sshCredentialId } = body;
+        const { name, config, metadata, primaryCredentialId, sshCredentialId, storageRole } = body;
 
         // Validate credential profile assignments (if provided)
         if (primaryCredentialId !== undefined || sshCredentialId !== undefined) {
@@ -158,6 +126,9 @@ export async function PUT(
         // (decrypted) config before re-encrypting so we never clobber a real
         // secret with an encrypted empty string (data-loss bug).
         let configString: string | undefined;
+        // Kept in scope for the snapshot check below, which has to probe with the real
+        // secrets rather than the redacted ones the form submits.
+        let mergedPlainConfig: Record<string, unknown> | undefined;
         if (config !== undefined) {
             const incomingConfig = typeof config === 'string' ? JSON.parse(config) : config;
             let existingDecrypted: unknown = {};
@@ -167,7 +138,58 @@ export async function PUT(
                 log.warn("Failed to decrypt existing config during update; secret merge skipped", { adapterId: params.id }, wrapError(e));
             }
             const mergedConfig = mergeSecrets(incomingConfig, existingDecrypted);
+            mergedPlainConfig = mergedConfig as Record<string, unknown>;
             configString = JSON.stringify(encryptConfig(mergedConfig));
+        }
+
+        // A role change drops the adapter out of every list its old role appeared in, so
+        // refuse it while a job still depends on that role rather than breaking the job.
+        if (storageRole !== undefined && !isStorageRole(storageRole)) {
+            return NextResponse.json({ error: "Invalid storage role" }, { status: 400 });
+        }
+        if (isStorageRole(storageRole) && storageRole !== existingAdapter.storageRole) {
+            if (storageRole === STORAGE_ROLES.SOURCE) {
+                const linkedDestinations = await prisma.jobDestination.findMany({
+                    where: { configId: params.id },
+                    select: { job: { select: { name: true } } },
+                });
+                if (linkedDestinations.length > 0) {
+                    return NextResponse.json({
+                        error: `Cannot turn this into a directory source: it is used as a destination in ${linkedDestinations.map(d => d.job.name).join(', ')}.`
+                    }, { status: 400 });
+                }
+            } else {
+                const linkedSources = await prisma.jobSource.findMany({
+                    where: { configId: params.id },
+                    select: { job: { select: { name: true } } },
+                });
+                if (linkedSources.length > 0) {
+                    return NextResponse.json({
+                        error: `Cannot turn this into a destination: it is used as a directory source in ${linkedSources.map(s => s.job.name).join(', ')}.`
+                    }, { status: 400 });
+                }
+            }
+        }
+
+        // Same gate as on create: the config that ends up stored has to be one the server
+        // can honour, whichever endpoint wrote it.
+        if (mergedPlainConfig !== undefined) {
+            try {
+                const effectiveRole = isStorageRole(storageRole) ? storageRole : (existingAdapter.storageRole as StorageRole);
+                const configForCheck = mergedPlainConfig;
+                await validateSnapshotConfig(
+                    existingAdapter.adapterId,
+                    configForCheck,
+                    effectiveRole,
+                    primaryCredentialId ?? null,
+                    sshCredentialId ?? null
+                );
+            } catch (e) {
+                if (e instanceof ValidationError) {
+                    return NextResponse.json({ success: false, error: e.message }, { status: 400 });
+                }
+                throw e;
+            }
         }
 
         const updatedAdapter = await prisma.adapterConfig.update({
@@ -178,6 +200,7 @@ export async function PUT(
                 ...(primaryCredentialId !== undefined ? { primaryCredentialId: primaryCredentialId ?? null } : {}),
                 ...(sshCredentialId !== undefined ? { sshCredentialId: sshCredentialId ?? null } : {}),
                 ...(metadata !== undefined ? { metadata: JSON.stringify(metadata) } : {}),
+                ...(isStorageRole(storageRole) ? { storageRole } : {}),
                 // Clear the "No credential profile assigned" OFFLINE/DEGRADED flag when a profile is now assigned.
                 ...(primaryCredentialId && existingAdapter.lastError === "No credential profile assigned"
                     ? { lastStatus: "ONLINE", lastError: null, consecutiveFailures: 0 }

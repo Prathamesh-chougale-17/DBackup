@@ -37,6 +37,34 @@ export async function stepCleanup(ctx: RunnerContext) {
             // File doesn't exist or cleanup failed - ignore
         }
     }
+
+    // The archive index sidecar, when the combined dump path produced one.
+    if (ctx.indexFile) {
+        await fs.unlink(ctx.indexFile).catch(() => {
+            // File doesn't exist or cleanup failed - ignore, same as the archive above
+        });
+    }
+
+    // 2. Release every shadow copy this run created.
+    //
+    // This function runs from the runner's `finally`, so it covers success, failure and
+    // cancellation. A snapshot left behind consumes space on the file server and blocks
+    // the next backup of that share, so each release is attempted independently and a
+    // failure is logged rather than thrown - it must not turn an otherwise good backup
+    // into a failed one.
+    for (const shadow of ctx.shadowCopies ?? []) {
+        try {
+            await shadow.adapter.releaseSnapshot?.(shadow.config, shadow.handle);
+            ctx.log(`[${shadow.configName}] Shadow copy released`, 'info', 'storage');
+        } catch (e: unknown) {
+            const message = e instanceof Error ? e.message : String(e);
+            ctx.log(
+                `[${shadow.configName}] Could not release the shadow copy (${shadow.handle.label}): ${message}. It may have to be removed on the server.`,
+                'warning', 'storage'
+            );
+        }
+    }
+    ctx.shadowCopies = [];
 }
 
 export async function stepFinalize(ctx: RunnerContext) {
@@ -66,7 +94,20 @@ export async function stepFinalize(ctx: RunnerContext) {
             logs: JSON.stringify(ctx.logs),
             size: ctx.dumpSize,
             path: ctx.finalRemotePath,
-            metadata: JSON.stringify(executionMetadata)
+            metadata: JSON.stringify(executionMetadata),
+            // Chain bookkeeping. Only set for incremental-mode jobs; a full-mode job
+            // leaves these null, which is what marks a backup as standalone.
+            ...(ctx.chain && ctx.job?.backupMode === "INCREMENTAL"
+                ? {
+                    backupType: ctx.chain.type === "full" ? "Full" : "Incremental",
+                    chainId: ctx.chain.chainId,
+                    baseArchive: ctx.chain.baseArchive ?? null,
+                    chainIndex: ctx.chain.index,
+                    // The complete snapshot size, as opposed to `size` which is what this
+                    // archive physically stores. The Storage Explorer shows this one.
+                    logicalSize: typeof ctx.metadata?.logicalSize === "number" ? ctx.metadata.logicalSize : null,
+                }
+                : {}),
         }
     });
 

@@ -1,18 +1,10 @@
-import { AdapterManager } from "@/components/adapter/adapter-manager";
-import { getUserPermissions } from "@/lib/auth/access-control";
-import { PERMISSIONS } from "@/lib/auth/permissions";
+import { redirect } from "next/navigation";
+import { CONNECTION_TABS } from "@/components/adapter/connections-tabs";
 
-export default async function SourcesPage() {
-    const permissions = await getUserPermissions();
-    const canManage = permissions.includes(PERMISSIONS.SOURCES.WRITE);
-
-    return (
-        <AdapterManager
-            type="database"
-            title="Sources"
-            description="Configure the databases you want to backup."
-            canManage={canManage}
-            permissions={permissions}
-        />
-    )
+/**
+ * Kept so bookmarks, documentation links and anything else pointing at the old
+ * Sources page still lands somewhere useful.
+ */
+export default function SourcesPage() {
+    redirect(`/dashboard/connections?tab=${CONNECTION_TABS.DATABASES}`);
 }

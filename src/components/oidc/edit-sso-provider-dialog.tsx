@@ -22,6 +22,11 @@ import { SsoProvider } from "@prisma/client";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
 import { Pencil } from "lucide-react";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { logger } from "@/lib/logging/logger";
+import { wrapError } from "@/lib/logging/errors";
+
+const log = logger.child({ component: "EditSsoProviderDialog" });
 
 interface EditSsoProviderDialogProps {
     provider: SsoProvider;
@@ -92,7 +97,7 @@ export function EditSsoProviderDialog({ provider }: EditSsoProviderDialogProps) 
                         newConfig.baseUrl = parts[0];
                         newConfig.slug = parts[1].replace(/\/$/, "");
                     }
-                } else if (adp.id === "pocket-id") {
+                } else if (adp.id === "pocket-id" || adp.id === "authelia") {
                     // Issuer: {baseUrl} (usually)
                     newConfig.baseUrl = issuer;
                 } else if (adp.id === "generic") {
@@ -107,7 +112,7 @@ export function EditSsoProviderDialog({ provider }: EditSsoProviderDialogProps) 
                      setAdapterConfig(newConfig);
                 }
             } catch (e) {
-                console.warn("Failed to reconstruct adapter config", e);
+                log.warn("Failed to reconstruct adapter config", {}, wrapError(e));
             }
         }
     }, [provider]);
@@ -167,15 +172,19 @@ export function EditSsoProviderDialog({ provider }: EditSsoProviderDialogProps) 
                     Edit
                 </Button>
             </DialogTrigger>
-            <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-                <DialogHeader>
-                    <DialogTitle>Edit SSO Provider</DialogTitle>
-                    <DialogDescription>
-                        Modify configuration for {adapter.name}
-                    </DialogDescription>
-                </DialogHeader>
+            <DialogContent className="max-w-2xl max-h-[90vh] p-0">
+                <div className="px-6 pt-6 pb-4 shrink-0">
+                    <DialogHeader>
+                        <DialogTitle>Edit SSO Provider</DialogTitle>
+                        <DialogDescription>
+                            Modify configuration for {adapter.name}
+                        </DialogDescription>
+                    </DialogHeader>
+                </div>
 
-                <form onSubmit={handleSubmit} className="space-y-6">
+                <form onSubmit={handleSubmit}>
+                <ScrollArea className="*:data-[slot=scroll-area-viewport]:max-h-[calc(90vh-10rem)]">
+                <div className="space-y-6 px-6 pb-4">
                     <Tabs defaultValue="general" className="w-full">
                         <TabsList className="grid w-full grid-cols-3">
                             <TabsTrigger value="general">General</TabsTrigger>
@@ -272,7 +281,10 @@ export function EditSsoProviderDialog({ provider }: EditSsoProviderDialogProps) 
                             />
                         </TabsContent>
                     </Tabs>
+                </div>
+                </ScrollArea>
 
+                <div className="px-6 pt-2 pb-6 shrink-0">
                     <DialogFooter>
                         <Button type="button" variant="outline" onClick={() => setOpen(false)} disabled={isLoading}>
                             Cancel
@@ -281,6 +293,7 @@ export function EditSsoProviderDialog({ provider }: EditSsoProviderDialogProps) 
                             {isLoading ? "Saving..." : "Save Changes"}
                         </Button>
                     </DialogFooter>
+                </div>
                 </form>
             </DialogContent>
         </Dialog>

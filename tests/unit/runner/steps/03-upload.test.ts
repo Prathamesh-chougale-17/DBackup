@@ -105,6 +105,10 @@ vi.mock('@/services/storage/storage-service', () => ({
     },
 }));
 
+// Deliberately NOT mocked: the row appended to the listing cache is derived by this mapper, and
+// the point of the test below is that the runner and the explorer derive it the same way.
+
+
 // --- Helpers ---
 
 function makeDestination(overrides: Partial<DestinationContext> = {}): DestinationContext {
@@ -177,6 +181,44 @@ describe('stepUpload', () => {
     it('throws when context is not ready (no tempFile)', async () => {
         const ctx = makeCtx({ tempFile: undefined });
         await expect(stepUpload(ctx)).rejects.toThrow('Context not ready for upload');
+    });
+
+    /**
+     * Where a chain member lands. The position has to appear exactly once: it is how chain
+     * members address each other, so a duplicated or missing segment breaks the references
+     * that every incremental snapshot is built on.
+     */
+    describe('incremental chain layout', () => {
+        const chain = { chainId: 'c1', type: 'incremental' as const, index: 2, chainDir: 'chain-2026-05-07T10-00-00-000' };
+
+        it('prepends the position when the naming template did not place it', async () => {
+            const ctx = makeCtx({ tempFile: '/tmp/Test_Job_2026-05-07.tar', chain, chainInFileName: false } as never);
+            (ctx.job as any).backupMode = 'INCREMENTAL';
+
+            await stepUpload(ctx);
+
+            expect(ctx.finalRemotePath).toBe('Test Job/chain-2026-05-07T10-00-00-000/inc-002-Test_Job_2026-05-07.tar');
+        });
+
+        it('does not prepend it again when the template already placed it', async () => {
+            // The {chain} token put the segment in the filename; prefixing here as well would
+            // produce "inc-002-Test_Job_..._inc-002.tar".
+            const ctx = makeCtx({ tempFile: '/tmp/Test_Job_2026-05-07_inc-002.tar', chain, chainInFileName: true } as never);
+            (ctx.job as any).backupMode = 'INCREMENTAL';
+
+            await stepUpload(ctx);
+
+            expect(ctx.finalRemotePath).toBe('Test Job/chain-2026-05-07T10-00-00-000/Test_Job_2026-05-07_inc-002.tar');
+        });
+
+        it('keeps the flat layout for a job that is not in incremental mode', async () => {
+            const ctx = makeCtx({ tempFile: '/tmp/Test_Job_2026-05-07.tar' });
+            (ctx.job as any).backupMode = 'FULL';
+
+            await stepUpload(ctx);
+
+            expect(ctx.finalRemotePath).toBe('Test Job/Test_Job_2026-05-07.tar');
+        });
     });
 
     it('sets stage to UPLOADING when no compression or encryption is configured', async () => {
@@ -458,6 +500,38 @@ describe('stepUpload', () => {
         await stepUpload(ctx);
 
         expect(ctx.finalRemotePath).toBe('Test Job/test_backup.sql');
+    });
+
+    it('caches a file backup with the compression and encryption it actually has', async () => {
+        // The row appended here is what the Storage Explorer shows until the destination is
+        // listed again from scratch - and reconciliation only enriches files it has not seen
+        // before, so a row written wrong stays wrong. A seekable (v2) archive keeps compression
+        // and encryption per entry under `archive.*`, which the hand-built row did not read:
+        // every file backup showed as uncompressed and unencrypted while both were on.
+        const { storageService } = await import('@/services/storage/storage-service');
+        const ctx = makeCtx();
+        ctx.metadata = {
+            ...ctx.metadata,
+            combined: { databases: 0, directorySources: 1 },
+            archive: {
+                formatVersion: 2,
+                indexFile: '.index',
+                encrypted: true,
+                profileId: 'profile-1',
+                compression: 'GZIP',
+                files: 129,
+            },
+        };
+
+        await stepUpload(ctx);
+
+        const appended = (storageService.appendStorageListCacheEntry as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1];
+        expect(appended).toMatchObject({
+            compression: 'GZIP',
+            isEncrypted: true,
+            encryptionProfileId: 'profile-1',
+            hasFileIndex: true,
+        });
     });
 
     it('includes multiDb metadata in the written sidecar', async () => {

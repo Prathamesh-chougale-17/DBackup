@@ -26,9 +26,20 @@ describe('OIDC_ADAPTERS registry', () => {
         expect(adapter?.name).toBe('Authentik');
     });
 
+    it('includes authelia adapter', () => {
+        const adapter = getOIDCAdapter('authelia');
+        expect(adapter).toBeDefined();
+        expect(adapter?.name).toBe('Authelia');
+    });
+
     it('includes generic adapter', () => {
         const adapter = getOIDCAdapter('generic');
         expect(adapter).toBeDefined();
+    });
+
+    it('has a unique id per adapter', () => {
+        const ids = OIDC_ADAPTERS.map(a => a.id);
+        expect(new Set(ids).size).toBe(ids.length);
     });
 });
 

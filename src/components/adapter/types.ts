@@ -1,3 +1,4 @@
+import type { StorageRole } from "@/lib/core/storage-roles";
 
 export interface AdapterConfig {
     id: string;
@@ -13,6 +14,8 @@ export interface AdapterConfig {
     sshCredentialId?: string | null;
     lastStatus?: string | null;
     lastError?: string | null;
+    /** Storage adapters only: whether this config is a backup destination or a directory source. */
+    storageRole?: StorageRole;
 }
 
 export interface AdapterManagerProps {
@@ -21,4 +24,10 @@ export interface AdapterManagerProps {
     description: string;
     canManage?: boolean;
     permissions?: string[];
+    /** Storage adapters only: restricts the list to configs in this role. */
+    roleFilter?: StorageRole;
+    /** Storage adapters only: the role a config created from this manager instance starts with. */
+    defaultRole?: StorageRole;
+    /** Set when the surrounding page owns the heading, e.g. several managers under one set of tabs. */
+    hidePageHeading?: boolean;
 }

@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isStorageRole, STORAGE_ROLES } from "@/lib/core/storage-roles";
+import { validateSnapshotConfig } from "@/lib/adapters/snapshot-validation";
 import prisma from "@/lib/prisma";
 import { encryptConfig } from "@/lib/crypto";
 import { toAdapterListItem } from "@/lib/adapters/dto";
@@ -24,6 +26,11 @@ export async function GET(req: NextRequest) {
 
     const { searchParams } = new URL(req.url);
     const type = searchParams.get("type");
+    // Storage adapters split into two exclusive roles. Callers that only care about one
+    // (the Storage Explorer, the Destinations page) pass it; the job form deliberately
+    // omits it and splits the single response itself.
+    const roleParam = searchParams.get("role")?.toUpperCase();
+    const role = isStorageRole(roleParam) ? roleParam : undefined;
 
     try {
         if (type === 'database') {
@@ -42,7 +49,10 @@ export async function GET(req: NextRequest) {
         }
 
         const adapters = await prisma.adapterConfig.findMany({
-            where: type ? { type } : undefined,
+            where: {
+                ...(type ? { type } : {}),
+                ...(role && type === 'storage' ? { storageRole: role } : {}),
+            },
             orderBy: { createdAt: 'desc' }
         });
 
@@ -67,7 +77,7 @@ export async function POST(req: NextRequest) {
 
     try {
         const body = await req.json();
-        const { name, type, adapterId, config, metadata, primaryCredentialId, sshCredentialId } = body;
+        const { name, type, adapterId, config, metadata, primaryCredentialId, sshCredentialId, storageRole } = body;
 
         // Permission Check
         if (type === 'database') {
@@ -92,6 +102,24 @@ export async function POST(req: NextRequest) {
             }
             if (e instanceof NotFoundError) {
                 return NextResponse.json({ error: e.message }, { status: 404 });
+            }
+            throw e;
+        }
+
+        // A snapshot-enabled config is only accepted when the server can actually deliver
+        // one - the form's gate alone would be bypassable through this endpoint.
+        try {
+            const configForCheck = typeof config === 'string' ? JSON.parse(config) : config;
+            await validateSnapshotConfig(
+                adapterId,
+                configForCheck,
+                isStorageRole(storageRole) ? storageRole : STORAGE_ROLES.DESTINATION,
+                primaryCredentialId ?? null,
+                sshCredentialId ?? null
+            );
+        } catch (e) {
+            if (e instanceof ValidationError) {
+                return NextResponse.json({ error: e.message }, { status: 400 });
             }
             throw e;
         }
@@ -122,6 +150,8 @@ export async function POST(req: NextRequest) {
                 primaryCredentialId: primaryCredentialId ?? null,
                 sshCredentialId: sshCredentialId ?? null,
                 ...(metadata ? { metadata: JSON.stringify(metadata) } : {}),
+                // The role only makes sense for storage adapters - other types keep the default.
+                ...(type === 'storage' && isStorageRole(storageRole) ? { storageRole } : {}),
             },
         });
 

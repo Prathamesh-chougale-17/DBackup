@@ -10,12 +10,13 @@ import {
     DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { deleteApiKey, toggleApiKey, rotateApiKey } from "@/app/actions/auth/api-key"
+import { deleteApiKey, toggleApiKey, rotateApiKey, bulkDeleteApiKeys, bulkToggleApiKeys } from "@/app/actions/auth/api-key"
 import { toast } from "sonner"
 import { DateDisplay } from "@/components/utils/date-display"
-import { DataTable } from "@/components/ui/data-table"
+import { DataTable, type BulkAction } from "@/components/ui/data-table"
+import { unwrapBulkAction } from "@/lib/bulk-request"
 import { Badge } from "@/components/ui/badge"
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { ApiKeyRevealDialog } from "./api-key-reveal-dialog"
 import type { ApiKeyListItem } from "@/services/auth/api-key-service"
 import {
@@ -74,6 +75,43 @@ export function ApiKeyTable({ data, canManage }: ApiKeyTableProps) {
             error: (err) => `Error: ${err.message}`,
         })
     }
+
+    const bulkActions = useMemo<BulkAction<ApiKeyListItem>[]>(() => {
+        if (!canManage) return []
+
+        return [
+            {
+                id: "enable",
+                labels: { verb: "enable", verbPast: "enabled", noun: "API key" },
+                icon: Power,
+                isAvailable: (rows) => rows.some((key) => !key.enabled),
+                itemName: (key) => key.name,
+                run: (rows) => unwrapBulkAction(bulkToggleApiKeys(rows.map((key) => key.id), true)),
+            },
+            {
+                id: "disable",
+                labels: { verb: "disable", verbPast: "disabled", noun: "API key" },
+                icon: PowerOff,
+                isAvailable: (rows) => rows.some((key) => key.enabled),
+                itemName: (key) => key.name,
+                run: (rows) => unwrapBulkAction(bulkToggleApiKeys(rows.map((key) => key.id), false)),
+            },
+            {
+                id: "delete",
+                labels: { verb: "delete", verbPast: "deleted", noun: "API key" },
+                icon: Trash,
+                variant: "destructive",
+                itemName: (key) => key.name,
+                confirm: {
+                    title: (rows) => `Delete ${rows.length} API key${rows.length === 1 ? "" : "s"}?`,
+                    description: () =>
+                        "This cannot be undone. Any integration using one of these keys loses access immediately.",
+                    confirmLabel: "Delete",
+                },
+                run: (rows) => unwrapBulkAction(bulkDeleteApiKeys(rows.map((key) => key.id))),
+            },
+        ]
+    }, [canManage])
 
     const columns: ColumnDef<ApiKeyListItem>[] = [
         {
@@ -190,7 +228,13 @@ export function ApiKeyTable({ data, canManage }: ApiKeyTableProps) {
 
     return (
         <>
-            <DataTable columns={columns} data={data} />
+            <DataTable
+                columns={columns}
+                data={data}
+                enableRowSelection={canManage}
+                getRowId={(key) => key.id}
+                bulkActions={bulkActions}
+            />
 
             {/* Reveal dialog for rotated keys */}
             <ApiKeyRevealDialog

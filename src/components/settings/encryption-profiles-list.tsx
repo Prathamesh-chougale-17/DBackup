@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -10,9 +10,12 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { toast } from "sonner"
 import { Loader2, Lock, Plus, Trash2, AlertTriangle, ShieldCheck, Download, Copy, Eye, Import } from "lucide-react"
 import { EncryptionProfile } from "@prisma/client"
-import { createEncryptionProfile, importEncryptionProfile, deleteEncryptionProfile, getEncryptionProfiles, revealMasterKey } from "@/app/actions/backup/encryption"
+import { createEncryptionProfile, importEncryptionProfile, deleteEncryptionProfile, getEncryptionProfiles, revealMasterKey, bulkDeleteEncryptionProfiles } from "@/app/actions/backup/encryption"
 import { DateDisplay } from "@/components/utils/date-display"
-import { DataTable } from "@/components/ui/data-table"
+import { DataTable, type BulkAction } from "@/components/ui/data-table"
+import { unwrapBulkAction } from "@/lib/bulk-request"
+import { Checkbox } from "@/components/ui/checkbox"
+import { ScrollArea } from "@/components/ui/scroll-area"
 import { ColumnDef } from "@tanstack/react-table"
 
 export function EncryptionProfilesList() {
@@ -36,6 +39,10 @@ export function EncryptionProfilesList() {
     // Reveal Key State
     const [revealedKey, setRevealedKey] = useState<{ id: string, key: string } | null>(null)
     const [isRevealing, setIsRevealing] = useState(false)
+
+    // Recovery Kit Export State
+    const [isKitOpen, setIsKitOpen] = useState(false)
+    const [selectedForKit, setSelectedForKit] = useState<Set<string>>(new Set())
 
     const fetchProfiles = async () => {
         setLoading(true)
@@ -139,9 +146,54 @@ export function EncryptionProfilesList() {
         });
     }
 
-    const downloadRecoveryKit = (profileId: string) => {
-        window.location.href = `/api/vault/${profileId}/recovery-kit`;
+    const downloadRecoveryKit = (profileIds: string[]) => {
+        if (profileIds.length === 0) return;
+        window.location.href = `/api/vault/recovery-kit?ids=${profileIds.map(encodeURIComponent).join(",")}`;
+        setIsKitOpen(false);
     }
+
+    /**
+     * Opens the export dialog with everything ticked.
+     *
+     * One kit covering every profile is the useful default: a backup records which profile
+     * encrypted it, so the tool picks the right key by itself and nobody has to work out
+     * which of several kits belongs to which job. Unticking is there for handing someone a
+     * kit that only opens what they should see.
+     */
+    const openKitDialog = () => {
+        setSelectedForKit(new Set(profiles.map((profile) => profile.id)));
+        setIsKitOpen(true);
+    }
+
+    const allSelectedForKit = profiles.length > 0 && selectedForKit.size === profiles.length;
+
+    const toggleForKit = (profileId: string) => {
+        setSelectedForKit((prev) => {
+            const next = new Set(prev);
+            if (next.has(profileId)) next.delete(profileId);
+            else next.add(profileId);
+            return next;
+        });
+    }
+
+    const bulkActions = useMemo<BulkAction<EncryptionProfile>[]>(() => [
+        {
+            id: "delete",
+            labels: { verb: "delete", verbPast: "deleted", noun: "encryption profile" },
+            icon: Trash2,
+            variant: "destructive",
+            itemName: (profile) => profile.name,
+            confirm: {
+                title: (rows) => `Delete ${rows.length} encryption profile${rows.length === 1 ? "" : "s"}?`,
+                // The strongest warning in the app belongs here. Losing a key is not
+                // recoverable by any means DBackup has.
+                description: () =>
+                    "Every backup encrypted with these profiles becomes permanently unreadable. Make sure you hold a Recovery Kit for anything you still need.",
+                confirmLabel: "Delete",
+            },
+            run: (rows) => unwrapBulkAction(bulkDeleteEncryptionProfiles(rows.map((profile) => profile.id))),
+        },
+    ], []);
 
     const columns: ColumnDef<EncryptionProfile>[] = [
         {
@@ -211,6 +263,15 @@ export function EncryptionProfilesList() {
                         </CardDescription>
                     </div>
                     <div className="flex gap-2">
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={openKitDialog}
+                            disabled={profiles.length === 0}
+                        >
+                            <Download className="mr-2 h-4 w-4" />
+                            Recovery Kit
+                        </Button>
                         <Button variant="outline" size="sm" onClick={() => {
                             setNewName(""); setNewDesc(""); setImportKey("");
                             setIsImportOpen(true);
@@ -276,9 +337,103 @@ export function EncryptionProfilesList() {
                         data={profiles}
                         searchKey="name"
                         onRefresh={fetchProfiles}
+                        enableRowSelection
+                        getRowId={(profile) => profile.id}
+                        bulkActions={bulkActions}
+                        onBulkActionComplete={fetchProfiles}
                     />
                 )}
             </CardContent>
+
+            {/* Recovery Kit Export Dialog */}
+            <Dialog open={isKitOpen} onOpenChange={setIsKitOpen}>
+                <DialogContent className="sm:max-w-md max-h-[90vh] p-0">
+                    <div className="px-6 pt-6 pb-4 shrink-0">
+                        <DialogHeader>
+                            <DialogTitle>Download Recovery Kit</DialogTitle>
+                            <DialogDescription>
+                                A standalone tool that restores your backups without DBackup. One kit
+                                can carry several keys and picks the right one per backup.
+                            </DialogDescription>
+                        </DialogHeader>
+                    </div>
+
+                    <div className="flex items-center justify-between px-6 pb-2 shrink-0">
+                        <span className="text-xs text-muted-foreground">
+                            {selectedForKit.size} of {profiles.length} selected
+                        </span>
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 text-xs"
+                            onClick={() => setSelectedForKit(
+                                allSelectedForKit ? new Set() : new Set(profiles.map((p) => p.id))
+                            )}
+                        >
+                            {allSelectedForKit ? "Deselect all" : "Select all"}
+                        </Button>
+                    </div>
+
+                    {/* flex-1 min-h-0 rather than a max-height: the header wraps to a
+                        different number of lines depending on the viewport, and any fixed
+                        subtraction pushed the footer off the bottom of the dialog. */}
+                    {/* Two measured budgets, because the footer stacks its buttons below sm:
+                        and the chrome is genuinely taller there. The nested !block undoes
+                        Radix's display:table wrapper, which sizes to the widest unbroken
+                        text and pushes the right-hand padding out of view. */}
+                    <ScrollArea className="*:data-[slot=scroll-area-viewport]:max-h-[calc(90vh-26rem)] sm:*:data-[slot=scroll-area-viewport]:max-h-[calc(90vh-21rem)] [&>[data-slot=scroll-area-viewport]>div]:!block">
+                        {/* pr-8 rather than pr-6: the scrollbar is drawn over the last 10px
+                            of the gutter, so matching the header's px-6 exactly leaves the
+                            cards visibly closer to the right edge than to the left. */}
+                        <div className="space-y-2 pl-6 pr-8 pb-4">
+                            {profiles.map((profile) => (
+                                <label
+                                    key={profile.id}
+                                    htmlFor={`kit-${profile.id}`}
+                                    // A fixed minimum height keeps rows even whether or not a profile
+                                    // carries a description.
+                                    className="flex min-h-14 items-center gap-3 rounded-md border px-3 py-2 cursor-pointer hover:bg-accent/50"
+                                >
+                                    <Checkbox
+                                        id={`kit-${profile.id}`}
+                                        checked={selectedForKit.has(profile.id)}
+                                        onCheckedChange={() => toggleForKit(profile.id)}
+                                    />
+                                    <div className="min-w-0">
+                                        <p className="text-sm font-medium leading-tight truncate">{profile.name}</p>
+                                        {profile.description && (
+                                            <p className="text-xs text-muted-foreground leading-tight truncate mt-0.5">
+                                                {profile.description}
+                                            </p>
+                                        )}
+                                    </div>
+                                </label>
+                            ))}
+                        </div>
+                    </ScrollArea>
+
+                    <div className="px-6 pt-3 pb-6 space-y-3 shrink-0">
+                        <p className="flex items-start gap-2 text-xs text-destructive">
+                            <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-px" />
+                            <span>
+                                {selectedForKit.size > 1
+                                    ? `Opens every backup made with any of these ${selectedForKit.size} profiles. Store it away from your backups.`
+                                    : "Contains the raw key. Store it away from your backups."}
+                            </span>
+                        </p>
+                        <DialogFooter>
+                            <Button variant="outline" onClick={() => setIsKitOpen(false)}>Cancel</Button>
+                            <Button
+                                onClick={() => downloadRecoveryKit([...selectedForKit])}
+                                disabled={selectedForKit.size === 0}
+                            >
+                                <Download className="mr-2 h-4 w-4" />
+                                Download {selectedForKit.size > 1 ? `${selectedForKit.size} keys` : "kit"}
+                            </Button>
+                        </DialogFooter>
+                    </div>
+                </DialogContent>
+            </Dialog>
 
             {/* Delete Confirmation Dialog */}
             <Dialog open={!!profileToDelete} onOpenChange={(open) => !open && setProfileToDelete(null)}>
@@ -369,7 +524,7 @@ export function EncryptionProfilesList() {
                                         variant="outline"
                                         onClick={() =>
                                             revealedKey &&
-                                            downloadRecoveryKit(revealedKey.id)
+                                            downloadRecoveryKit([revealedKey.id])
                                         }
                                     >
                                         Download .zip

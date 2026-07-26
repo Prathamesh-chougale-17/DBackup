@@ -26,6 +26,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { togglePasskeyTwoFactor as togglePasskeyAction, updateOwnPassword } from "@/app/actions/auth/user"
 import { User, Passkey } from "@prisma/client"
 import { formatTwoFactorCode } from "@/lib/utils"
+import { logger } from "@/lib/logging/logger"
+import { wrapError } from "@/lib/logging/errors"
+
+const log = logger.child({ component: "SecurityForm" })
 
 interface SecurityFormProps {
     canUpdatePassword: boolean;
@@ -73,7 +77,7 @@ export function SecurityForm({ canUpdatePassword, canManage2FA, canManagePasskey
                 setPasskeys(result.data.map(p => ({ ...p, name: p.name ?? null })) as Passkey[])
             }
         } catch (error) {
-            console.error("Failed to fetch passkeys", error)
+            log.error("Failed to fetch passkeys", {}, wrapError(error))
         }
     }
 
@@ -105,7 +109,7 @@ export function SecurityForm({ canUpdatePassword, canManage2FA, canManagePasskey
                 setBackupCodes(result.data.backupCodes || [])
             }
         } catch (error) {
-            console.error(error)
+            log.error("Failed to enable two-factor authentication", {}, wrapError(error))
             toast.error("An error occurred")
         } finally {
             setIsPending(false)
@@ -129,7 +133,7 @@ export function SecurityForm({ canUpdatePassword, canManage2FA, canManagePasskey
             setShowBackupCodes(true)
             await refetch()
         } catch (error) {
-           console.error(error)
+           log.error("Two-factor verification failed", {}, wrapError(error))
            toast.error("Verification failed")
         } finally {
             setIsPending(false)
@@ -175,7 +179,7 @@ export function SecurityForm({ canUpdatePassword, canManage2FA, canManagePasskey
                 await fetchPasskeys()
             }
         } catch (error) {
-            console.error(error)
+            log.error("Failed to add passkey", {}, wrapError(error))
             toast.error("Failed to add passkey")
         } finally {
             setIsPending(false)
@@ -331,7 +335,7 @@ export function SecurityForm({ canUpdatePassword, canManage2FA, canManagePasskey
                                                     setIsChangingPassword(false)
                                                 }
                                             } catch (error) {
-                                                console.error(error)
+                                                log.error("Failed to update password", {}, wrapError(error))
                                                 toast.error("Failed to update password")
                                             } finally {
                                                 setIsPending(false)

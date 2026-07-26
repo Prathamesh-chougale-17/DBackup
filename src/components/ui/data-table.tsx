@@ -4,6 +4,7 @@ import * as React from "react";
 import {
     ColumnDef,
     ColumnFiltersState,
+    RowSelectionState,
     SortingState,
     VisibilityState,
     PaginationState,
@@ -26,47 +27,13 @@ import {
     TableHeader,
     TableRow,
 } from "@/components/ui/table";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import {
-    DropdownMenu,
-    DropdownMenuCheckboxItem,
-    DropdownMenuContent,
-    DropdownMenuTrigger,
-    DropdownMenuLabel,
-    DropdownMenuSeparator,
-} from "@/components/ui/dropdown-menu";
-import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
-} from "@/components/ui/select";
-import {
-    ChevronLeft,
-    ChevronRight,
-    ChevronsLeft,
-    ChevronsRight,
-    X,
-    Settings2,
-    RefreshCw,
-} from "lucide-react";
-import { DataTableFacetedFilter } from "./data-table-faceted-filter";
-import { cn } from "@/lib/utils";
+import { DataTableToolbar } from "./data-table-toolbar";
+import { DataTablePagination } from "./data-table-pagination";
+import { DataTableBulkBar } from "./data-table-bulk-bar";
+import { selectColumn } from "./data-table-selection";
+import type { BulkAction, DataTableFilterableColumn, DataTableFilterOption } from "./data-table-types";
 
-export interface DataTableFilterOption {
-    label: string
-    value: string
-    icon?: React.ComponentType<{ className?: string }>
-    count?: number
-}
-
-export interface DataTableFilterableColumn<TData> {
-    id: keyof TData | string;
-    title: string;
-    options: DataTableFilterOption[];
-}
+export type { BulkAction, DataTableFilterableColumn, DataTableFilterOption };
 
 interface DataTableProps<TData, TValue> {
     columns: ColumnDef<TData, TValue>[];
@@ -77,6 +44,28 @@ interface DataTableProps<TData, TValue> {
     autoResetPageIndex?: boolean;
     onRefresh?: () => void;
     isLoading?: boolean;
+
+    // Row selection & bulk actions
+    /**
+     * Shows the leading checkbox column and the bulk action bar.
+     *
+     * Bind this to the permission boolean resolved on the server. It hides UI only - the
+     * endpoint behind every bulk action checks permissions again.
+     */
+    enableRowSelection?: boolean;
+    /**
+     * Stable identity per row. Required whenever `enableRowSelection` is set.
+     *
+     * Without it TanStack keys the selection by row index, so any refetch that reorders or
+     * resizes the list leaves the selection pointing at different records. Every consumer
+     * here replaces `data` after a mutation, and some poll on a timer.
+     */
+    getRowId?: (row: TData, index: number) => string;
+    /** Rows that may never be selected, whatever the action. Renders a disabled checkbox. */
+    isRowSelectable?: (row: TData) => boolean;
+    bulkActions?: BulkAction<TData>[];
+    /** Runs after a bulk action settles, whether fully or partly successful. Refetch here. */
+    onBulkActionComplete?: () => void | Promise<void>;
 
     // Manual Pagination & Sorting Capabilities
     pageCount?: number;
@@ -101,6 +90,11 @@ export function DataTable<TData, TValue>({
     autoResetPageIndex = true,
     onRefresh,
     isLoading = false,
+    enableRowSelection = false,
+    getRowId,
+    isRowSelectable,
+    bulkActions = [],
+    onBulkActionComplete,
     pageCount,
     rowCount,
     pagination: controlledPagination,
@@ -121,7 +115,7 @@ export function DataTable<TData, TValue>({
         pageSize: 10,
     });
     const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>(initialColumnVisibility);
-    const [rowSelection, setRowSelection] = React.useState({});
+    const [rowSelection, setRowSelection] = React.useState<RowSelectionState>({});
 
     // Resolution (Controlled vs Internal)
     const sorting = controlledSorting ?? internalSorting;
@@ -133,9 +127,20 @@ export function DataTable<TData, TValue>({
     const pagination = controlledPagination ?? internalPagination;
     const setPagination = onPaginationChange ?? setInternalPagination;
 
+    // The select column is prepended here rather than by each consumer, so its position is
+    // the same everywhere and permission gating stays a single boolean.
+    const tableColumns = React.useMemo(
+        () => (enableRowSelection ? [selectColumn<TData>() as ColumnDef<TData, TValue>, ...columns] : columns),
+        [enableRowSelection, columns]
+    );
+
     const table = useReactTable({
         data,
-        columns,
+        columns: tableColumns,
+        getRowId,
+        enableRowSelection: enableRowSelection
+            ? (row) => (isRowSelectable ? isRowSelectable(row.original) : true)
+            : false,
         pageCount: pageCount ?? (manualPagination ? -1 : undefined),
         state: {
             sorting,
@@ -164,87 +169,47 @@ export function DataTable<TData, TValue>({
         getFacetedUniqueValues: !manualFiltering ? getFacetedUniqueValues() : undefined,
     });
 
-    const isFiltered = table.getState().columnFilters.length > 0;
+    // TanStack keeps selection keys for rows that have left `data`. They are invisible in
+    // the row models but would still count as "selected" the moment a row with the same id
+    // comes back, so drop them whenever the data changes.
+    React.useEffect(() => {
+        if (!enableRowSelection || !getRowId) return;
+        setRowSelection((current) => {
+            const keys = Object.keys(current);
+            if (keys.length === 0) return current;
+            const present = new Set(data.map((row, index) => getRowId(row, index)));
+            const stale = keys.filter((key) => !present.has(key));
+            if (stale.length === 0) return current;
+            const next = { ...current };
+            for (const key of stale) delete next[key];
+            return next;
+        });
+    }, [data, enableRowSelection, getRowId]);
+
     const totalRows = rowCount ?? table.getFilteredRowModel().rows.length;
+    // Always read the selection through the row model. The raw record can hold ids that
+    // are no longer on screen.
+    const selectedRows = enableRowSelection
+        ? table.getFilteredSelectedRowModel().rows.map((row) => row.original)
+        : [];
 
     return (
         <div className="w-full">
-            <div className="flex items-center justify-between py-4">
-                <div className="flex flex-1 items-center space-x-2">
-                    <Input
-                        placeholder="Filter..."
-                        value={(table.getColumn(searchKey)?.getFilterValue() as string) ?? ""}
-                        onChange={(event) =>
-                            table.getColumn(searchKey)?.setFilterValue(event.target.value)
-                        }
-                        className="h-8 w-37.5 lg:w-62.5"
-                    />
-                    {filterableColumns.length > 0 &&
-                        filterableColumns.map((column) => (
-                            table.getColumn(column.id as string) && (
-                                <DataTableFacetedFilter
-                                    key={String(column.id)}
-                                    column={table.getColumn(column.id as string)}
-                                    title={column.title}
-                                    options={column.options}
-                                />
-                            )
-                        ))}
-                    {isFiltered && (
-                        <Button
-                            variant="ghost"
-                            onClick={() => table.resetColumnFilters()}
-                            className="h-8 px-2 lg:px-3"
-                        >
-                            Reset
-                            <X className="ml-2 h-4 w-4" />
-                        </Button>
-                    )}
-                </div>
-                <div className="flex items-center space-x-2">
-                    <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                            <Button variant="outline" size="sm" className="h-8 hidden lg:flex ml-auto">
-                                <Settings2 className="mr-2 h-4 w-4" />
-                                View
-                            </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="w-37.5">
-                            <DropdownMenuLabel>Toggle columns</DropdownMenuLabel>
-                            <DropdownMenuSeparator />
-                            {table
-                                .getAllColumns()
-                                .filter((column) => column.getCanHide())
-                                .map((column) => {
-                                    return (
-                                        <DropdownMenuCheckboxItem
-                                            key={column.id}
-                                            className="capitalize"
-                                            checked={column.getIsVisible()}
-                                            onCheckedChange={(value) =>
-                                                column.toggleVisibility(!!value)
-                                            }
-                                        >
-                                            {column.id}
-                                        </DropdownMenuCheckboxItem>
-                                    );
-                                })}
-                        </DropdownMenuContent>
-                    </DropdownMenu>
-                    {onRefresh && (
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={onRefresh}
-                            title="Refresh"
-                            className="h-8 w-8 p-0"
-                            disabled={isLoading}
-                        >
-                            <RefreshCw className={cn("h-4 w-4", isLoading && "animate-spin")} />
-                        </Button>
-                    )}
-                </div>
-            </div>
+            <DataTableToolbar
+                table={table}
+                searchKey={searchKey}
+                filterableColumns={filterableColumns}
+                onRefresh={onRefresh}
+                isLoading={isLoading}
+            />
+            {enableRowSelection && bulkActions.length > 0 && (
+                <DataTableBulkBar
+                    selectedRows={selectedRows}
+                    actions={bulkActions}
+                    onClearSelection={() => setRowSelection({})}
+                    onComplete={onBulkActionComplete}
+                />
+            )}
             <div className="rounded-md border overflow-x-auto max-w-[calc(100vw-6rem)] md:max-w-[calc(100vw-22rem)]">
                 <Table>
                     <TableHeader>
@@ -285,7 +250,9 @@ export function DataTable<TData, TValue>({
                         ) : (
                             <TableRow>
                                 <TableCell
-                                    colSpan={columns.length}
+                                    // Counted from the table, not from `columns`, so the
+                                    // prepended select column does not break the span.
+                                    colSpan={table.getVisibleLeafColumns().length}
                                     className="h-24 text-center"
                                 >
                                     No results.
@@ -295,78 +262,7 @@ export function DataTable<TData, TValue>({
                     </TableBody>
                 </Table>
             </div>
-            <div className="flex items-center justify-between px-2 py-4">
-                <div className="flex-1 text-sm text-muted-foreground">
-                    {table.getFilteredSelectedRowModel().rows.length > 0
-                        ? `${table.getFilteredSelectedRowModel().rows.length} of ${totalRows} row(s) selected.`
-                        : `Total ${totalRows} row(s).`
-                    }
-                </div>
-                <div className="flex items-center space-x-6 lg:space-x-8">
-                    <div className="flex items-center space-x-2">
-                        <p className="text-sm font-medium">Rows per page</p>
-                        <Select
-                            value={`${table.getState().pagination.pageSize}`}
-                            onValueChange={(value) => {
-                                table.setPageSize(Number(value));
-                            }}
-                        >
-                            <SelectTrigger className="h-8 w-17.5">
-                                <SelectValue placeholder={table.getState().pagination.pageSize} />
-                            </SelectTrigger>
-                            <SelectContent side="top">
-                                {[10, 20, 30, 40, 50].map((pageSize) => (
-                                    <SelectItem key={pageSize} value={`${pageSize}`}>
-                                        {pageSize}
-                                    </SelectItem>
-                                ))}
-                            </SelectContent>
-                        </Select>
-                    </div>
-                    <div className="flex w-25 items-center justify-center text-sm font-medium">
-                        Page {table.getState().pagination.pageIndex + 1} of{" "}
-                        {table.getPageCount()}
-                    </div>
-                    <div className="flex items-center space-x-2">
-                        <Button
-                            variant="outline"
-                            className="hidden h-8 w-8 p-0 lg:flex"
-                            onClick={() => table.setPageIndex(0)}
-                            disabled={!table.getCanPreviousPage()}
-                        >
-                            <span className="sr-only">Go to first page</span>
-                            <ChevronsLeft className="h-4 w-4" />
-                        </Button>
-                        <Button
-                            variant="outline"
-                            className="h-8 w-8 p-0"
-                            onClick={() => table.previousPage()}
-                            disabled={!table.getCanPreviousPage()}
-                        >
-                            <span className="sr-only">Go to previous page</span>
-                            <ChevronLeft className="h-4 w-4" />
-                        </Button>
-                        <Button
-                            variant="outline"
-                            className="h-8 w-8 p-0"
-                            onClick={() => table.nextPage()}
-                            disabled={!table.getCanNextPage()}
-                        >
-                            <span className="sr-only">Go to next page</span>
-                            <ChevronRight className="h-4 w-4" />
-                        </Button>
-                        <Button
-                            variant="outline"
-                            className="hidden h-8 w-8 p-0 lg:flex"
-                            onClick={() => table.setPageIndex(table.getPageCount() - 1)}
-                            disabled={!table.getCanNextPage()}
-                        >
-                            <span className="sr-only">Go to last page</span>
-                            <ChevronsRight className="h-4 w-4" />
-                        </Button>
-                    </div>
-                </div>
-            </div>
+            <DataTablePagination table={table} totalRows={totalRows} />
         </div>
     );
 }

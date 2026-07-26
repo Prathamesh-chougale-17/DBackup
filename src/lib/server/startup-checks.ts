@@ -3,6 +3,7 @@ import { registry } from "@/lib/core/registry";
 import { registerAdapters } from "@/lib/adapters";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
+import { getOidcAutoRedirectProviderId } from "@/lib/auth/env-flags";
 
 const log = logger.child({ module: "StartupChecks" });
 
@@ -79,5 +80,52 @@ export async function validateAdapterCredentials(): Promise<void> {
         });
     } catch (e) {
         log.error("Credential profile validation failed", {}, wrapError(e));
+    }
+}
+
+/**
+ * Verifies that `OIDC_AUTO_REDIRECT` names an SSO provider that exists and is enabled.
+ *
+ * The variable holds a `SsoProvider.providerId`, which the login page uses to send
+ * visitors straight to that provider instead of showing the login form. A value that
+ * matches nothing would leave the login page silently behaving as if the feature were
+ * off, so it is reported loudly here instead.
+ *
+ * Never throws - a bad value logs an error and the application starts normally with
+ * the redirect switched off. Aborting startup would take the instance down the moment
+ * somebody deletes or disables that provider in the UI, which is exactly the situation
+ * where an administrator needs to reach the login page.
+ */
+export async function validateOidcAutoRedirect(): Promise<void> {
+    const providerId = getOidcAutoRedirectProviderId();
+    if (!providerId) return;
+
+    try {
+        const provider = await prisma.ssoProvider.findUnique({
+            where: { providerId },
+            select: { providerId: true, name: true, enabled: true },
+        });
+
+        if (!provider) {
+            log.error(
+                "OIDC_AUTO_REDIRECT names an unknown SSO provider - automatic redirect is disabled. " +
+                "The value must be a provider ID from Users > SSO / OIDC.",
+                { providerId },
+            );
+            return;
+        }
+
+        if (!provider.enabled) {
+            log.error(
+                "OIDC_AUTO_REDIRECT names a disabled SSO provider - automatic redirect is disabled. " +
+                "Enable the provider under Users > SSO / OIDC or clear the variable.",
+                { providerId },
+            );
+            return;
+        }
+
+        log.info("OIDC auto-redirect active", { providerId, name: provider.name });
+    } catch (e) {
+        log.error("OIDC auto-redirect validation failed", { providerId }, wrapError(e));
     }
 }

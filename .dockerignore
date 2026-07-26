@@ -6,6 +6,9 @@ node_modules
 .next
 out
 
+# Local test infrastructure (pnpm test:ui), including its own .next cache
+.test
+
 # Production folders (should be volume mounted, not baked into image)
 backups
 storage
@@ -47,7 +50,7 @@ pnpm-debug.log*
 docs
 tests
 scripts
-!scripts/decrypt_backup.js
+!scripts/dbackup-recover.js
 coverage
 wiki
 api-docs

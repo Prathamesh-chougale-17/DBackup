@@ -1,10 +1,17 @@
 import { defineConfig, globalIgnores } from "eslint/config";
+import { fixupConfigRules } from "@eslint/compat";
 import nextVitals from "eslint-config-next/core-web-vitals";
 import nextTs from "eslint-config-next/typescript";
 
+// eslint-config-next still bundles eslint-plugin-react, eslint-plugin-import and
+// eslint-plugin-jsx-a11y, none of which have shipped an ESLint 10 release. They call
+// context methods that ESLint 10 removed (context.getFilename and friends), which makes
+// the whole run abort rather than report. fixupConfigRules re-adds those methods for the
+// affected rules. Tracked upstream in jsx-eslint/eslint-plugin-react#3977 and
+// vercel/next.js#89764 - drop this wrapper once eslint-config-next declares eslint 10.
 const eslintConfig = defineConfig([
-  ...nextVitals,
-  ...nextTs,
+  ...fixupConfigRules(nextVitals),
+  ...fixupConfigRules(nextTs),
   {
     rules: {
       "@typescript-eslint/no-explicit-any": "off",

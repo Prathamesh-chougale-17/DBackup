@@ -9,6 +9,8 @@ import { auditService } from "@/services/audit-service";
 import { AUDIT_ACTIONS, AUDIT_RESOURCES } from "@/lib/core/audit-types";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
+import { runBulk } from "@/lib/core/bulk";
+import { BulkIdsSchema } from "@/lib/core/bulk-schema";
 
 const log = logger.child({ action: "group" });
 
@@ -161,5 +163,56 @@ export async function deleteGroup(id: string) {
     } catch (error: unknown) {
         log.error("Failed to delete group", { groupId: id }, wrapError(error));
         return { success: false, error: "Failed to delete group. Ensure no users are assigned to it." };
+    }
+}
+
+/**
+ * Deletes several groups.
+ *
+ * SuperAdmin is refused here as well as in the UI, since hiding a checkbox is not a
+ * guarantee. A group with users still in it surfaces as a per-group failure.
+ */
+export async function bulkDeleteGroups(ids: string[]) {
+    await checkPermission(PERMISSIONS.GROUPS.WRITE);
+    const currentUser = await getCurrentUserWithGroup();
+
+    const parsed = BulkIdsSchema.safeParse(ids);
+    if (!parsed.success) {
+        return { success: false as const, error: "Invalid request" };
+    }
+
+    try {
+        const groups = await prisma.group.findMany({
+            where: { id: { in: parsed.data } },
+            select: { id: true, name: true },
+        });
+        const names = new Map(groups.map((group) => [group.id, group.name]));
+
+        const result = await runBulk(
+            parsed.data,
+            async (id) => {
+                if (names.get(id) === "SuperAdmin") {
+                    throw new Error("The SuperAdmin group cannot be deleted.");
+                }
+                await prisma.group.delete({ where: { id } });
+            },
+            (id) => names.get(id)
+        );
+
+        revalidatePath("/dashboard/users");
+
+        if (currentUser) {
+            await auditService.log(
+                currentUser.id,
+                AUDIT_ACTIONS.DELETE,
+                AUDIT_RESOURCES.GROUP,
+                { bulk: true, requested: parsed.data.length, succeeded: result.succeeded.length, failed: result.failed.length }
+            );
+        }
+
+        return { success: true as const, data: result };
+    } catch (error: unknown) {
+        log.error("Failed to bulk delete groups", {}, wrapError(error));
+        return { success: false as const, error: "Failed to delete groups" };
     }
 }

@@ -14,6 +14,8 @@ services:
       # - TZ=Europe/Zurich    # Optional: Server timezone
       # - PUID=1001           # Optional: User ID for file permissions
       # - PGID=1001           # Optional: Group ID for file permissions
+      # - DISABLE_EMAIL_LOGIN=true          # Optional: Switch off password sign-in, leaving SSO and passkeys
+      # - OIDC_AUTO_REDIRECT=authentik-742  # Optional: SSO provider ID to redirect to instead of the login page
     volumes:
       - ./data:/data              # All persistent data (db, storage, certs)
       - ./backups:/backups        # Optional: used for local backups

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -52,7 +52,9 @@ import {
   setDefaultNotificationTemplate,
   unsetDefaultNotificationTemplate,
 } from "@/app/actions/templates";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type BulkAction } from "@/components/ui/data-table";
+import { unwrapBulkAction } from "@/lib/bulk-request";
+import { bulkDeleteNotificationTemplates } from "@/app/actions/templates-bulk";
 import { ColumnDef } from "@tanstack/react-table";
 import { DateDisplay } from "@/components/utils/date-display";
 import { AdapterIcon } from "@/components/adapter/adapter-icon";
@@ -458,6 +460,25 @@ export function NotificationTemplateList({
     }
   };
 
+  const bulkActions = useMemo<BulkAction<NotificationTemplateWithChannels>[]>(() => [
+    {
+      id: "delete",
+      labels: { verb: "delete", verbPast: "deleted", noun: "notification template" },
+      icon: Trash2,
+      variant: "destructive",
+      itemName: (row) => row.name,
+      // Built-in entries ship with the product and the service refuses them anyway.
+      ineligible: (row) => (row.isSystem ? "Built-in, cannot be deleted" : null),
+      confirm: {
+        title: (rows) => `Delete ${rows.length} notification template${rows.length === 1 ? "" : "s"}?`,
+        description: () =>
+          "This cannot be undone. A template still used by a job is kept and listed afterwards.",
+        confirmLabel: "Delete",
+      },
+      run: (rows) => unwrapBulkAction(bulkDeleteNotificationTemplates(rows.map((row) => row.id))),
+    },
+  ], []);
+
   const columns: ColumnDef<NotificationTemplateWithChannels>[] = [
     {
       accessorKey: "name",
@@ -576,7 +597,14 @@ export function NotificationTemplateList({
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : (
-            <DataTable columns={columns} data={templates} />
+            <DataTable
+              columns={columns}
+              data={templates}
+              enableRowSelection
+              getRowId={(row) => row.id}
+              bulkActions={bulkActions}
+              onBulkActionComplete={fetchTemplates}
+            />
           )}
         </CardContent>
       </Card>

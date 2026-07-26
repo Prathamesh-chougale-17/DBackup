@@ -9,7 +9,7 @@ import { restoreFromStorage } from "./restore-pipeline";
  * Implementation is split across `src/services/config/`:
  *  - export.ts          → exportConfiguration()
  *  - import.ts          → importConfiguration() (DB transaction with FK remapping)
- *  - parse.ts           → parseBackupFile() + tryDecryptFile() helpers
+ *  - parse.ts           → parseBackupFile() helper
  *  - restore-pipeline.ts → restoreFromStorage() background pipeline
  */
 export class ConfigService {

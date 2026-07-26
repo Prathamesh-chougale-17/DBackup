@@ -87,8 +87,9 @@ export const StorageHistoryTab = forwardRef<StorageHistoryTabRef, StorageHistory
     return formatDate(dateStr, "P");
   };
 
-  const formatTooltipDate = (dateStr: string) => {
-    return formatDate(dateStr, "Pp");
+  // Recharts 3 hands the tooltip label in as a ReactNode rather than a string.
+  const formatTooltipDate = (dateStr: React.ReactNode) => {
+    return formatDate(String(dateStr), "Pp");
   };
 
   // Computed stats

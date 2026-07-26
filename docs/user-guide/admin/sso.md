@@ -14,6 +14,7 @@ DBackup supports SSO authentication via OIDC (OpenID Connect):
 
 | Provider | Type | Adapter |
 | :--- | :--- | :--- |
+| **Authelia** | Self-hosted | Pre-configured |
 | **Authentik** | Self-hosted | Pre-configured |
 | **Keycloak** | Self-hosted | Pre-configured |
 | **PocketID** | Self-hosted | Pre-configured |
@@ -40,12 +41,52 @@ Create an OIDC application in your identity provider:
 
 1. Go to **Settings** → **SSO Providers**
 2. Click **Add Provider**
-3. Select adapter type (Authentik, PocketID, Keycloak or Generic)
+3. Select adapter type (Authelia, Authentik, PocketID, Keycloak or Generic)
 4. Fill in configuration
 5. Click **Test** to verify
 6. Save
 
 ## Provider Configuration
+
+### Authelia
+
+[Authelia](https://www.authelia.com/) is a self-hosted authentication and authorization server.
+
+**Configuration**:
+| Field | Description | Example |
+| :--- | :--- | :--- |
+| **Name** | Display name | "Authelia" |
+| **Authelia URL** | Authelia instance URL | `https://auth.example.com` |
+| **Client ID** | From your Authelia client | `dbackup` |
+| **Client Secret** | The plaintext secret | `secret-key` |
+
+Endpoints are discovered via `{baseUrl}/.well-known/openid-configuration`.
+
+::: warning The client secret is stored hashed in Authelia
+Since Authelia 4.38 the `client_secret` in `configuration.yml` has to be a **hash**, while DBackup needs the **plaintext** value. Generate a pair with:
+
+```bash
+authelia crypto hash generate pbkdf2 --variant sha512 --random --random.length 72
+```
+
+Put the `Digest` in Authelia's config and the `Random Password` into DBackup. Pasting the hash into DBackup produces an `invalid_client` error at sign-in.
+:::
+
+Client registration in Authelia's `configuration.yml`:
+
+```yaml
+identity_providers:
+  oidc:
+    clients:
+      - client_id: dbackup
+        client_name: DBackup
+        client_secret: '$pbkdf2-sha512$...'  # the Digest, not the plaintext
+        redirect_uris:
+          - 'https://dbackup.example.com/api/auth/sso/callback/{provider-id}'
+        scopes: [openid, profile, email]
+```
+
+Replace `{provider-id}` with the provider ID DBackup shows on the provider card.
 
 ### Authentik
 
@@ -148,6 +189,34 @@ When SSO providers are configured:
 - "Sign in with [Provider]" buttons appear
 - Users can choose SSO or password login
 - Domain-matched users may auto-redirect
+
+Two environment variables change this. Both are set on the container rather than in the UI, because either one can lock you out and the lever has to work without signing in.
+
+### Switching off password login
+
+`DISABLE_EMAIL_LOGIN=true` removes the email and password form. Only SSO and passkeys remain, and the endpoints are rejected server-side rather than just hidden. Administrators keep creating users and resetting passwords under **Users**, since an account often has to exist before it can link to an SSO identity.
+
+Passkey login has its own switch under **Settings** → **General** and needs no environment variable.
+
+::: warning Order matters on a new instance
+Create the first administrator and configure your provider **before** setting this. There is no bootstrap exception - on an empty instance it leaves no way to sign in and no way to create an account.
+:::
+
+### Skipping the login page entirely
+
+`OIDC_AUTO_REDIRECT` takes a **provider ID** and sends visitors straight to that provider:
+
+```bash
+OIDC_AUTO_REDIRECT=authentik-742
+```
+
+The ID is shown on the provider card in this tab and is the same one in its callback URL.
+
+The redirect is skipped after a failed sign-in, so the error is readable instead of looping, and on the page load right after signing out, so signing out actually works. An ID matching no enabled provider logs an error at startup and leaves the redirect off rather than stopping the application.
+
+::: warning No way past it from the browser
+While this is set, nothing in the URL reaches the login form. If the provider is unreachable or misconfigured, remove the variable and restart.
+:::
 
 ## Security Considerations
 

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
@@ -21,9 +21,13 @@ import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 import { Loader2, Fingerprint, AlertCircle } from "lucide-react"
 import { formatTwoFactorCode } from "@/lib/utils"
-import { ShieldCheck, Box, Settings2, Globe } from "lucide-react"
+import { getOidcProviderIcon } from "@/components/oidc/provider-icon"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { logLoginSuccess } from "@/app/actions/audit/audit-log"
+import { logger } from "@/lib/logging/logger"
+import { wrapError } from "@/lib/logging/errors"
+
+const log = logger.child({ component: "LoginForm" })
 
 const formSchema = z.object({
   email: z.string().email(),
@@ -36,7 +40,16 @@ interface LoginFormProps {
     ssoProviders?: { id: string; name: string; type: string; providerId: string; adapterId: string; domain: string | null; allowProvisioning: boolean }[];
     errorCode?: string;
     disablePasskeyLogin?: boolean;
+    disableEmailLogin?: boolean;
+    autoRedirectProviderId?: string;
 }
+
+/**
+ * Set by the sign-out handler so the auto-redirect skips exactly one page load.
+ * Without it the still-valid session at the identity provider signs the user
+ * straight back in and logging out becomes impossible.
+ */
+export const SKIP_SSO_AUTO_REDIRECT_KEY = "dbackup.skipSsoAutoRedirect";
 
 // Error messages for SSO errors
 const ERROR_MESSAGES: Record<string, { title: string; description: string }> = {
@@ -66,7 +79,7 @@ const ERROR_MESSAGES: Record<string, { title: string; description: string }> = {
     }
 };
 
-export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, disablePasskeyLogin = false }: LoginFormProps) {
+export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, disablePasskeyLogin = false, disableEmailLogin = false, autoRedirectProviderId }: LoginFormProps) {
   const router = useRouter()
   const [isLogin, setIsLogin] = useState(true)
   const [isEmailStep, setIsEmailStep] = useState(true) // New state for 2-step login
@@ -75,10 +88,23 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
   const [totpCode, setTotpCode] = useState("")
   const [isBackupCode, setIsBackupCode] = useState(false)
 
+  // The email/password form is still shown while the instance has no users, so the
+  // first administrator can be created. `allowSignUp` already carries that case.
+  const showEmailForm = !disableEmailLogin || allowSignUp
+  const autoRedirectProvider = autoRedirectProviderId
+    ? ssoProviders.find(p => p.providerId === autoRedirectProviderId)
+    : undefined
+  // Derived from props only, so server and client agree and the login form never
+  // flashes before the redirect takes over. The effect clears it if it decides to
+  // stay, or if the redirect fails.
+  const [autoRedirecting, setAutoRedirecting] = useState(Boolean(autoRedirectProvider) && !errorCode)
+  const autoRedirectFired = useRef(false)
+
   // Get error message for display
   const errorMessage = errorCode ? ERROR_MESSAGES[errorCode] || ERROR_MESSAGES.sso_error : null;
 
-  const handleSsoLogin = async (providerId: string, allowProvisioning: boolean) => {
+  /** Returns false when the provider could not be reached, so callers can fall back to the form. */
+  const handleSsoLogin = async (providerId: string, allowProvisioning: boolean): Promise<boolean> => {
         setLoading(true);
         try {
             const res = await signIn.sso({
@@ -90,23 +116,45 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
             });
             if (res.error) {
                  toast.error(res.error.message || "SSO Login failed");
+                 return false;
             }
+            return true;
         } catch (e: unknown) {
             const message = e instanceof Error ? e.message : "SSO Login failed";
             toast.error(message);
+            return false;
         } finally {
             setLoading(false);
         }
   };
 
-  const getSsoIcon = (adapterId: string) => {
-        switch (adapterId) {
-            case "authentik": return ShieldCheck;
-            case "pocket-id": return Box;
-            case "generic": return Settings2;
-            default: return Globe;
-        }
-    };
+  // OIDC_AUTO_REDIRECT: go straight to the configured provider instead of showing
+  // the login form. Two cases must never redirect, or the instance becomes
+  // unreachable: an SSO error is on screen (redirecting would loop and swallow the
+  // message), and the page load right after an explicit sign-out.
+  useEffect(() => {
+      if (!autoRedirectProvider || errorCode) return
+      // Guards against React strict mode invoking the effect twice in development.
+      if (autoRedirectFired.current) return
+      autoRedirectFired.current = true
+
+      if (sessionStorage.getItem(SKIP_SSO_AUTO_REDIRECT_KEY)) {
+          sessionStorage.removeItem(SKIP_SSO_AUTO_REDIRECT_KEY)
+          setAutoRedirecting(false)
+          return
+      }
+
+      // On success the browser navigates to the provider, so the card stays up until
+      // the page unloads. On failure fall back to the normal form.
+      handleSsoLogin(autoRedirectProvider.providerId, autoRedirectProvider.allowProvisioning)
+          .then(ok => { if (!ok) setAutoRedirecting(false) })
+          .catch(e => {
+              log.error("Automatic SSO redirect failed", {}, wrapError(e))
+              setAutoRedirecting(false)
+          })
+  }, [autoRedirectProvider, errorCode])
+
+  const getSsoIcon = getOidcProviderIcon;
 
   const handlePasskeyLogin = async () => {
         setLoading(true)
@@ -114,7 +162,7 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
             const result = await signIn.passkey({
                 fetchOptions: {
                     onSuccess: async () => {
-                        await logLoginSuccess().catch(e => console.error("Logging failed", e));
+                        await logLoginSuccess().catch(e => log.error("Audit log for login failed", {}, wrapError(e)));
                         toast.success("Login successful")
                         router.push("/dashboard")
                     }
@@ -147,7 +195,7 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
                   code: totpCode,
                   fetchOptions: {
                       onSuccess: async () => {
-                           await logLoginSuccess().catch(e => console.error("Logging failed", e));
+                           await logLoginSuccess().catch(e => log.error("Audit log for login failed", {}, wrapError(e)));
                            router.push("/dashboard")
                            toast.success("Login successful")
                       },
@@ -162,7 +210,7 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
                   code: totpCode,
                   fetchOptions: {
                       onSuccess: async () => {
-                           await logLoginSuccess().catch(e => console.error("Logging failed", e));
+                           await logLoginSuccess().catch(e => log.error("Audit log for login failed", {}, wrapError(e)));
                            router.push("/dashboard")
                            toast.success("Login successful")
                       },
@@ -174,7 +222,7 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
               })
           }
       } catch (error) {
-          console.error(error)
+          log.error("Two-factor verification failed", {}, wrapError(error))
           toast.error("An error occurred")
           setLoading(false)
       }
@@ -213,17 +261,15 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
           callbackURL: "/dashboard",
           fetchOptions: {
             onSuccess: async (ctx) => {
-               console.log("Login Success Context:", ctx);
                if (ctx.data?.twoFactorRedirect) {
                  setTwoFactorStep(true)
                  setLoading(false)
                  return
                }
-               await logLoginSuccess().catch(e => console.error("Logging failed", e));
+               await logLoginSuccess().catch(e => log.error("Audit log for login failed", {}, wrapError(e)));
               router.push("/dashboard")
             },
             onError: (ctx) => {
-              console.log("Login Error Context:", ctx);
               if (ctx.error.code === "TWO_FACTOR_REQUIRED" || ctx.error.message?.includes("2FA") || ctx.error.message?.includes("Two factor")) {
                  setTwoFactorStep(true)
                  setLoading(false)
@@ -253,9 +299,25 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
         })
       }
     } catch (error) {
-       console.error(error);
+       log.error("Login submit failed", {}, wrapError(error));
        setLoading(false);
     }
+  }
+
+  if (autoRedirecting && autoRedirectProvider) {
+      return (
+          <Card className="w-87.5">
+              <CardHeader>
+                  <CardTitle>Signing in</CardTitle>
+                  <CardDescription>
+                      Redirecting to {autoRedirectProvider.name}.
+                  </CardDescription>
+              </CardHeader>
+              <CardContent className="flex justify-center py-6">
+                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+              </CardContent>
+          </Card>
+      )
   }
 
   if (twoFactorStep) {
@@ -353,9 +415,11 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
       <CardHeader>
         <CardTitle>{isLogin ? "Login" : "Sign Up"}</CardTitle>
         <CardDescription>
-          {isLogin
-            ? "Enter your email to login to your account"
-            : "Create a new account to get started"}
+          {!showEmailForm
+            ? "Choose how you want to sign in"
+            : isLogin
+              ? "Enter your email to login to your account"
+              : "Create a new account to get started"}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -367,6 +431,7 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
             <AlertDescription>{errorMessage.description}</AlertDescription>
           </Alert>
         )}
+        {showEmailForm && (
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
             {!isLogin && (
@@ -452,8 +517,9 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
             )}
           </form>
         </Form>
+        )}
         {isLogin && (
-            <div className="mt-4 space-y-4">
+            <div className={showEmailForm ? "mt-4 space-y-4" : "space-y-4"}>
                 {ssoProviders.length > 0 && (
                     <div className="space-y-2">
                         {ssoProviders.map((provider) => {
@@ -477,7 +543,7 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
 
                 {!disablePasskeyLogin && (
                     <>
-                        {ssoProviders.length === 0 && (
+                        {ssoProviders.length === 0 && showEmailForm && (
                             <div className="relative">
                                 <div className="absolute inset-0 flex items-center">
                                     <span className="w-full border-t" />
@@ -500,6 +566,19 @@ export function LoginForm({ allowSignUp = true, ssoProviders = [], errorCode, di
                             Sign in with Passkey
                         </Button>
                     </>
+                )}
+
+                {/* Password login is off and nothing else is configured - say so rather
+                    than render an empty card. Recovering means clearing DISABLE_EMAIL_LOGIN. */}
+                {!showEmailForm && ssoProviders.length === 0 && disablePasskeyLogin && (
+                    <Alert variant="destructive">
+                        <AlertCircle className="h-4 w-4" />
+                        <AlertTitle>No login method available</AlertTitle>
+                        <AlertDescription>
+                            Password sign-in is disabled and no other method is configured.
+                            Contact your administrator.
+                        </AlertDescription>
+                    </Alert>
                 )}
             </div>
         )}

@@ -1,4 +1,4 @@
-import { StorageAdapter, StorageSession, FileInfo } from "@/lib/core/interfaces";
+import { StorageAdapter, StorageSession, FileInfo, DirectoryBrowseEntry } from "@/lib/core/interfaces";
 import { OneDriveSchema } from "@/lib/adapters/definitions";
 import { Client } from "@microsoft/microsoft-graph-client";
 import fs from "fs/promises";
@@ -93,30 +93,67 @@ function driveItemPath(filePath: string): string {
  * Ensures all parent folders exist for a given path.
  * Checks each segment via GET first; only creates if it doesn't exist.
  */
+/**
+ * In-flight folder creations, keyed by the full path being ensured.
+ *
+ * Looking a folder up and creating it when absent spans an await, so restoring several files
+ * into the same folder at once would have every one of them find nothing and create its own.
+ * Graph renames rather than merges on a name clash, so that surfaces as "Images 1", "Images 2"
+ * beside the real one. Sharing the promise makes the others wait for the first.
+ */
+const folderCreations = new Map<string, Promise<void>>();
+
 async function ensureFolderExists(client: Client, folderPath: string): Promise<void> {
     const segments = folderPath.split("/").filter(Boolean);
     let currentPath = "";
 
     for (const segment of segments) {
         const targetPath = currentPath ? `${currentPath}/${segment}` : segment;
+        const parentPath = currentPath;
 
-        // Check if the folder already exists
-        try {
-            await client
-                .api(`/me/drive/root:/${targetPath}:`)
-                .select("id,folder")
-                .get();
-            // Folder exists - continue to next segment
-        } catch {
-            // Folder doesn't exist - create it
-            const parentApiPath = currentPath
-                ? `/me/drive/root:/${currentPath}:/children`
+        const inFlight = folderCreations.get(targetPath);
+        if (inFlight) {
+            await inFlight;
+            currentPath = targetPath;
+            continue;
+        }
+
+        const creation = (async () => {
+            // Check if the folder already exists
+            try {
+                await client
+                    .api(`/me/drive/root:/${targetPath}:`)
+                    .select("id,folder")
+                    .get();
+                return; // Folder exists - continue to next segment
+            } catch {
+                // Folder doesn't exist - create it
+            }
+
+            const parentApiPath = parentPath
+                ? `/me/drive/root:/${parentPath}:/children`
                 : "/me/drive/root/children";
 
-            await client.api(parentApiPath).post({
-                name: segment,
-                folder: {},
-            });
+            try {
+                await client.api(parentApiPath).post({
+                    name: segment,
+                    folder: {},
+                    // Without this Graph silently renames a clash to "segment 1" instead of
+                    // failing, which is how a duplicate would slip in despite the check above.
+                    "@microsoft.graph.conflictBehavior": "fail",
+                });
+            } catch (e: unknown) {
+                // Someone else created it first - which is the outcome we wanted anyway.
+                const status = (e as { statusCode?: number })?.statusCode;
+                if (status !== 409) throw e;
+            }
+        })();
+
+        folderCreations.set(targetPath, creation);
+        try {
+            await creation;
+        } finally {
+            folderCreations.delete(targetPath);
         }
 
         currentPath = targetPath;
@@ -302,6 +339,26 @@ export const OneDriveAdapter: StorageAdapter = {
         }
     },
 
+    async downloadRange(
+        config: OneDriveConfig,
+        remotePath: string,
+        start: number,
+        end: number
+    ): Promise<NodeJS.ReadableStream> {
+        // An empty range is legal - a zero-length file's archive entry produces one.
+        if (end < start) return Readable.from([]);
+
+        const client = createGraphClient(await getAccessToken(config));
+        const item = await client.api(driveItemPath(buildDrivePath(config.folderPath, remotePath))).get();
+
+        const downloadUrl = item["@microsoft.graph.downloadUrl"];
+        if (!downloadUrl) throw new Error("Could not get download URL for file");
+
+        const res = await fetch(downloadUrl, { headers: { Range: `bytes=${start}-${end}` } });
+        if (!res.ok || !res.body) throw new Error(`Ranged download failed with status ${res.status}`);
+        return Readable.fromWeb(res.body as never);
+    },
+
     async download(
         config: OneDriveConfig,
         remotePath: string,
@@ -400,6 +457,44 @@ export const OneDriveAdapter: StorageAdapter = {
             return await listFilesRecursive(client, listPath, dir || "");
         } catch (error: unknown) {
             log.error("OneDrive list failed", { dir }, wrapError(error));
+            throw error;
+        }
+    },
+
+    async browseDirectories(config: OneDriveConfig, subPath: string = ""): Promise<DirectoryBrowseEntry[]> {
+        try {
+            const accessToken = await getAccessToken(config);
+            const client = createGraphClient(accessToken);
+            const basePath = config.folderPath?.replace(/^\/+|\/+$/g, "") || "";
+            const listPath = subPath ? (basePath ? `${basePath}/${subPath}` : subPath) : basePath;
+
+            const apiPath = listPath
+                ? `/me/drive/root:/${listPath}:/children`
+                : "/me/drive/root/children";
+
+            const entries: DirectoryBrowseEntry[] = [];
+            let url: string | null = apiPath;
+
+            while (url) {
+                const res = await client.api(url)
+                    .select("id,name,folder")
+                    .filter("folder ne null")
+                    .top(200)
+                    .orderby("name")
+                    .get();
+
+                for (const item of res.value || []) {
+                    if (item.folder) {
+                        entries.push({ name: item.name, path: subPath ? `${subPath}/${item.name}` : item.name });
+                    }
+                }
+
+                url = res["@odata.nextLink"] || null;
+            }
+
+            return entries;
+        } catch (error: unknown) {
+            log.error("OneDrive browseDirectories failed", { subPath }, wrapError(error));
             throw error;
         }
     },

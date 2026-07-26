@@ -1,9 +1,11 @@
 import { betterAuth } from "better-auth";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import prisma from "@/lib/prisma";
 import { twoFactor } from "better-auth/plugins";
 import { passkey } from "@better-auth/passkey";
 import { sso } from "@better-auth/sso";
+import { shouldBlockBrowserEmailAuth } from "@/lib/auth/env-flags";
 
 // Default session duration: 7 days (in seconds)
 const DEFAULT_SESSION_DURATION = 3600 * 24 * 7;
@@ -109,6 +111,27 @@ function getTrustedProviders(): string[] {
     return trustedProvidersCache;
 }
 
+/**
+ * Rejects browser-initiated email/password authentication when DISABLE_EMAIL_LOGIN
+ * is set. Hiding the form is not enough - the endpoints are public.
+ *
+ * This deliberately does NOT use `emailAndPassword.enabled: false`. That flag is
+ * checked inside the route handlers rather than at registration, and the sign-up
+ * handler guards on `!enabled || disableSignUp`, so it would also break
+ * `auth.api.signUpEmail()` behind the admin Users page.
+ *
+ * The decision itself lives in `shouldBlockBrowserEmailAuth` so it can be tested
+ * without standing up better-auth.
+ */
+const blockEmailLogin = createAuthMiddleware(async (ctx) => {
+    if (!shouldBlockBrowserEmailAuth(ctx.path, Boolean(ctx.request))) return;
+
+    throw new APIError("FORBIDDEN", {
+        code: "EMAIL_LOGIN_DISABLED",
+        message: "Password sign-in is disabled. Use single sign-on or a passkey.",
+    });
+});
+
 export const auth = betterAuth({
     logging: {
         level: "debug"
@@ -189,6 +212,9 @@ export const auth = betterAuth({
         // app (password change, passkey/2FA management) requires re-authentication,
         // so unlinkAccount would otherwise fail with SESSION_NOT_FRESH for most users.
         freshAge: 0,
+    },
+    hooks: {
+        before: blockEmailLogin,
     },
     databaseHooks: {
         user: {

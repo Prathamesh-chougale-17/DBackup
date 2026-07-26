@@ -11,7 +11,7 @@ import { createReadStream, createWriteStream } from "fs";
 import { Transform } from "stream";
 import { createDecryptionStream } from "@/lib/crypto/stream";
 import { getDecompressionStream, CompressionType } from "@/lib/crypto/compression";
-import { LogEntry, LogLevel, LogType } from "@/lib/core/logs";
+import { LogEntry, LogLevel, LogType, RESTORE_STAGES } from "@/lib/core/logs";
 import { isMultiDbTar, readTarManifest } from "@/lib/adapters/database/common/tar-utils";
 import { logger } from "@/lib/logging/logger";
 import { wrapError, getErrorMessage } from "@/lib/logging/errors";
@@ -22,6 +22,7 @@ import { registerExecution, unregisterExecution } from "@/lib/execution/abort";
 import { processQueue } from "@/lib/execution/queue-manager";
 import type { RestoreInput } from "./types";
 import { resolveDecryptionKey } from "./smart-recovery";
+import { restoreArchiveSnapshot } from "./archive-restore";
 
 const svcLog = logger.child({ service: "RestoreService" });
 
@@ -118,8 +119,8 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
     let resolvedStorageName: string | undefined;
 
     try {
-        if (!file || !targetSourceId) {
-            throw new Error("Missing file or targetSourceId");
+        if (!file) {
+            throw new Error("Missing file");
         }
 
         log(`Initiating restore process...`, 'info');
@@ -136,22 +137,32 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
             throw new Error("Storage impl missing");
         }
 
-        // 2. Get Source Adapter
-        const sourceConfig = await prisma.adapterConfig.findUnique({ where: { id: targetSourceId } });
-        if (!sourceConfig || sourceConfig.type !== "database") {
-            throw new Error("Source adapter not found");
-        }
-        resolvedSourceName = sourceConfig.name;
-        resolvedSourceType = sourceConfig.adapterId;
+        // 2. Get Source Adapter (optional - a directory-only archive has no database target;
+        // the v2 archive path resolves its own target when the archive turns out to contain
+        // database entries. Kept here too since v1 archives still expect it resolved up
+        // front, and it doubles as the version-compat check below.)
+        let sourceConfig: Awaited<ReturnType<typeof prisma.adapterConfig.findUnique>> | null = null;
+        let sourceAdapter: DatabaseAdapter | undefined;
+        if (targetSourceId) {
+            sourceConfig = await prisma.adapterConfig.findUnique({ where: { id: targetSourceId } });
+            if (!sourceConfig || sourceConfig.type !== "database") {
+                throw new Error("Source adapter not found");
+            }
+            resolvedSourceName = sourceConfig.name;
+            resolvedSourceType = sourceConfig.adapterId;
 
-        const sourceAdapter = registry.get(sourceConfig.adapterId) as DatabaseAdapter;
-        if (!sourceAdapter) {
-            throw new Error("Source impl missing");
+            sourceAdapter = registry.get(sourceConfig.adapterId) as DatabaseAdapter;
+            if (!sourceAdapter) {
+                throw new Error("Source impl missing");
+            }
         }
 
-        // 3. Download File
-        setStage("Downloading");
-        log(`Downloading backup file: ${file}...`, 'info');
+        // 3. Read the backup's metadata, then either download it whole (v1) or restore it
+        //    by byte range (v2). The stage is entered before the metadata read because the
+        //    read itself fetches the sidecar - but the message waits until we know which
+        //    path this is, so it never claims a download that will not happen.
+        setStage(RESTORE_STAGES.DOWNLOADING);
+        log(`Reading backup metadata: ${file}...`, 'info');
         const tempDir = getTempDir();
         tempFile = path.join(tempDir, path.basename(file));
 
@@ -162,6 +173,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
         let encryptionMeta: BackupMetadata['encryption'] = undefined;
         let compressionMeta: CompressionType | undefined = undefined;
         let expectedChecksum: string | undefined = undefined;
+        let seekableArchive = false;
 
         try {
             const metaRemotePath = file + ".meta.json";
@@ -173,22 +185,31 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
                 const metaContent = await fs.promises.readFile(tempMetaPath, 'utf-8');
                 const metadata = JSON.parse(metaContent);
 
-                if (metadata.encryption && metadata.encryption.enabled) {
+                if (metadata.archive?.formatVersion === 2) {
+                    // Seekable archive - restored by byte range below, never by full
+                    // download. Its encryption/compression is per entry inside the
+                    // archive, so the whole-file passes of this pipeline do not apply.
+                    seekableArchive = true;
+                    log("Detected seekable (v2) archive.", 'info');
+                }
+
+                if (!seekableArchive && metadata.encryption && metadata.encryption.enabled) {
                     isEncrypted = true;
                     encryptionMeta = metadata.encryption;
                     log("Detected encrypted backup.", 'info');
                 }
-                if (metadata.compression && metadata.compression !== 'NONE') {
+                if (!seekableArchive && metadata.compression && metadata.compression !== 'NONE') {
                     compressionMeta = metadata.compression;
                     log(`Detected ${compressionMeta} compression.`, 'info');
                 }
-                if (metadata.checksum) {
+                if (!seekableArchive && metadata.checksum) {
                     expectedChecksum = metadata.checksum;
                     log(`Checksum found in metadata (SHA-256).`, 'info');
                 }
 
-                // Version Check (informational - hard guard already done in preflight)
-                if (metadata.engineVersion) {
+                // Version Check (informational - hard guard already done in preflight).
+                // Only meaningful when a database target was actually resolved above.
+                if (metadata.engineVersion && sourceConfig && sourceAdapter) {
                     const usageConfig = { ...(await resolveAdapterConfig(sourceConfig) as any) };
                     if (privilegedAuth) {
                         usageConfig.privilegedAuth = privilegedAuth;
@@ -223,7 +244,56 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
         }
         // --- END METADATA CHECK ---
 
+        // --- SEEKABLE (v2) ARCHIVE: restore by byte range, never by full download ---
+        // The archive is opened remotely; on adapters with ranged reads only the selected
+        // entries are transferred. Downloading it here - like the v1 path below does -
+        // would move the whole archive to restore a fraction of it. v1 archives and naked
+        // dumps fall through unchanged.
+        if (seekableArchive) {
+            log("Reading directly from the archive - no full download needed.", 'success');
+            // The stage is set inside restoreArchiveSnapshot, which knows whether it is
+            // restoring databases, files, or both - so a file-only restore no longer shows
+            // "Restoring Databases".
+            const result = await restoreArchiveSnapshot(input, { log, updateDetail, setStage });
 
+            if (result.status === "Failed") {
+                log(`Restore failed: no entries could be restored (${result.errors.map(e => e.error).join('; ')})`, 'error');
+                setStage(RESTORE_STAGES.FAILED);
+                await prisma.execution.update({
+                    where: { id: executionId },
+                    data: { status: 'Failed', endedAt: new Date(), logs: JSON.stringify(internalLogs) }
+                });
+            } else {
+                if (result.status === "Partial") {
+                    log(`Restore completed with some failures: ${result.errors.map(e => e.entry).join(', ')}`, 'warning');
+                } else {
+                    log(`Restore completed successfully.`, 'success');
+                }
+                setStage(RESTORE_STAGES.COMPLETED);
+                await prisma.execution.update({
+                    where: { id: executionId },
+                    data: { status: result.status, endedAt: new Date(), logs: JSON.stringify(internalLogs) }
+                });
+
+                notify({
+                    eventType: NOTIFICATION_EVENTS.RESTORE_COMPLETE,
+                    data: {
+                        sourceName: resolvedSourceName ?? "Combined archive",
+                        databaseType: resolvedSourceType,
+                        targetDatabase: targetDatabaseName,
+                        backupFile: path.basename(file),
+                        storageName: resolvedStorageName,
+                        duration: Date.now() - restoreStartTime,
+                        executionId,
+                        timestamp: new Date().toISOString(),
+                    },
+                }).catch(() => {});
+            }
+            return;
+        }
+        // --- END SEEKABLE (v2) ARCHIVE ---
+
+        log(`Downloading backup file: ${file}...`, 'info');
         const downloadStartTime = Date.now();
         const downloadSuccess = await storageAdapter.download(sConf, file, tempFile, (processed, total) => {
             const percent = total > 0 ? Math.round((processed / total) * 100) : 0;
@@ -265,7 +335,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
 
         // --- DECRYPTION EXECUTION ---
         if (isEncrypted && encryptionMeta) {
-            setStage("Decrypting");
+            setStage(RESTORE_STAGES.DECRYPTING);
 
             const masterKey = await resolveDecryptionKey(
                 encryptionMeta,
@@ -329,7 +399,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
         if (compressionMeta && compressionMeta !== 'NONE') {
             try {
                 log(`Decompressing backup (${compressionMeta})...`, 'info');
-                setStage("Decompressing");
+                setStage(RESTORE_STAGES.DECOMPRESSING);
 
                 const decompStream = getDecompressionStream(compressionMeta);
                 if (decompStream) {
@@ -372,7 +442,9 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
         }
         // --- END DECOMPRESSION EXECUTION ---
 
-        // --- MULTI-DB TAR DETECTION ---
+
+        // --- MULTI-DB TAR DETECTION (v1, cosmetic - the actual selective restore logic lives
+        // inside each adapter's own restore(), see mysql/restore.ts etc.) ---
         try {
             if (await isMultiDbTar(tempFile)) {
                 const manifest = await readTarManifest(tempFile);
@@ -389,8 +461,12 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
         }
         // --- END MULTI-DB TAR DETECTION ---
 
-        // 4. Restore
-        setStage("Restoring Database");
+        // 4. Restore (v1 archives only, by construction - see above)
+        if (!sourceConfig || !sourceAdapter) {
+            throw new Error("Missing targetSourceId");
+        }
+        // v1 archives and naked dumps are always a database restore.
+        setStage(RESTORE_STAGES.RESTORING_DATABASES);
         log(`Starting database restore on ${sourceConfig.name}...`, 'info');
 
         const dbConf = await resolveAdapterConfig(sourceConfig) as any;
@@ -476,7 +552,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
             }
 
             log(`Restore adapter reported failure. Check logs above.`, 'error');
-            setStage("Failed");
+            setStage(RESTORE_STAGES.FAILED);
 
             await prisma.execution.update({
                 where: { id: executionId },
@@ -488,7 +564,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
             });
         } else {
             log(`Restore completed successfully.`, 'success');
-            setStage("Completed");
+            setStage(RESTORE_STAGES.COMPLETED);
             await prisma.execution.update({
                 where: { id: executionId },
                 data: {
@@ -517,7 +593,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
     } catch (error: unknown) {
         if (abortController.signal.aborted) {
             svcLog.info("Restore cancelled by user", { executionId });
-            setStage("Cancelled");
+            setStage(RESTORE_STAGES.CANCELLED);
             log("Restore was cancelled by user", 'warning');
 
             await prisma.execution.update({
@@ -526,7 +602,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
             });
         } else {
             svcLog.error("Restore service error", {}, wrapError(error));
-            setStage("Failed");
+            setStage(RESTORE_STAGES.FAILED);
             log(`Fatal Error: ${getErrorMessage(error)}`, 'error');
 
             await prisma.execution.update({

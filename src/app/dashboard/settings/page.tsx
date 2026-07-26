@@ -1,8 +1,10 @@
 import { auth } from "@/lib/auth";
+import { STORAGE_ROLES } from "@/lib/core/storage-roles";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { getUserPermissions } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
+import { isEmailLoginDisabled } from "@/lib/auth/env-flags";
 import prisma from "@/lib/prisma";
 import { SystemSettingsForm } from "@/components/settings/system-settings-form";
 import { SystemTasksSettings } from "@/components/settings/system-tasks-settings";
@@ -33,8 +35,12 @@ export default async function SettingsPage() {
     const maxJobsSetting = await prisma.systemSetting.findUnique({ where: { key: "maxConcurrentJobs" } });
     const maxConcurrentJobs = maxJobsSetting ? parseInt(maxJobsSetting.value) : 1;
 
+
     const disablePasskeySetting = await prisma.systemSetting.findUnique({ where: { key: "auth.disablePasskeyLogin" } });
     const disablePasskeyLogin = disablePasskeySetting?.value === 'true';
+
+    // Deployment-level switch, not a stored setting - surfaced read-only in the form.
+    const emailLoginDisabledByEnv = isEmailLoginDisabled();
 
     const sessionDurationSetting = await prisma.systemSetting.findUnique({ where: { key: "auth.sessionDuration" } });
     const sessionDuration = sessionDurationSetting ? parseInt(sessionDurationSetting.value) : 604800;
@@ -74,9 +80,9 @@ export default async function SettingsPage() {
 
     // Load Options for Config Backup
 
-    // Correct approach: Fetch where type is 'storage'
+    // The config backup is written somewhere, so only destinations qualify.
     const filteredStorageAdapters = await prisma.adapterConfig.findMany({
-        where: { type: "storage" },
+        where: { type: "storage", storageRole: STORAGE_ROLES.DESTINATION },
         select: { id: true, name: true }
     });
 
@@ -134,6 +140,7 @@ export default async function SettingsPage() {
                     <SystemSettingsForm
                         initialMaxConcurrentJobs={maxConcurrentJobs}
                         initialDisablePasskeyLogin={disablePasskeyLogin}
+                        emailLoginDisabledByEnv={emailLoginDisabledByEnv}
                         initialSessionDuration={sessionDuration}
                         initialAuditLogRetentionDays={auditLogRetentionDays}
                         initialStorageSnapshotRetentionDays={storageSnapshotRetentionDays}

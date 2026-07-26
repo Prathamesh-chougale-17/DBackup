@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -33,7 +33,9 @@ import {
   unsetDefaultRetentionPolicy,
 } from "@/app/actions/templates";
 import { RetentionConfiguration } from "@/lib/core/retention";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type BulkAction } from "@/components/ui/data-table";
+import { unwrapBulkAction } from "@/lib/bulk-request";
+import { bulkDeleteRetentionPolicies } from "@/app/actions/templates-bulk";
 import { ColumnDef } from "@tanstack/react-table";
 import { DateDisplay } from "@/components/utils/date-display";
 import { RetentionPolicyForm } from "./retention-policy-form";
@@ -121,6 +123,23 @@ export function RetentionPolicyList() {
   ): "default" | "secondary" | "outline" {
     return "outline";
   }
+
+  const bulkActions = useMemo<BulkAction<RetentionPolicy>[]>(() => [
+    {
+      id: "delete",
+      labels: { verb: "delete", verbPast: "deleted", noun: "retention policy" },
+      icon: Trash2,
+      variant: "destructive",
+      itemName: (row) => row.name,
+      confirm: {
+        title: (rows) => `Delete ${rows.length} retention policy${rows.length === 1 ? "" : "s"}?`,
+        description: () =>
+          "This cannot be undone. An entry that is still in use is kept and listed afterwards.",
+        confirmLabel: "Delete",
+      },
+      run: (rows) => unwrapBulkAction(bulkDeleteRetentionPolicies(rows.map((row) => row.id))),
+    },
+  ], []);
 
   const columns: ColumnDef<RetentionPolicy>[] = [
     {
@@ -216,7 +235,15 @@ export function RetentionPolicyList() {
           </Button>
         </CardHeader>
         <CardContent>
-          <DataTable columns={columns} data={policies} isLoading={loading} />
+          <DataTable
+            columns={columns}
+            data={policies}
+            isLoading={loading}
+            enableRowSelection
+            getRowId={(row) => row.id}
+            bulkActions={bulkActions}
+            onBulkActionComplete={fetchPolicies}
+          />
         </CardContent>
       </Card>
 

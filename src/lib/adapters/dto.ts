@@ -1,4 +1,11 @@
 import { decryptConfig, redactSecrets, getSecretStatus } from "@/lib/crypto";
+import { STORAGE_ROLES, isStorageRole, type StorageRole } from "@/lib/core/storage-roles";
+import { registry } from "@/lib/core/registry";
+import { registerAdapters } from "@/lib/adapters";
+import type { StorageAdapter } from "@/lib/core/interfaces";
+import prisma from "@/lib/prisma";
+
+registerAdapters();
 
 /**
  * Adapter-list Data Transfer Object.
@@ -32,6 +39,10 @@ export interface AdapterListItemDTO {
     lastStatus: string;
     lastError: string | null;
     consecutiveFailures: number;
+    /** Storage adapters only: whether this config is a backup destination or a directory source. */
+    storageRole: StorageRole;
+    /** Storage adapters only: whether the folder tree picker (directory sources) can browse this adapter. */
+    supportsBrowse: boolean;
 }
 
 /**
@@ -54,6 +65,7 @@ export interface AdapterRowInput {
     lastStatus: string;
     lastError: string | null;
     consecutiveFailures: number;
+    storageRole: string;
 }
 
 /**
@@ -101,5 +113,19 @@ export function toAdapterListItem(row: AdapterRowInput): AdapterListItemDTO {
         lastStatus: row.lastStatus,
         lastError: row.lastError,
         consecutiveFailures: row.consecutiveFailures,
+        storageRole: isStorageRole(row.storageRole) ? row.storageRole : STORAGE_ROLES.DESTINATION,
+        supportsBrowse: row.type === "storage" && typeof (registry.get(row.adapterId) as StorageAdapter | undefined)?.browseDirectories === "function",
     };
+}
+
+/**
+ * Server-side helper for pages that need adapter option lists without a client round-trip
+ * (mirrors the query `GET /api/adapters?type=...` runs, kept in sync by sharing this function).
+ */
+export async function getAdapterOptions(type: "database" | "storage" | "notification"): Promise<AdapterListItemDTO[]> {
+    const adapters = await prisma.adapterConfig.findMany({
+        where: { type },
+        orderBy: { createdAt: "desc" },
+    });
+    return adapters.map(toAdapterListItem);
 }

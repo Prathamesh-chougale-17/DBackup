@@ -38,7 +38,7 @@ export async function PUT(
     const params = await props.params;
     try {
         const body = await req.json();
-        const { name, schedule, sourceId, databases, destinations, notificationIds, notificationTemplateIds, enabled, encryptionProfileId, compression, pgCompression, notificationEvents, namingTemplateId, schedulePresetId, skipVerification } = body;
+        const { name, schedule, sourceId, databases, destinations, sources, notificationIds, notificationTemplateIds, enabled, encryptionProfileId, compression, pgCompression, notificationEvents, namingTemplateId, schedulePresetId, skipVerification, backupMode, fullEveryDays, verifyByHash } = body;
 
         const updatedJob = await jobService.updateJob(params.id, {
             name,
@@ -52,6 +52,13 @@ export async function PUT(
                 retention: d.retention ? JSON.stringify(d.retention) : "{}",
                 retentionPolicyId: d.retentionPolicyId ?? null,
             })) : undefined,
+            sources: sources ? sources.map((s: { configId: string; priority?: number; path: string; excludePatterns?: string[]; excludePatternPresetIds?: string[] }, i: number) => ({
+                configId: s.configId,
+                priority: s.priority ?? i,
+                path: s.path,
+                excludePatterns: Array.isArray(s.excludePatterns) ? s.excludePatterns : [],
+                excludePatternPresetIds: Array.isArray(s.excludePatternPresetIds) ? s.excludePatternPresetIds : [],
+            })) : undefined,
             notificationIds,
             notificationTemplateIds: Array.isArray(notificationTemplateIds) ? notificationTemplateIds : undefined,
             encryptionProfileId,
@@ -61,6 +68,9 @@ export async function PUT(
             namingTemplateId: namingTemplateId !== undefined ? (namingTemplateId ?? null) : undefined,
             schedulePresetId: schedulePresetId !== undefined ? (schedulePresetId ?? null) : undefined,
             skipVerification: skipVerification !== undefined ? skipVerification : undefined,
+            backupMode: backupMode !== undefined ? backupMode : undefined,
+            fullEveryDays: fullEveryDays !== undefined ? fullEveryDays : undefined,
+            verifyByHash: verifyByHash !== undefined ? verifyByHash : undefined,
         });
 
         return NextResponse.json(updatedJob);

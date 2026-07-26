@@ -1,5 +1,6 @@
 import { RunnerContext } from "../types";
 import path from "path";
+import { describeBackupFromMetadata } from "@/services/storage/backup-file-fields";
 import fs from "fs/promises";
 import prisma from "@/lib/prisma";
 import { createReadStream, createWriteStream } from "fs";
@@ -12,6 +13,8 @@ import { ProgressMonitorStream } from "@/lib/streams/progress-monitor";
 import { formatBytes } from "@/lib/utils";
 import { calculateFileChecksums } from "@/lib/crypto/checksum";
 import { PIPELINE_STAGES } from "@/lib/core/logs";
+import { INDEX_SIDECAR_SUFFIX } from "@/lib/archive/format";
+import { chainSegment } from "@/lib/templates/naming-template-engine";
 import { withStorageSession } from "./upload-helpers";
 import { verificationService } from "@/services/storage/verification-service";
 
@@ -19,12 +22,24 @@ export async function stepUpload(ctx: RunnerContext) {
     if (!ctx.job || ctx.destinations.length === 0 || !ctx.tempFile) throw new Error("Context not ready for upload");
 
     const job = ctx.job;
-    const compression = (job as any).compression as CompressionType;
+    // Combined (DB + directory source) archives apply BOTH compression and encryption per
+    // entry inside the archive itself (see combined-dump.ts / createArchive), so neither
+    // whole-file pass runs here.
+    //
+    // For compression that would merely waste CPU re-compressing compressed bytes. For
+    // encryption it would be actively destructive: a whole-file AES-GCM stream makes the
+    // archive unseekable, and an unseekable archive cannot serve a single file without a
+    // full download and a full decrypt - which is the entire point of the format.
+    //
+    // ctx.metadata.combined is only ever set by executeCombinedDump(), so its presence is
+    // the correct signal.
+    const isCombinedArchive = !!ctx.metadata?.combined;
+    const compression = isCombinedArchive ? ("NONE" as CompressionType) : ((job as any).compression as CompressionType);
 
     // Determine Action Label for UI
     const actions: string[] = [];
     if (compression && compression !== 'NONE') actions.push("Compressing");
-    if (job.encryptionProfileId) actions.push("Encrypting");
+    if (job.encryptionProfileId && !isCombinedArchive) actions.push("Encrypting");
     const processingLabel = actions.length > 0 ? actions.join(" & ") : "Processing";
 
     if (actions.length > 0) {
@@ -60,7 +75,7 @@ export async function stepUpload(ctx: RunnerContext) {
     let encryptionMeta: BackupMetadata['encryption'] = undefined;
     let getAuthTagCallback: (() => Buffer) | null = null;
 
-    if (job.encryptionProfileId) {
+    if (job.encryptionProfileId && !isCombinedArchive) {
         try {
             ctx.log(`Encryption enabled. Profile ID: ${job.encryptionProfileId}`);
 
@@ -140,9 +155,9 @@ export async function stepUpload(ctx: RunnerContext) {
         version: 1,
         jobId: job.id,
         jobName: job.name,
-        sourceName: job.source.name,
-        sourceType: job.source.adapterId,
-        sourceId: job.source.id,
+        sourceName: job.source?.name ?? (ctx.sources.length > 0 ? `${ctx.sources.length} directory source(s)` : 'Unknown'),
+        sourceType: job.source?.adapterId ?? 'directory-only',
+        sourceId: job.source?.id ?? '',
         databases: {
             count: typeof ctx.metadata?.count === 'number' ? ctx.metadata.count : 0,
             names: Array.isArray(ctx.metadata?.names) ? ctx.metadata.names : undefined
@@ -156,6 +171,24 @@ export async function stepUpload(ctx: RunnerContext) {
         checksum,
         checksumMd5,
         multiDb: ctx.metadata?.multiDb,
+        combined: ctx.metadata?.combined,
+        archive: ctx.metadata?.archive,
+        // Every backup carries a type. Only jobs with directory sources can currently
+        // produce an incremental, so everything else is a full by construction.
+        backupType: ctx.chain?.type ?? 'full',
+        ...(ctx.chain && job.backupMode === "INCREMENTAL"
+            ? {
+                chain: {
+                    id: ctx.chain.chainId,
+                    type: ctx.chain.type,
+                    ...(ctx.chain.baseArchive ? { base: ctx.chain.baseArchive } : {}),
+                    index: ctx.chain.index,
+                },
+                // The complete snapshot size, so the Storage Explorer can show what a
+                // snapshot actually contains rather than only what this archive stores.
+                logicalSize: ctx.metadata?.logicalSize,
+            }
+            : {}),
         trigger,
         locked: ctx.lock === true,
     };
@@ -164,7 +197,26 @@ export async function stepUpload(ctx: RunnerContext) {
     await fs.writeFile(metaPath, JSON.stringify(metadata, null, 2));
 
     // --- SEQUENTIAL UPLOAD TO ALL DESTINATIONS ---
-    const remotePath = `${job.name}/${path.basename(ctx.tempFile)}`;
+    // Incremental jobs group a chain into its own directory and prefix the archive with
+    // its type. Both are visible in any file browser without knowing the format: copying
+    // "a backup" means copying the folder, and `ls` shows at a glance which archive is the
+    // full. Full-mode jobs keep the flat layout they have always had.
+    // The chain position is part of the filename, not decoration: members are addressed by
+    // name from each other's index, and the naming template is user-defined - one with
+    // day granularity plus two runs a day would otherwise have the second archive
+    // overwrite the first, silently gutting every snapshot that references it. The
+    // zero-padded position also makes `ls` show a chain in order.
+    //
+    // A template can place it itself via the {chain} token; then it is already in the name
+    // and prefixing again would duplicate it. Without the token the position is prepended, so
+    // the uniqueness guarantee never depends on how the template happens to be written.
+    const inChain = Boolean(ctx.chain && ctx.chain.type !== undefined && ctx.job!.backupMode === "INCREMENTAL");
+    const chainPrefix = inChain && !ctx.chainInFileName
+        ? `${chainSegment(ctx.chain!.type, ctx.chain!.index)}-`
+        : "";
+    const remotePath = inChain
+        ? `${job.name}/${ctx.chain!.chainDir}/${chainPrefix}${path.basename(ctx.tempFile)}`
+        : `${job.name}/${path.basename(ctx.tempFile)}`;
     const totalDests = ctx.destinations.length;
 
     ctx.setStage(PIPELINE_STAGES.UPLOADING);
@@ -205,6 +257,19 @@ export async function stepUpload(ctx: RunnerContext) {
                     sessionLog
                 );
 
+                // Upload the archive index sidecar, when the dump produced one. Browsing and
+                // file-level restore read this instead of the archive, so it has to reach
+                // every destination the archive itself reaches.
+                if (ctx.indexFile) {
+                    ctx.log(`${destLabel} Uploading archive index sidecar...`);
+                    await session.upload(
+                        ctx.indexFile,
+                        remotePath + INDEX_SIDECAR_SUFFIX,
+                        undefined,
+                        sessionLog
+                    );
+                }
+
                 // Upload main backup file (pass checksums so adapters can store them natively)
                 const uploadSuccess = await session.upload(
                     ctx.tempFile!,
@@ -221,31 +286,30 @@ export async function stepUpload(ctx: RunnerContext) {
 
             dest.uploadResult = { success: true, path: remotePath };
             ctx.log(`${destLabel} Upload complete: ${remotePath}`);
-            const dbCount = typeof metadata.databases === 'object' && 'count' in metadata.databases
-                ? (metadata.databases as { count: number }).count
-                : (Array.isArray(metadata.databases) ? metadata.databases.length : 0);
-            const richEntry = {
-                name: path.basename(remotePath),
-                path: remotePath,
-                size: ctx.dumpSize ?? 0,
-                lastModified: new Date(),
-                jobName: metadata.jobName,
-                sourceName: metadata.sourceName,
-                sourceType: metadata.sourceType,
-                engineVersion: metadata.engineVersion,
-                engineEdition: metadata.engineEdition,
-                dbInfo: { count: dbCount, label: dbCount <= 1 ? "Single DB" : `${dbCount} DBs` },
-                isEncrypted: metadata.encryption?.enabled,
-                encryptionProfileId: metadata.encryption?.profileId,
-                compression: metadata.compression,
-                locked: metadata.locked ?? false,
-                trigger: metadata.trigger as { type: string; actor?: string } | undefined,
-                checksum: metadata.checksum,
-                checksumMd5: metadata.checksumMd5,
-            };
-            import("@/services/storage/storage-service").then(({ storageService }) => {
-                storageService.appendStorageListCacheEntry(dest.configId, richEntry).catch(() => {});
-            });
+            // Awaited rather than fired and forgotten: the previous form left the dynamic
+            // import's own rejection unhandled (the .catch() only covered the inner call),
+            // and let the cache update outlive the run that produced it. Everything the cache
+            // needs stays inside the try, so no part of it can fail a completed upload.
+            try {
+                const { storageService } = await import("@/services/storage/storage-service");
+                // Derived by the explorer's own mapper rather than assembled here. The two
+                // copies had already drifted once: a seekable (v2) archive records compression
+                // and encryption per entry under `archive.*`, which this side did not read, so
+                // every file backup was cached as plain and unencrypted - and stayed so,
+                // because reconciliation only enriches files it has not seen before.
+                const richEntry = {
+                    name: path.basename(remotePath),
+                    path: remotePath,
+                    size: ctx.dumpSize ?? 0,
+                    lastModified: new Date(),
+                    ...describeBackupFromMetadata(path.basename(remotePath), metadata),
+                    ...(typeof ctx.metadata?.logicalSize === 'number' ? { logicalSize: ctx.metadata.logicalSize } : {}),
+                };
+                await storageService.appendStorageListCacheEntry(dest.configId, richEntry);
+            } catch (e: unknown) {
+                // A stale listing cache is cosmetic - it must never fail a successful upload.
+                ctx.log(`${destLabel} Could not update the storage listing cache: ${e instanceof Error ? e.message : String(e)}`, 'warning');
+            }
 
         } catch (e: unknown) {
             const message = e instanceof Error ? e.message : String(e);

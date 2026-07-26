@@ -18,23 +18,10 @@ const SRC_DIR = path.resolve(__dirname, "../../../src");
 const ALLOWED_FILES = [
   "src/lib/logging/logger.ts", // Logger itself uses console
   "src/instrumentation.ts", // Next.js instrumentation hook
+  // Emits copy-paste API client snippets as template literals. The console.* calls
+  // inside those strings are part of the sample a user runs standalone, not our code.
+  "src/components/dashboard/jobs/api-trigger-dialog.tsx",
 ];
-
-/**
- * Checks if a file is a React Client Component.
- * Client Components run in the browser where the server-side logger is not available.
- * In these files, console.* is the appropriate choice for debugging.
- */
-function isClientComponent(filePath: string): boolean {
-  try {
-    const content = fs.readFileSync(filePath, "utf-8");
-    // Check first 100 characters for "use client" directive
-    const firstChunk = content.slice(0, 100);
-    return firstChunk.includes('"use client"') || firstChunk.includes("'use client'");
-  } catch {
-    return false;
-  }
-}
 
 // Patterns to detect direct console usage
 const CONSOLE_PATTERNS = [
@@ -124,12 +111,6 @@ function findConsoleUsage(filePath: string): Violation[] {
 
   // Skip allowed files
   if (ALLOWED_FILES.some((allowed) => relativePath.includes(allowed))) {
-    return [];
-  }
-
-  // Skip Client Components - they run in the browser where server-side logger is unavailable
-  // console.* is the correct choice for browser-side debugging
-  if (isClientComponent(filePath)) {
     return [];
   }
 

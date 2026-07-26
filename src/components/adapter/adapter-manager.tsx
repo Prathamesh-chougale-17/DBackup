@@ -2,6 +2,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { STORAGE_ROLES, storageRoleLabel, type StorageRole } from "@/lib/core/storage-roles";
 import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
@@ -12,10 +13,11 @@ import { AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import { ADAPTER_DEFINITIONS, AdapterDefinition } from "@/lib/adapters/definitions";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type BulkAction } from "@/components/ui/data-table";
+import { requestBulk } from "@/lib/bulk-request";
 import { ColumnDef } from "@tanstack/react-table";
 import { Badge } from "@/components/ui/badge";
-import { Edit, Trash, BarChart3, SearchCode, Copy } from "lucide-react";
+import { Edit, Trash, BarChart3, SearchCode, Copy, ArrowLeftRight } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -27,8 +29,9 @@ import { HealthStatusBadge } from "@/components/ui/health-status-badge";
 import { StorageHistoryModal } from "@/components/dashboard/widgets/storage-history-modal";
 import { PERMISSIONS } from "@/lib/auth/permissions";
 import { CloneDialog } from "@/components/ui/clone-dialog";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
-export function AdapterManager({ type, title, description, canManage = true, permissions = [] }: AdapterManagerProps) {
+export function AdapterManager({ type, title, description, canManage = true, permissions = [], roleFilter, defaultRole, hidePageHeading = false }: AdapterManagerProps) {
     const [configs, setConfigs] = useState<AdapterConfig[]>([]);
     const [isDialogOpen, setIsDialogOpen] = useState(false);
     const [isPickerOpen, setIsPickerOpen] = useState(false);
@@ -37,10 +40,20 @@ export function AdapterManager({ type, title, description, canManage = true, per
     const [editingId, setEditingId] = useState<string | null>(null);
     const [deletingId, setDeletingId] = useState<string | null>(null);
     const [cloningId, setCloningId] = useState<string | null>(null);
-    const [cloneTarget, setCloneTarget] = useState<{ id: string; name: string } | null>(null);
+    // A clone target with a role is the counterpart action: same server and credentials in
+    // the opposite role, so the same NAS does not have to be configured twice by hand.
+    const [cloneTarget, setCloneTarget] = useState<{ id: string; name: string; role?: StorageRole } | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [historyAdapter, setHistoryAdapter] = useState<{ id: string; name: string } | null>(null);
     const router = useRouter();
+
+    // A storage adapter has exactly one role; a manager instance scoped to one (the
+    // "Directory Sources" section, the Destinations page) only shows configs in it -
+    // filtered client-side against the single type=storage fetch.
+    const applyRoleFilter = useCallback((data: AdapterConfig[]) => {
+        if (!roleFilter || type !== 'storage') return data;
+        return data.filter((c) => (c.storageRole ?? STORAGE_ROLES.DESTINATION) === roleFilter);
+    }, [roleFilter, type]);
 
     const fetchConfigs = useCallback(async () => {
         setIsLoading(true);
@@ -48,7 +61,7 @@ export function AdapterManager({ type, title, description, canManage = true, per
             const res = await fetch(`/api/adapters?type=${type}`);
             if (res.ok) {
                 const data = await res.json();
-                setConfigs(data);
+                setConfigs(applyRoleFilter(data));
             } else {
                  const data = await res.json();
                  toast.error(data.error || "Failed to load configurations");
@@ -58,7 +71,7 @@ export function AdapterManager({ type, title, description, canManage = true, per
         } finally {
             setIsLoading(false);
         }
-    }, [type]);
+    }, [type, applyRoleFilter]);
 
     // Silent polling refresh (no loading spinner, no error toasts)
     const silentRefresh = useCallback(async () => {
@@ -66,12 +79,12 @@ export function AdapterManager({ type, title, description, canManage = true, per
             const res = await fetch(`/api/adapters?type=${type}`);
             if (res.ok) {
                 const data = await res.json();
-                setConfigs(data);
+                setConfigs(applyRoleFilter(data));
             }
         } catch {
             // Silent - don't disturb the user on background poll failures
         }
-    }, [type]);
+    }, [type, applyRoleFilter]);
 
     useEffect(() => {
         // Filter definitions by type
@@ -110,17 +123,21 @@ export function AdapterManager({ type, title, description, canManage = true, per
         }
     };
 
-    const cloneAdapter = async (id: string, name: string) => {
+    const cloneAdapter = async (id: string, name: string, role?: StorageRole) => {
         setCloningId(id);
         try {
             const res = await fetch(`/api/adapters/${id}/clone`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ name }),
+                body: JSON.stringify({ name, ...(role ? { role } : {}) }),
             });
             const data = await res.json();
             if (res.ok) {
-                toast.success("Configuration cloned successfully");
+                // A counterpart lands in the other role, so it will not show up in this
+                // list - say where it went instead of leaving the user looking for it.
+                toast.success(role
+                    ? `Created "${name}" as a ${storageRoleLabel(role)}. Adjust its path there.`
+                    : "Configuration cloned successfully");
                 fetchConfigs();
             } else {
                 toast.error(data.error || "Failed to clone configuration");
@@ -303,6 +320,26 @@ export function AdapterManager({ type, title, description, canManage = true, per
                                 >
                                     <Copy className="h-4 w-4" />
                                 </Button>
+                                {type === 'storage' && (() => {
+                                    const counterpart = (row.original.storageRole ?? STORAGE_ROLES.DESTINATION) === STORAGE_ROLES.SOURCE
+                                        ? STORAGE_ROLES.DESTINATION
+                                        : STORAGE_ROLES.SOURCE;
+                                    return (
+                                        <Button
+                                            variant="ghost"
+                                            size="icon"
+                                            title={`Create as ${storageRoleLabel(counterpart)}`}
+                                            disabled={cloningId === row.original.id}
+                                            onClick={() => setCloneTarget({
+                                                id: row.original.id,
+                                                name: `${row.original.name} (${counterpart === STORAGE_ROLES.SOURCE ? 'Source' : 'Destination'})`,
+                                                role: counterpart,
+                                            })}
+                                        >
+                                            <ArrowLeftRight className="h-4 w-4" />
+                                        </Button>
+                                    );
+                                })()}
                                 <Button
                                     variant="ghost"
                                     size="icon"
@@ -336,6 +373,32 @@ export function AdapterManager({ type, title, description, canManage = true, per
         return [{ id: "adapterId", title: "Type", options }];
     }, [configs, availableAdapters]);
 
+    const bulkActions = useMemo<BulkAction<AdapterConfig>[]>(() => {
+        if (!canManage) return [];
+
+        return [
+            {
+                id: "delete",
+                labels: { verb: "delete", verbPast: "deleted", noun: "connection" },
+                icon: Trash,
+                variant: "destructive",
+                itemName: (config) => config.name,
+                confirm: {
+                    title: (rows) => `Delete ${rows.length} connection${rows.length === 1 ? "" : "s"}?`,
+                    // A connection still referenced by a job is refused per entry rather
+                    // than up front, because the reason names the jobs holding it.
+                    description: () =>
+                        "This cannot be undone. Connections still used by a job or a notification template are kept and listed afterwards.",
+                    confirmLabel: "Delete",
+                },
+                run: (rows) => requestBulk("/api/adapters/bulk", {
+                    action: "delete",
+                    ids: rows.map((config) => config.id),
+                }),
+            },
+        ];
+    }, [canManage]);
+
     // Stable reference for the adapter list passed to AdapterForm - prevents the
     // useEffect inside AdapterForm from re-running (and wiping typed values) when
     // unrelated state changes cause the parent to re-render.
@@ -348,12 +411,14 @@ export function AdapterManager({ type, title, description, canManage = true, per
 
     return (
         <div className="space-y-6">
-            <div className="flex items-center justify-between">
-                <div>
-                    <h2 className="text-3xl font-bold tracking-tight">{title}</h2>
-                    <p className="text-muted-foreground">{description}</p>
+            {!hidePageHeading && (
+                <div className="flex items-center justify-between">
+                    <div>
+                        <h2 className="text-3xl font-bold tracking-tight">{title}</h2>
+                        <p className="text-muted-foreground">{description}</p>
+                    </div>
                 </div>
-            </div>
+            )}
 
             <CredentialUpgradeBanner configs={configs} />
 
@@ -382,7 +447,10 @@ export function AdapterManager({ type, title, description, canManage = true, per
                         <div className="flex justify-between items-center">
                             <div>
                                 <CardTitle>{title}</CardTitle>
-                                <CardDescription>Manage your {type} configurations.</CardDescription>
+                                {/* With the page heading hidden the caller's description has
+                                    nowhere else to go, so the card carries it instead of the
+                                    generic line - which would otherwise duplicate the heading. */}
+                                <CardDescription>{hidePageHeading ? description : `Manage your ${type} configurations.`}</CardDescription>
                             </div>
                             {canManage && (
                                 <Button onClick={() => { setEditingId(null); setSelectedAdapterForNew(null); setIsPickerOpen(true); }}>
@@ -398,6 +466,12 @@ export function AdapterManager({ type, title, description, canManage = true, per
                             searchKey="name"
                             onRefresh={fetchConfigs}
                             filterableColumns={typeFilterColumns}
+                            enableRowSelection={canManage}
+                            // Load-bearing here: this list is re-fetched by a poll every
+                            // 10 seconds, and index-keyed selection would jump each time.
+                            getRowId={(config) => config.id}
+                            bulkActions={bulkActions}
+                            onBulkActionComplete={fetchConfigs}
                         />
                     </CardContent>
                 </Card>
@@ -405,18 +479,22 @@ export function AdapterManager({ type, title, description, canManage = true, per
 
             {/* Step 1: Adapter Picker */}
             <Dialog open={isPickerOpen} onOpenChange={setIsPickerOpen}>
-                <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto" aria-describedby={undefined}>
-                    <DialogHeader>
+                <DialogContent className="sm:max-w-2xl max-h-[90vh] p-0" aria-describedby={undefined}>
+                    <DialogHeader className="px-6 pt-6 pb-2 shrink-0">
                         <DialogTitle>{type === 'notification' ? "Select Notification Type" : (type === 'database' ? "Select Database Type" : (type === 'storage' ? "Select Destination Type" : "Select Type"))}</DialogTitle>
                     </DialogHeader>
-                    <AdapterPicker
-                        adapters={availableAdapters}
-                        onSelect={(adapter) => {
-                            setSelectedAdapterForNew(adapter.id);
-                            setIsPickerOpen(false);
-                            setIsDialogOpen(true);
-                        }}
-                    />
+                    <ScrollArea className="*:data-[slot=scroll-area-viewport]:max-h-[calc(90vh-9rem)]">
+                        <div className="px-6 pb-6">
+                            <AdapterPicker
+                                adapters={availableAdapters}
+                                onSelect={(adapter) => {
+                                    setSelectedAdapterForNew(adapter.id);
+                                    setIsPickerOpen(false);
+                                    setIsDialogOpen(true);
+                                }}
+                            />
+                        </div>
+                    </ScrollArea>
                 </DialogContent>
             </Dialog>
 
@@ -433,6 +511,7 @@ export function AdapterManager({ type, title, description, canManage = true, per
                             onSuccess={() => { setIsDialogOpen(false); setSelectedAdapterForNew(null); fetchConfigs(); }}
                             initialData={editingId ? configs.find(c => c.id === editingId) : undefined}
                             onBack={!editingId ? () => { setIsDialogOpen(false); setSelectedAdapterForNew(null); setIsPickerOpen(true); } : undefined}
+                            defaultRole={defaultRole}
                         />
                     )}
                 </DialogContent>
@@ -470,7 +549,7 @@ export function AdapterManager({ type, title, description, canManage = true, per
                 defaultName={cloneTarget?.name ?? ""}
                 existingNames={configs.map((c) => c.name)}
                 isLoading={!!cloningId}
-                onConfirm={(name) => cloneAdapter(cloneTarget!.id, name)}
+                onConfirm={(name) => cloneAdapter(cloneTarget!.id, name, cloneTarget!.role)}
             />
         </div>
     );

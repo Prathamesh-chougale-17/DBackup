@@ -41,15 +41,22 @@ Typical compression ratios for SQL dumps:
 | CPU Usage | Medium |
 | Compatibility | Modern |
 
+DBackup runs Brotli at quality 10 rather than its maximum of 11. On a measured 22 MB SQL
+dump that costs 2.5% in size and returns well over half the time. Quality 9 and below are a
+different setting rather than a faster version of the same one - they skip the search that
+makes Brotli worth choosing, and produce output around 85% larger. If that trade appeals,
+Gzip already offers it.
+
 ### Comparison
 
-100MB SQL dump:
+Indicative figures for a 100 MB SQL dump. Your ratio depends entirely on the content, and
+Brotli's lead over Gzip grows the more repetition there is:
 
-| Algorithm | Compressed Size | Time |
+| Algorithm | Compressed Size | Relative Time |
 | :--- | :--- | :--- |
-| None | 100 MB | 0s |
-| Gzip | 25 MB (75% reduction) | ~5s |
-| Brotli | 20 MB (80% reduction) | ~15s |
+| None | 100 MB | - |
+| Gzip | 25 MB (75% reduction) | 1x |
+| Brotli | 20 MB (80% reduction) | 15-25x |
 
 ## Enabling Compression
 
@@ -69,6 +76,62 @@ Compressed backups have extensions:
 With encryption:
 - `backup.sql.gz.enc`
 - `backup.sql.br.enc`
+
+## Already-Compressed Formats
+
+In a file or folder backup, every file is compressed on its own. Files whose format is
+already compressed are stored as-is instead, even when the job has compression enabled.
+
+Recompressing them gains a fraction of a percent at best, and costs the full CPU time plus a
+complete extra write and read of the file through a temporary file. On a photo or video
+library that is the difference between a backup that finishes and one that does not.
+
+::: info The files are still in the backup
+This only skips the compression step. Nothing is left out. To leave files out of a backup,
+use [exclude patterns](/user-guide/features/file-backups) on the directory source.
+:::
+
+### Formats stored as-is
+
+Matched on the file extension, case-insensitive, and only the last one - so `photos.tar.gz`
+counts as `gz`.
+
+<!-- The table below is checked against src/lib/incompressible-formats.ts by
+     tests/unit/lint-guards/incompressible-formats-doc.test.ts. Edit both together. -->
+
+| Category | Extensions |
+| :--- | :--- |
+| Video | `3gp` `avi` `flv` `m2ts` `m4v` `mkv` `mov` `mp4` `mpeg` `mpg` `mts` `ts` `vob` `webm` `wmv` |
+| Audio | `aac` `ape` `flac` `m4a` `mka` `mp3` `oga` `ogg` `opus` `wma` |
+| Images | `avif` `gif` `heic` `heif` `jp2` `jpeg` `jpg` `jxl` `png` `webp` |
+| Archives | `7z` `br` `bz2` `cab` `gz` `lz4` `lzma` `rar` `tbz2` `tgz` `txz` `xz` `zip` `zst` |
+| ZIP containers | `apk` `docx` `epub` `ipa` `jar` `nupkg` `odp` `ods` `odt` `pptx` `vsix` `war` `whl` `xlsx` `xpi` |
+| Web fonts | `woff` `woff2` |
+| Encrypted | `age` `enc` `gpg` `pgp` |
+| Disk images | `dmg` |
+
+Everything else is compressed normally. Some formats look like they belong on this list and
+are left off on purpose, because they compress well often enough to be worth the attempt -
+PDFs, executables and ISO images among them.
+
+If a format is missing and you are backing up a lot of it, that is worth
+[reporting](https://github.com/Skyfay/DBackup/issues) - the list ships in the code and grows
+with releases, without anything to reconfigure.
+
+### Behaviour
+
+It is automatic and needs no configuration. The job log names how many files were affected:
+
+```
+412 file(s) stored uncompressed (38.1 GB) - their format is already compressed
+```
+
+Restore, download and file-level restore handle this by themselves, and so does the
+[Recovery Kit](/user-guide/security/recovery-kit), including kits you downloaded earlier.
+Every file records how it was stored, so nothing has to be worked out at restore time.
+
+Unpacking an unencrypted backup by hand is the one place it shows: a stored file keeps its
+real name and is immediately usable, while a compressed one ends in `.gz` or `.br`.
 
 ## Pipeline Order
 
@@ -227,11 +290,12 @@ Compression info stored in `.meta.json`:
 
 ### File Larger After Compression
 
-**Cause**: Already compressed data (images, PDFs)
+**Cause**: Already compressed data. In a file backup, known formats are stored as-is
+automatically, so this points at content the extension does not give away - a database dump
+full of BLOBs, or files with a misleading name.
 
-**Solution**:
-1. Consider skipping compression
-2. Or accept minimal overhead
+**Solution:** Set the job to `None`. There is nothing to gain from compressing data that is
+already compressed, and it costs the CPU time either way.
 
 ## Best Practices
 

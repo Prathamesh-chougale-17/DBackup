@@ -1,7 +1,9 @@
-import { StorageAdapter, StorageSession, FileInfo } from "@/lib/core/interfaces";
+import { StorageAdapter, StorageSession, FileInfo, DirectoryBrowseEntry } from "@/lib/core/interfaces";
 import { FTPSchema } from "@/lib/adapters/definitions";
+import { createConnectionPool } from "@/lib/adapters/storage/common/connection-pool";
 import { Client, FileInfo as FTPFileInfo } from "basic-ftp";
 import { createReadStream, createWriteStream } from "fs";
+import { PassThrough, Readable, Writable } from "stream";
 import fs from "fs/promises";
 import path from "path";
 import os from "os";
@@ -88,6 +90,35 @@ async function ensureDir(client: Client, remotePath: string): Promise<void> {
  * cache prevents redundant ensureDir calls when reused across multiple uploads
  * in the same session.
  */
+/** Performs a single download on an already-connected FTP client. */
+async function performFtpDownload(
+    client: Client,
+    config: FTPConfig,
+    remotePath: string,
+    localPath: string,
+    onProgress?: (processed: number, total: number) => void,
+    onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
+): Promise<boolean> {
+    try {
+        const source = resolvePath(config, remotePath);
+        if (onLog) onLog(`Downloading from FTP: ${source}`, "info", "storage");
+
+        if (onProgress) {
+            let total = 0;
+            try { total = await client.size(source); } catch { /* size not supported */ }
+            client.trackProgress((info) => onProgress(info.bytesOverall, total || info.bytesOverall));
+        }
+
+        await client.downloadTo(createWriteStream(localPath), source);
+        client.trackProgress();
+        return true;
+    } catch (error: unknown) {
+        log.error("FTP download failed", { host: config.host, remotePath }, wrapError(error));
+        if (onLog && error instanceof Error) onLog(`FTP download failed: ${error.message}`, "error", "storage", error.stack);
+        return false;
+    }
+}
+
 async function performFtpUpload(
     client: Client,
     config: FTPConfig,
@@ -145,16 +176,49 @@ export const FTPAdapter: StorageAdapter = {
     configSchema: FTPSchema,
     credentials: { primary: "USERNAME_PASSWORD" },
 
-    async openSession(config: FTPConfig, onLog?): Promise<StorageSession> {
-        const client = await connectFTP(config);
-        if (onLog) onLog(`Connected to FTP ${config.host}:${config.port}`, "info", "storage");
+    async openSession(config: FTPConfig, onLog?, options?): Promise<StorageSession> {
+        // One client per parallel transfer, never one shared between them: basic-ftp's Client
+        // carries a single control connection and refuses a second operation while one is in
+        // flight ("User launched a task while another one is still running"), which is not a
+        // recoverable error - it closes the client and takes every queued transfer with it.
+        const pool = createConnectionPool<Client>({
+            limit: options?.concurrency ?? 1,
+            connect: () => connectFTP(config),
+            disconnect: async (client) => { client.close(); },
+            isAlive: (client) => !client.closed,
+        });
+
+        // Opened right away rather than on the first transfer, so bad credentials or an
+        // unreachable host fail here - where the caller can report one clear error - instead of
+        // separately for every file.
+        try {
+            await pool.withConnection(async () => undefined);
+        } catch (error) {
+            await pool.close();
+            throw error;
+        }
+
+        if (onLog) {
+            const limit = options?.concurrency ?? 1;
+            onLog(
+                `Connected to FTP ${config.host}:${config.port}`
+                + (limit > 1 ? ` (up to ${limit} parallel transfers)` : ''),
+                "info",
+                "storage"
+            );
+        }
+
+        // Shared across the pool, not per client: which directories exist is a property of the
+        // server, so one transfer's mkdir spares every other transfer the same check.
         const dirCache = new Set<string>();
+
         return {
             upload: (localPath, remotePath, onProgress, uploadLog) =>
-                performFtpUpload(client, config, localPath, remotePath, onProgress, uploadLog ?? onLog, dirCache),
-            close: async () => {
-                client.close();
-            },
+                pool.withConnection((client) =>
+                    performFtpUpload(client, config, localPath, remotePath, onProgress, uploadLog ?? onLog, dirCache)),
+            download: (remotePath, localPath, onProgress) =>
+                pool.withConnection((client) => performFtpDownload(client, config, remotePath, localPath, onProgress)),
+            close: () => pool.close(),
         };
     },
 
@@ -173,27 +237,61 @@ export const FTPAdapter: StorageAdapter = {
         }
     },
 
+    /**
+     * Streams a byte range using FTP's REST command.
+     *
+     * FTP can seek to a start offset but has no way to express an end, so the transfer is
+     * aborted once enough bytes have arrived. Aborting leaves the control connection
+     * unusable, hence one connection per range - acceptable because a restore touches a
+     * handful of entries, and vastly cheaper than transferring the whole archive.
+     */
+    async downloadRange(config: FTPConfig, remotePath: string, start: number, end: number): Promise<NodeJS.ReadableStream> {
+        // An empty range is legal - a zero-length file's archive entry produces one.
+        if (end < start) return Readable.from([]);
+
+        const wanted = end - start + 1;
+        const client = await connectFTP(config);
+        const source = resolvePath(config, remotePath);
+        const out = new PassThrough();
+
+        let delivered = 0;
+        const sink = new Writable({
+            write(chunk: Buffer, _encoding, callback) {
+                const take = Math.min(chunk.length, wanted - delivered);
+                if (take > 0) {
+                    delivered += take;
+                    out.write(chunk.subarray(0, take));
+                }
+                if (delivered >= wanted) {
+                    // Enough bytes. Closing the client aborts the data transfer, which
+                    // rejects the downloadTo() promise below - that rejection is expected.
+                    client.close();
+                }
+                callback();
+            },
+        });
+
+        client.downloadTo(sink, source, start)
+            .then(() => out.end())
+            .catch((error: unknown) => {
+                // A rejection after the range was fully delivered is our own abort.
+                if (delivered >= wanted) {
+                    out.end();
+                    return;
+                }
+                log.error("FTP ranged download failed", { host: config.host, remotePath, start, end }, wrapError(error));
+                out.destroy(wrapError(error));
+            })
+            .finally(() => client.close());
+
+        return out;
+    },
+
     async download(config: FTPConfig, remotePath: string, localPath: string, onProgress?: (processed: number, total: number) => void, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void): Promise<boolean> {
         let client: Client | null = null;
         try {
             client = await connectFTP(config);
-
-            const source = resolvePath(config, remotePath);
-
-            if (onLog) onLog(`Downloading from FTP: ${source}`, "info", "storage");
-
-            if (onProgress) {
-                let total = 0;
-                try { total = await client.size(source); } catch { /* size not supported */ }
-                client.trackProgress((info) => {
-                    onProgress(info.bytesOverall, total || info.bytesOverall);
-                });
-            }
-
-            await client.downloadTo(createWriteStream(localPath), source);
-
-            client.trackProgress();
-            return true;
+            return await performFtpDownload(client, config, remotePath, localPath, onProgress, onLog);
         } catch (error: unknown) {
             log.error("FTP download failed", { host: config.host, remotePath }, wrapError(error));
             if (onLog && error instanceof Error) onLog(`FTP download failed: ${error.message}`, "error", "storage", error.stack);
@@ -220,6 +318,28 @@ export const FTPAdapter: StorageAdapter = {
         } finally {
             if (client) client.close();
             await fs.unlink(tmpPath).catch(() => {});
+        }
+    },
+
+    async browseDirectories(config: FTPConfig, subPath: string = ""): Promise<DirectoryBrowseEntry[]> {
+        let client: Client | null = null;
+        try {
+            client = await connectFTP(config);
+            const prefix = config.pathPrefix ? config.pathPrefix.replace(/\\/g, "/") : "";
+            const startDir = prefix ? path.posix.join(prefix, subPath) : (subPath || "/");
+
+            const items = await client.list(startDir);
+            return items
+                .filter((item) => item.isDirectory && item.name !== "." && item.name !== "..")
+                .map((item) => ({
+                    name: item.name,
+                    path: subPath ? `${subPath}/${item.name}` : item.name,
+                }));
+        } catch (error: unknown) {
+            log.error("FTP browseDirectories failed", { host: config.host, subPath }, wrapError(error));
+            throw wrapError(error);
+        } finally {
+            if (client) client.close();
         }
     },
 

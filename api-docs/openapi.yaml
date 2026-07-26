@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: DBackup API
-  version: 2.10.1
+  version: 3.0.0
   description: |
     REST API for DBackup - a self-hosted database backup automation platform with encryption, compression, and smart retention.
 
@@ -110,6 +110,55 @@ paths:
                 $ref: "#/components/schemas/Job"
         "409":
           description: Job with this name already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /jobs/bulk:
+    post:
+      tags: [Jobs]
+      summary: Bulk Job Action
+      description: |
+        Applies one action to several jobs in a single request.
+
+        A job that could not be processed does not fail the request. The response is always
+        `200` with per-job outcomes in `data`, so a partial result is reported rather than
+        discarded.
+
+        **Required permission:** `jobs:write`
+      operationId: bulkJobAction
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, ids]
+              properties:
+                action:
+                  type: string
+                  enum: [delete, enable, disable]
+                ids:
+                  type: array
+                  items: { type: string }
+                  minItems: 1
+                  maxItems: 200
+      responses:
+        "200":
+          description: Action applied, with per-job outcomes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkResponse"
+        "400":
+          description: Invalid request body
           content:
             application/json:
               schema:
@@ -483,6 +532,55 @@ paths:
                           type: integer
 
   # ─── Adapters ──────────────────────────────────────────────────
+  /adapters/check-snapshot:
+    post:
+      tags: [Adapters]
+      summary: Check Snapshot Availability
+      description: |
+        Asks a storage server whether it can produce point-in-time snapshots of its path.
+
+        Currently only SMB, via MS-FSRVP. The snapshot option cannot be enabled on an
+        adapter until this reports `supported: true`, and the same check runs again when
+        the adapter is saved.
+      operationId: checkAdapterSnapshot
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [adapterId, config]
+              properties:
+                adapterId:
+                  type: string
+                  example: smb
+                config:
+                  type: object
+                  description: Adapter connection configuration
+                primaryCredentialId:
+                  type: string
+                sshCredentialId:
+                  type: string
+      responses:
+        "200":
+          description: Probe result. Also returned when the server is unreachable - an unavailable snapshot service is an answer, not an error.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  supported:
+                    type: boolean
+                  message:
+                    type: string
+                    example: "\\\\fileserver\\data supports shadow copies (FSRVP 1-1)."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /adapters:
     get:
       tags: [Adapters]
@@ -505,6 +603,15 @@ paths:
             type: string
             enum: [database, storage, notification]
           description: Adapter category
+        - name: role
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [DESTINATION, SOURCE]
+          description: >-
+            Narrows storage adapters to one role (case-insensitive). Omit to receive both.
+            Ignored for other adapter types.
       responses:
         "200":
           description: Adapter list
@@ -546,6 +653,63 @@ paths:
                 $ref: "#/components/schemas/AdapterConfig"
         "409":
           description: Adapter with this name and type already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /adapters/bulk:
+    post:
+      tags: [Adapters]
+      summary: Bulk Delete Adapters
+      description: |
+        Deletes several adapter configurations in a single request.
+
+        Permissions are checked per distinct adapter type in the selection, so a mixed
+        batch requires every matching write permission (`sources:write`,
+        `destinations:write`, `notifications:write`).
+
+        An adapter still referenced by a job, a directory source or a notification template
+        is kept and reported in `data.failed` with the names holding it. The request itself
+        still answers `200`.
+      operationId: bulkDeleteAdapters
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, ids]
+              properties:
+                action:
+                  type: string
+                  enum: [delete]
+                ids:
+                  type: array
+                  items: { type: string }
+                  minItems: 1
+                  maxItems: 200
+      responses:
+        "200":
+          description: Deletion applied, with per-adapter outcomes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkResponse"
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: None of the given ids exist
           content:
             application/json:
               schema:
@@ -1088,6 +1252,58 @@ paths:
                       $ref: "#/components/schemas/ColumnInfo"
 
   # ─── Storage Explorer ──────────────────────────────────────────
+  /storage/{id}/files/bulk:
+    post:
+      tags: [Storage]
+      summary: Bulk Backup Action
+      description: |
+        Deletes, locks or unlocks several backups on a destination in a single request.
+
+        A locked backup is never deleted - it is reported in `data.failed` instead. An
+        incremental chain can be deleted as a whole, and members are removed newest-first
+        so no snapshot is left depending on one that is gone. Selecting only part of a
+        chain is still refused per file.
+
+        **Required permission:** `storage:delete`
+      operationId: bulkBackupAction
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, paths]
+              properties:
+                action:
+                  type: string
+                  enum: [delete, lock, unlock]
+                paths:
+                  type: array
+                  items: { type: string }
+                  minItems: 1
+                  maxItems: 200
+      responses:
+        "200":
+          description: Action applied, with per-backup outcomes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkResponse"
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /storage/{id}/files:
     get:
       tags: [Storage Explorer]
@@ -1576,6 +1792,54 @@ paths:
                 $ref: "#/components/schemas/CredentialProfile"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /credentials/bulk:
+    post:
+      tags: [Credentials]
+      summary: Bulk Delete Credential Profiles
+      description: |
+        Deletes several credential profiles in a single request.
+
+        A profile still attached to an adapter is kept and reported in `data.failed` with
+        its reference count.
+
+        **Required permission:** `credentials:delete`
+      operationId: bulkDeleteCredentialProfiles
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, ids]
+              properties:
+                action:
+                  type: string
+                  enum: [delete]
+                ids:
+                  type: array
+                  items: { type: string }
+                  minItems: 1
+                  maxItems: 200
+      responses:
+        "200":
+          description: Deletion applied, with per-profile outcomes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkResponse"
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -2167,6 +2431,44 @@ components:
           type: boolean
           example: true
 
+    BulkResponse:
+      type: object
+      description: |
+        Outcome of an action applied to several records.
+
+        `success` describes the request, not the records. It is `true` whenever the request
+        was handled, including when every record failed - the per-record verdicts live in
+        `data`. Only authentication, permission, validation and unexpected server errors
+        produce `success: false` with a 4xx or 5xx status.
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          description: One-line summary, for example "8 of 10 jobs deleted".
+          example: 8 of 10 jobs deleted
+        data:
+          type: object
+          properties:
+            succeeded:
+              type: array
+              description: Ids (or paths, for storage) that were processed.
+              items: { type: string }
+            failed:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                    description: Human-readable label, when one is known.
+                  error:
+                    type: string
+                    description: Why this record was not processed.
+
     Pagination:
       type: object
       properties:
@@ -2558,6 +2860,15 @@ components:
         updatedAt:
           type: string
           format: date-time
+        storageRole:
+          type: string
+          enum: [DESTINATION, SOURCE]
+          default: DESTINATION
+          description: >-
+            Storage adapters only. A config either receives backups (DESTINATION) or
+            provides folders to back up (SOURCE) - never both, because a destination writes
+            job and chain folders into its configured path while a source reads folders out
+            of it. Ignored for database and notification adapters.
 
     CreateAdapterRequest:
       type: object
@@ -2582,6 +2893,11 @@ components:
         config:
           type: object
           description: Adapter-specific configuration. See adapter documentation for fields.
+        storageRole:
+          type: string
+          enum: [DESTINATION, SOURCE]
+          default: DESTINATION
+          description: Storage adapters only - see AdapterConfig.storageRole. Ignored for other types.
 
     UpdateAdapterRequest:
       type: object
@@ -2591,6 +2907,12 @@ components:
         config:
           type: object
           description: Updated configuration (merged with existing)
+        storageRole:
+          type: string
+          enum: [DESTINATION, SOURCE]
+          description: >-
+            Storage adapters only. Rejected with 400 while a job still uses the adapter in
+            its current role, since the change would remove it from that job's picker.
 
     # ─── Storage ─────────────────────────────────────────────────
     FileInfo:
@@ -2613,15 +2935,25 @@ components:
 
     RestoreRequest:
       type: object
-      required: [file, targetSourceId]
+      required: [file]
       properties:
         file:
           type: string
           description: Backup file path
           example: "backups/mydb_2025-01-15.sql.gz.enc"
+        scope:
+          type: string
+          enum: [all, databases, files]
+          default: all
+          description: >-
+            Which half of a combined (database + directory) archive to restore. Omitting
+            `databaseMapping` or `directoryMapping` means "restore all of them", so a
+            restore that should leave one half untouched has to say so here.
         targetSourceId:
           type: string
-          description: Target database adapter ID
+          description: >-
+            Target database adapter ID. Required whenever the restore includes at least one
+            database - so not for a directory-only backup, nor at `scope: files`.
         targetDatabaseName:
           type: string
           description: Override target DB name (single-DB backups)
