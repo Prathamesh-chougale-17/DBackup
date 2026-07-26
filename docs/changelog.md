@@ -54,6 +54,7 @@ All notable changes to DBackup are documented here.
 - **navigation**: Sources, Destinations and Notifications are now one page, **Connections**, with a tab per kind: Databases, Directory Sources, Backup Destinations and Notifications. Adapters are grouped by what they are rather than by the direction a job happens to use them in - which is what made a database "a source" even when restoring into it. The old routes redirect to the matching tab, and the active tab lives in the URL so links and bookmarks keep working.
 - **destinations**: A storage adapter now has one exclusive role, backup destination or directory source, instead of two independent toggles. They cannot be combined because a destination owns its configured path - the runner writes job and chain folders into it - while a source only reads folders out of it, so one adapter doing both would let a job back up its own archives. Existing adapters are migrated automatically.
 - **retention**: The retention log now names backups that survive only because their incremental chain is still in use, so a destination holding more than its policy allows is explainable instead of looking broken.
+- **charts**: Upgraded Recharts from 2 to 3. Every chart renders the same data as before, with one visible difference: Recharts 3 no longer guarantees that legend entries follow the order of the data, so the Job Status legend may list its statuses differently.
 
 ### 🗑️ Removed
 
@@ -84,6 +85,7 @@ All notable changes to DBackup are documented here.
 - **lint-guards**: New guards that fail the build when code enumerates storage adapters without filtering by role, or links to the retired Sources/Destinations/Notifications routes.
 - **lint-guards**: New design system guards covering raw overflow containers, locale date formatting, ScrollArea max-height placement and palette colors without a dark mode variant. The last two carry a baseline count that may only go down, so the existing backlog is tolerated but nothing new is added.
 - **lint-guards**: The no-console guard no longer exempts Client Components. The exemption assumed the logger needed Node APIs, which it never did, and it was hiding 21 console calls.
+- **charts**: New render tests for the chart wrapper and all four chart types, asserting that the series, axes, grid, pie sectors and the legend's mapping back through the chart config actually reach the DOM. The chart components had no coverage at all, which made the Recharts 3 upgrade a change nothing could verify.
 
 ### 🔧 CI/CD
 

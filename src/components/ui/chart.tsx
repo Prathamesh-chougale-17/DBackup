@@ -118,8 +118,11 @@ function ChartTooltipContent({
   color,
   nameKey,
   labelKey,
-}: React.ComponentProps<typeof RechartsPrimitive.Tooltip> &
-  React.ComponentProps<"div"> & {
+}: React.ComponentProps<"div"> &
+  // Recharts 3 splits the props the Tooltip accepts from the ones it injects into
+  // custom content. `payload`, `label` and `active` only exist on TooltipContentProps,
+  // and they arrive by cloning, so every field is optional at the call site.
+  Partial<RechartsPrimitive.TooltipContentProps> & {
     hideLabel?: boolean
     hideIndicator?: boolean
     indicator?: "line" | "dot" | "dashed"
@@ -188,7 +191,8 @@ function ChartTooltipContent({
 
             return (
               <div
-                key={item.dataKey}
+                // Recharts 3 allows dataKey to be an accessor function, which is not a valid key.
+                key={String(item.dataKey)}
                 className={cn(
                   "[&>svg]:text-muted-foreground flex w-full flex-wrap items-stretch gap-2 [&>svg]:h-2.5 [&>svg]:w-2.5",
                   indicator === "dot" && "items-center"
@@ -259,7 +263,10 @@ function ChartLegendContent({
   verticalAlign = "bottom",
   nameKey,
 }: React.ComponentProps<"div"> &
-  Pick<RechartsPrimitive.LegendProps, "payload" | "verticalAlign"> & {
+  Pick<RechartsPrimitive.LegendProps, "verticalAlign"> & {
+    // Recharts 3 no longer exposes `payload` on LegendProps - it is injected into the
+    // content component instead, typed as LegendPayload entries.
+    payload?: RechartsPrimitive.LegendPayload[]
     hideIcon?: boolean
     nameKey?: string
   }) {
