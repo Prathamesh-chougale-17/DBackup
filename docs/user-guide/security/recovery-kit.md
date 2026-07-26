@@ -12,30 +12,23 @@ Each Recovery Kit contains:
 
 ```
 recovery-kit/
-├── README.txt                    # Instructions
-├── master.key                    # Your encryption key (64 hex characters)
-├── restore_archive.js            # Lists and extracts file backups
-├── decrypt_backup.js             # Decrypts database-only backups
-├── decrypt_drag_drop_windows.bat # Windows helper
-└── decrypt_linux_mac.sh          # Linux/macOS helper
+├── README.txt              # Instructions
+├── master.key              # Your encryption key (64 hex characters)
+├── dbackup-recover.js      # The recovery tool
+├── START-Windows.bat       # Double-click launcher
+├── START-macOS.command     # Double-click launcher
+└── START-Linux.sh          # Launcher
 ```
 
-### Which script do I need?
+One tool handles every backup format DBackup writes - database dumps, file backups and
+incremental chains, encrypted or not. It works out which one it is looking at, so you do
+not have to.
 
-| Your backup | Script |
-| :--- | :--- |
-| Job backs up **only databases** (a `.enc` file, or a plain dump) | `decrypt_backup.js` |
-| Job includes **directory sources** (a `.tar` file) | `restore_archive.js` |
-
-The two formats differ because file backups encrypt each file individually, which is what
-makes it possible to pull a single file out of a large backup. The format is fully
-documented in the [Archive Format reference](/developer-guide/reference/archive-format).
-
-`restore_archive.js` streams every entry it extracts, so a backup containing a 50 GB VM
-image needs no more memory than one containing text files - which matters precisely when
-you are recovering onto whatever machine happens to be available. Files are written to a
-temporary name and only put in place once their authentication tag and recorded checksum
-both verify, so a damaged archive never leaves something that looks like a recovered file.
+It streams every entry it extracts, so a backup containing a 50 GB VM image needs no more
+memory than one containing text files - which matters precisely when you are recovering
+onto whatever machine happens to be available. Files are written to a temporary name and
+only put in place once their authentication tag and recorded checksum both verify, so a
+damaged archive never leaves something that looks like a recovered file.
 
 ## Why You Need It
 
@@ -77,111 +70,101 @@ The Recovery Kit contains your encryption key! Store it:
 
 ## Using the Recovery Kit
 
-### Prerequisites
+The only prerequisite is [Node.js 18 or newer](https://nodejs.org/). No `npm install`, no
+DBackup server, no database.
 
-- Node.js 18+ installed
-- Backup file (`.enc`)
-- Corresponding `.meta.json` file
+1. Unzip the Recovery Kit.
+2. Copy the backup next to the unzipped files. If the backup is a **folder** - which is how
+   an incremental chain is stored - copy the whole folder.
+3. Start the tool:
 
-### Steps
+   | System | How |
+   | :--- | :--- |
+   | Windows | Double-click `START-Windows.bat` |
+   | macOS | Double-click `START-macOS.command` |
+   | Linux | `./START-Linux.sh`, or `node dbackup-recover.js` |
 
-1. Extract the Recovery Kit:
-```bash
-unzip recovery-kit-profile-name.zip
-cd recovery-kit
+4. It shows what it found and asks what to do with it:
+
+```
+  DBackup Recovery
+  Key loaded from master.key
+
+  Found 2 backup(s):
+
+ > chain-2026-07-25T20-10-37-652   25.07.2026 20:11  1.0 GB  encrypted  incremental chain, 2 archive(s)
+   MyDb_2026-07-20.sql.gz.enc      20.07.2026 03:00  348 MB  encrypted
+   Quit
 ```
 
-2. Install dependencies (if needed):
-```bash
-npm install
-```
+Choosing a backup offers restoring everything, looking inside first, picking an older state
+of a chain, or pulling out only certain files.
 
-3. Run the decryption:
-```bash
-node decrypt.js /path/to/backup.sql.gz.enc
-```
+You never have to type the key: the tool reads `master.key` from its own folder. If the key
+is somewhere else, it asks for it.
 
-4. Output file:
-```
-/path/to/backup.sql.gz  # Decrypted, still compressed
-```
+::: tip macOS may refuse to open the launcher
+`START-macOS.command` is downloaded from the internet, so Gatekeeper blocks the first
+double-click. Right-click it and choose **Open**, or run `node dbackup-recover.js` in
+Terminal instead.
+:::
 
-5. Decompress if needed:
-```bash
-# For Gzip
-gunzip backup.sql.gz
+## Command line
 
-# For Brotli
-brotli -d backup.sql.br
-```
-
-### Script Usage
-
-```bash
-node decrypt.js <encrypted-file> [output-file]
-
-# Examples:
-node decrypt.js backup.sql.gz.enc
-node decrypt.js backup.sql.gz.enc decrypted.sql.gz
-```
-
-## Restoring File Backups
-
-Backups that include directory sources use the seekable archive format. Use
-`restore_archive.js`, which can list contents and extract selected paths.
-
-### See what is inside
+The same tool, for scripting or over SSH. Every mode accepts a folder wherever it accepts
+an archive.
 
 ```bash
-node restore_archive.js --list backup.tar <paste-master.key-here>
+node dbackup-recover.js --list    <archive or folder>
+node dbackup-recover.js --extract <archive or folder> <output_dir> [pattern...]
+node dbackup-recover.js --decrypt <backup.enc> [output_file]
 ```
 
-This prints the databases, the directory sources, and every file with its size and
-modification time.
+`--list` prints the databases, the directory sources, and every file with its size and
+modification time. For an incremental snapshot it also names every archive the snapshot
+needs and marks any that are missing, so a gap is visible before you start extracting.
 
-### Extract everything
+`--extract` patterns accept `*` and `**`, and naming a folder selects everything inside it:
 
 ```bash
-node restore_archive.js --extract backup.tar ./restored <paste-master.key-here>
+node dbackup-recover.js --extract backup.tar ./restored 'www/**'
+node dbackup-recover.js --extract backup.tar ./restored docs
 ```
 
-### Extract only part of it
+Every extracted file is verified against the checksum recorded when the backup was made. A
+mismatch is reported and the command exits non-zero.
 
-Patterns accept `*` and `**`, and naming a folder selects everything inside it:
+`--decrypt` handles a database backup encrypted as a single file, and decompresses it in the
+same pass - the output is the usable dump, not a `.gz`.
+
+The key is read from `master.key` next to the tool. Pass it as an extra argument to override,
+or leave it out entirely for unencrypted backups.
+
+## Incremental chains
+
+An incremental backup is stored as a chain in one folder: one full backup plus the changes
+made after it.
+
+```
+MyJob/chain-2026-07-24T03-00-00-000/
+    ..._full-000.tar     the full backup the chain is built on
+    ..._inc-001.tar      what changed after it
+    ..._inc-002.tar      what changed after that
+```
+
+**Copy the whole folder and point the tool at it.** It picks the newest snapshot on its own
+and rebuilds the current state from all of them, every file at its latest version, merged
+into a single output folder. There is no separate step to replay the chain.
 
 ```bash
-node restore_archive.js --extract backup.tar ./restored <key> 'www/**'
-node restore_archive.js --extract backup.tar ./restored <key> docs
+node dbackup-recover.js --extract ./chain-2026-07-24T03-00-00-000 ./restored
 ```
 
-Every extracted file is verified against the checksum recorded when the backup was made.
-A mismatch is reported and the command exits non-zero.
+To recover an older state, choose "Pick an older state" in the wizard, or name that archive
+directly - each one rebuilds the snapshot as it was at its own point in time.
 
-### Incremental chains
-
-Incremental backups are stored as a chain in one folder: one full backup plus the changes
-made after it. Point the tool at the **newest** archive to get the complete, current state -
-every file at its latest version, merged into a single output folder. There is no separate
-step to replay the chain.
-
-```bash
-node restore_archive.js --extract ./chain-2026-07-15/inc-2026-07-17.tar ./restored <key>
-```
-
-Each archive describes the whole snapshot and reads every file from whichever archive of the
-chain actually stores its bytes. To recover an older state, point at that archive instead -
-each one rebuilds the snapshot as it was at its own point in time.
-
-Keep the archives of a chain together in one folder; that is how they find each other, so
-copying "a backup" means copying the whole folder.
-
-```bash
-node restore_archive.js --list ./chain-2026-07-15/inc-2026-07-17.tar <key>
-```
-
-The listing names every archive the snapshot needs and marks any that are missing, so a gap
-is visible before you start extracting rather than halfway through. A missing archive aborts
-the extract by name instead of writing an incomplete restore.
+Keep the archives of a chain together in one folder; that is how they find each other. A
+missing archive aborts the extract by name instead of writing an incomplete restore.
 
 ::: tip Unencrypted archives need no kit at all
 If the job had no encryption profile, the archive is a plain TAR:
@@ -273,7 +256,7 @@ When creating new encryption profile:
 
 **Cause**: Key is not 64 hex characters
 
-**Solution**: Verify key.txt contains exactly 64 characters
+**Solution**: Verify `master.key` contains exactly 64 characters and nothing else
 
 ### "Unable to authenticate data"
 
@@ -309,7 +292,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import json
 
 # Read key
-key = bytes.fromhex(open('key.txt').read().strip())
+key = bytes.fromhex(open('master.key').read().strip())
 
 # Read metadata
 meta = json.load(open('backup.sql.gz.enc.meta.json'))
@@ -332,7 +315,7 @@ open('backup.sql.gz', 'wb').write(decrypted)
 ```bash
 # Note: OpenSSL GCM support varies
 openssl enc -d -aes-256-gcm \
-  -K $(cat key.txt) \
+  -K $(cat master.key) \
   -iv $(cat meta.json | jq -r '.encryption.iv') \
   -in backup.sql.gz.enc \
   -out backup.sql.gz
@@ -345,10 +328,10 @@ When you need to use Recovery Kit:
 - [ ] Locate Recovery Kit
 - [ ] Download backup files (.enc + .meta.json)
 - [ ] Install Node.js if needed
-- [ ] Extract Recovery Kit
-- [ ] Run decrypt script
-- [ ] Decompress if needed
-- [ ] Verify SQL file is valid
+- [ ] Unzip the Recovery Kit
+- [ ] Copy the backup (or its whole folder) next to it
+- [ ] Start the launcher for your system and follow the prompts
+- [ ] Verify the restored files
 - [ ] Restore to database
 
 ## Next Steps

@@ -3,7 +3,7 @@
 Byte-level specification of the seekable archive format (manifest version 2) that DBackup
 writes for jobs with directory sources.
 
-This document is the contract. The Recovery Kit's `restore_archive.js` is an independent
+This document is the contract. The Recovery Kit's `dbackup-recover.js` is an independent
 implementation of it, and your backups remain recoverable as long as this document and a
 Node.js runtime exist - DBackup itself is not required.
 
@@ -11,7 +11,7 @@ Node.js runtime exist - DBackup itself is not required.
 Jobs with **directory sources** produce a v2 archive. Jobs that back up **only databases**
 keep producing the older format: a single dump file, or a plain multi-database TAR
 (manifest version 1), compressed and encrypted as a whole. Those are decrypted with
-`decrypt_backup.js` instead.
+`dbackup-recover.js --decrypt` instead.
 :::
 
 ## Design goals
@@ -297,15 +297,15 @@ header on a potentially enormous archive.
 **Encrypted archives** need the Recovery Kit (Settings → Vault → Download Recovery Kit):
 
 ```bash
-node restore_archive.js --list    backup.tar <hex_key>
-node restore_archive.js --extract backup.tar ./out <hex_key> 'www/**'
+node dbackup-recover.js --list    backup.tar
+node dbackup-recover.js --extract backup.tar ./out 'www/**'
 ```
 
 For an incremental chain, point the tool at the snapshot you want and keep the other
 archives in the same folder - it resolves them itself and lists what it is missing:
 
 ```bash
-node restore_archive.js --list ./chain-2026-07-15/inc-002-2026-07-17.tar <hex_key>
+node dbackup-recover.js --list ./chain-2026-07-15
 ```
 
 **Unencrypted archives** need no tooling:

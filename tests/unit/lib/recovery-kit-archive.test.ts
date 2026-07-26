@@ -3,6 +3,7 @@ import fs from "fs/promises";
 import path from "path";
 import os from "os";
 import crypto from "crypto";
+import zlib from "zlib";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { createArchive } from "@/lib/archive/writer";
@@ -11,7 +12,7 @@ import type { ArchiveSourceEntry } from "@/lib/archive/types";
 
 const execFileAsync = promisify(execFile);
 
-const SCRIPT = path.resolve(process.cwd(), "scripts/restore_archive.js");
+const SCRIPT = path.resolve(process.cwd(), "scripts/dbackup-recover.js");
 const MASTER_KEY = Buffer.alloc(32, 0x6b);
 const KEY_HEX = MASTER_KEY.toString("hex");
 
@@ -74,10 +75,10 @@ async function buildArchive(encrypted: boolean, compression: "NONE" | "GZIP" | "
  * Runs the recovery script the way a user in a disaster would: a bare Node process, in an
  * unrelated working directory, with no DBackup environment variables at all.
  */
-async function runScript(args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+async function runScript(args: string[], cwd = os.tmpdir()): Promise<{ stdout: string; stderr: string; code: number }> {
     try {
         const { stdout, stderr } = await execFileAsync("node", [SCRIPT, ...args], {
-            cwd: os.tmpdir(),
+            cwd,
             // Deliberately minimal: proves the script needs no DBackup environment at all.
             env: { PATH: process.env.PATH ?? "" } as unknown as NodeJS.ProcessEnv,
             maxBuffer: 32 * 1024 * 1024,
@@ -89,7 +90,7 @@ async function runScript(args: string[]): Promise<{ stdout: string; stderr: stri
     }
 }
 
-describe("recovery kit: restore_archive.js", () => {
+describe("recovery kit: dbackup-recover.js", () => {
     it("lists an encrypted archive's contents with only the master key", async () => {
         const archivePath = await buildArchive(true);
         const { stdout, code } = await runScript(["--list", archivePath, KEY_HEX]);
@@ -231,7 +232,7 @@ describe("recovery kit: restore_archive.js", () => {
         await expect(fs.access(path.join(outDir, "src-1", "www/assets/large.bin"))).rejects.toThrow();
     });
 
-    it("rejects a v1 archive with a pointer to the older tool", async () => {
+    it("points a v1 archive at the mode that handles it", async () => {
         const fake = path.join(workDir, "v1.tar");
         const { createMultiDbTar } = await import("@/lib/adapters/database/common/tar-utils");
         const dump = path.join(workDir, "d.sql");
@@ -240,7 +241,73 @@ describe("recovery kit: restore_archive.js", () => {
 
         const { stderr, code } = await runScript(["--list", fake]);
         expect(code).toBe(1);
-        expect(stderr).toMatch(/decrypt_backup\.js/);
+        expect(stderr).toMatch(/--decrypt/);
+    });
+});
+
+describe("recovery kit: whole-file backups", () => {
+    /** A database backup as the older pipeline writes it: one encrypted, compressed stream. */
+    async function buildWholeFile({ encrypted = true } = {}) {
+        const plain = Buffer.from("CREATE TABLE users (id INT);\n".repeat(50));
+        const compressed = zlib.gzipSync(plain);
+        const target = path.join(workDir, "MyDb_2026-07-20.sql.gz" + (encrypted ? ".enc" : ""));
+
+        let encryption: Record<string, unknown> | undefined;
+        if (encrypted) {
+            const iv = crypto.randomBytes(16);
+            const cipher = crypto.createCipheriv("aes-256-gcm", MASTER_KEY, iv);
+            await fs.writeFile(target, Buffer.concat([cipher.update(compressed), cipher.final()]));
+            encryption = {
+                enabled: true, profileId: "p1", algorithm: "aes-256-gcm",
+                iv: iv.toString("hex"), authTag: cipher.getAuthTag().toString("hex"),
+            };
+        } else {
+            await fs.writeFile(target, compressed);
+        }
+
+        await fs.writeFile(`${target}.meta.json`, JSON.stringify({
+            timestamp: "2026-07-20T03:00:00.000Z", compression: "GZIP", ...(encryption ? { encryption } : {}),
+        }));
+        return { target, plain };
+    }
+
+    it("decrypts and decompresses in one pass, leaving a usable dump", async () => {
+        // The old tool left a .gz behind and told the user to gunzip it themselves.
+        const { target, plain } = await buildWholeFile();
+
+        const { code } = await runScript(["--decrypt", target, KEY_HEX]);
+
+        expect(code).toBe(0);
+        expect(await fs.readFile(path.join(workDir, "MyDb_2026-07-20.sql"))).toEqual(plain);
+    });
+
+    it("says what is missing when the metadata sidecar was left behind", async () => {
+        const { target } = await buildWholeFile();
+        await fs.rm(`${target}.meta.json`);
+
+        const { stderr, code } = await runScript(["--decrypt", target, KEY_HEX]);
+
+        expect(code).toBe(1);
+        expect(stderr).toMatch(/meta\.json/);
+    });
+
+    it("writes nothing at all when the key is wrong", async () => {
+        const { target } = await buildWholeFile();
+
+        const { code } = await runScript(["--decrypt", target, Buffer.alloc(32, 0x02).toString("hex")]);
+
+        expect(code).toBe(1);
+        // A half-written file would look like a restore: GCM only authenticates at the end.
+        await expect(fs.access(path.join(workDir, "MyDb_2026-07-20.sql"))).rejects.toThrow();
+    });
+
+    it("handles an unencrypted backup with no key", async () => {
+        const { target, plain } = await buildWholeFile({ encrypted: false });
+
+        const { code } = await runScript(["--decrypt", target]);
+
+        expect(code).toBe(0);
+        expect(await fs.readFile(path.join(workDir, "MyDb_2026-07-20.sql"))).toEqual(plain);
     });
 });
 
@@ -340,6 +407,59 @@ describe("recovery kit: incremental chains", () => {
         expect(code).toBe(0);
         expect(await fs.readFile(path.join(outDir, SRC, "kept.txt"))).toEqual(contents.kept);
         expect(await fs.readFile(path.join(outDir, SRC, "changed.bin"))).toEqual(contents.changed);
+    });
+
+    it("takes the chain folder, not just the one archive inside it", async () => {
+        // What a user actually does: copy the whole chain-... folder next to the kit and
+        // point at it. That used to fail with "no manifest.json found", which was true of
+        // the folder and no help at all.
+        const { chainDir, contents } = await buildChain();
+        const outDir = path.join(workDir, "out");
+
+        const { code, stdout } = await runScript(["--extract", chainDir, outDir, KEY_HEX]);
+
+        expect(code).toBe(0);
+        // Newest snapshot picked on its own, and it says which one it took.
+        expect(stdout).toContain("inc-2.tar");
+        expect(await fs.readFile(path.join(outDir, SRC, "kept.txt"))).toEqual(contents.kept);
+        expect(await fs.readFile(path.join(outDir, SRC, "changed.bin"))).toEqual(contents.changed);
+    });
+
+    it("takes the chain folder for an unencrypted chain too", async () => {
+        const { chainDir, contents } = await buildChain({ encrypted: false });
+        const outDir = path.join(workDir, "out");
+
+        const { code } = await runScript(["--extract", chainDir, outDir]);
+
+        expect(code).toBe(0);
+        expect(await fs.readFile(path.join(outDir, SRC, "kept.txt"))).toEqual(contents.kept);
+    });
+
+    it("names the backups instead of guessing when a folder holds several", async () => {
+        const { chainDir } = await buildChain();
+        const loose = await buildArchive(true);
+        await fs.rename(loose, path.join(path.dirname(chainDir), "standalone.tar"));
+
+        const { code, stderr } = await runScript(["--list", path.dirname(chainDir), KEY_HEX]);
+
+        expect(code).toBe(1);
+        expect(stderr).toContain("standalone.tar");
+        expect(stderr).toContain("chain-2026-07-15");
+    });
+
+    it("reads the key from master.key instead of being handed it", async () => {
+        // The kit has always shipped master.key and then told people to paste it on the
+        // command line, which put it in shell history and in the process list.
+        const { chainDir, contents } = await buildChain();
+        const kitDir = path.join(workDir, "kit");
+        await fs.mkdir(kitDir, { recursive: true });
+        await fs.writeFile(path.join(kitDir, "master.key"), KEY_HEX);
+        const outDir = path.join(workDir, "out");
+
+        const { code } = await runScript(["--extract", chainDir, outDir], kitDir);
+
+        expect(code).toBe(0);
+        expect(await fs.readFile(path.join(outDir, SRC, "kept.txt"))).toEqual(contents.kept);
     });
 
     it("needs only the archives the snapshot actually references, not the whole chain", async () => {

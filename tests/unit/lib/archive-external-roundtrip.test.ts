@@ -158,7 +158,7 @@ describe.skipIf(!hasTar)("archive round-trip through external tools", () => {
 
     it("the recovery kit lists and extracts the unencrypted archive", async () => {
         const { archivePath, outDir } = await buildArchive({ compression: "GZIP" });
-        const kit = path.resolve(process.cwd(), "scripts/restore_archive.js");
+        const kit = path.resolve(process.cwd(), "scripts/dbackup-recover.js");
 
         const listed = await execFileAsync("node", [kit, "--list", archivePath], { maxBuffer: 32 * 1024 * 1024 });
         for (const rel of Object.keys(AWKWARD)) {

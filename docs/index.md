@@ -200,7 +200,7 @@ DBackup is designed as a convenience layer, not a dependency.
 2. **Decompress** automatically (GZIP or Brotli is handled by the same script)
 3. **Import** the resulting dump directly with your database's native CLI tool
 
-**File backups** are a **plain TAR archive**. Unencrypted, `tar -xf backup.tar` is the whole recovery procedure. Encrypted, the layout is specified byte by byte in the [Archive Format reference](/developer-guide/reference/archive-format), and the Recovery Kit's `restore_archive.js` is an independent implementation of that document - it lists and extracts single files with nothing but Node.js.
+**File backups** are a **plain TAR archive**. Unencrypted, `tar -xf backup.tar` is the whole recovery procedure. Encrypted, the layout is specified byte by byte in the [Archive Format reference](/developer-guide/reference/archive-format), and the Recovery Kit's `dbackup-recover.js` is an independent implementation of that document - it lists and extracts single files with nothing but Node.js.
 
 The **[Recovery Kit](/user-guide/security/recovery-kit)** (downloadable from Vault) bundles everything you need: your encryption key, both scripts, and platform-specific helpers for Windows, Linux, and macOS.
 
