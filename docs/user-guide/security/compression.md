@@ -110,22 +110,13 @@ counts as `gz`.
 | Encrypted | `age` `enc` `gpg` `pgp` |
 | Disk images | `dmg` |
 
-Some formats that look like they belong here are deliberately left out, because they
-compress well often enough to be worth the attempt:
+Everything else is compressed normally. Some formats look like they belong on this list and
+are left off on purpose, because they compress well often enough to be worth the attempt -
+PDFs, executables and ISO images among them.
 
-| Not on the list | Why |
-| :--- | :--- |
-| `pdf` | Streams inside a PDF may or may not be compressed, and an uncompressed one shrinks a lot. |
-| `tif` `tiff` `bmp` | Frequently uncompressed or LZW, both of which still gain. |
-| `ttf` `otf` | Uncompressed font tables. `woff` is the compressed variant and is listed above. |
-| `sqlite` `db` | Page-oriented and full of repetition, one of the best cases there is. |
-| `svg` | XML text. |
-| `asc` | Base64-armored ciphertext. The encoding overhead still gives back roughly a quarter, unlike the raw `.gpg`. |
-| `vmdk` `qcow2` | Either sparse-but-raw or already compressed, with no way to tell from the name. |
-
-If a format is missing from the first table and you are backing up a lot of it, that is
-worth [reporting](https://github.com/Skyfay/DBackup/issues) - the list ships in the code and
-grows with releases, without anything to reconfigure.
+If a format is missing and you are backing up a lot of it, that is worth
+[reporting](https://github.com/Skyfay/DBackup/issues) - the list ships in the code and grows
+with releases, without anything to reconfigure.
 
 ### Behaviour
 

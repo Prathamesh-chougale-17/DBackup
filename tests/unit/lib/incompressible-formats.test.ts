@@ -59,6 +59,15 @@ describe("formats deliberately left off the list still compress", () => {
         }
     });
 
+    it("keeps compressing executables and disk images", () => {
+        // A PE image is code, data and resources - measured 51-67% with gzip. An ISO holds
+        // no compression of its own and compresses like whatever is inside it, 81% for a
+        // data ISO. Both look like binaries that would not gain, and both do.
+        for (const path of ["bin/setup.exe", "bin/core.dll", "iso/data-archive.iso", "bin/installer.msi"]) {
+            expect(isIncompressible(path), path).toBe(false);
+        }
+    });
+
     it("keeps compressing formats that compress extremely well", () => {
         // Uncompressed font tables, a page-oriented database file, and XML.
         for (const path of ["fonts/inter.ttf", "fonts/inter.otf", "data/app.sqlite", "data/app.db", "icons/logo.svg"]) {

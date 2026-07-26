@@ -38,8 +38,10 @@ export function BulkResultDialog({ open, onOpenChange, title, failures }: BulkRe
                     </DialogDescription>
                 </DialogHeader>
 
-                <ScrollArea className="*:data-[slot=scroll-area-viewport]:max-h-[calc(80vh-10rem)]">
-                    <ul className="space-y-3 pr-3">
+                {/* DialogContent is a flex column, whose items default to
+                    min-width:auto - min-w-0 is what lets a long name wrap here. */}
+                <ScrollArea className="*:data-[slot=scroll-area-viewport]:max-h-[calc(80vh-10rem)] min-w-0">
+                    <ul className="min-w-0 space-y-3 pr-3">
                         {failures.map((failure) => (
                             <li key={failure.id} className="space-y-1 border-l-2 border-destructive/60 pl-3">
                                 <p className="text-sm font-medium break-all">

@@ -107,7 +107,7 @@ All notable changes to DBackup are documented here.
 - **wiki**: The documentation home page now covers file backups, incremental chains, per-adapter directory source support, and how the archive format keeps the no-lock-in promise.
 - **wiki**: Backup Modes explains why whole changed files are stored rather than deduplicated chunks, with the storage cost spelled out per situation.
 - **wiki**: Fixed the opening paragraph of the Backup Modes page, which had a sentence split across the intro note.
-- **wiki**: Compression now lists every format that is stored without compression, grouped by kind, alongside the formats deliberately left out and the reason for each. File & Folder Backups links to it.
+- **wiki**: Compression now lists every format that is stored without compression, grouped by kind. File & Folder Backups links to it.
 
 ### 🧪 Tests
 
