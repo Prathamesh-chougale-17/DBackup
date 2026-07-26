@@ -94,6 +94,8 @@ All notable changes to DBackup are documented here.
 - **types**: Updated `@types/node` from 20 to 24, matching the Node version the container and CI actually run. The local filesystem adapter dropped a `Dirent.path` fallback that no supported Node version reaches.
 - **tests**: Upgraded Vite from 7 to 8, where Rolldown replaces esbuild and Rollup, together with `@vitejs/plugin-react` 6 which requires it. Vite backs only the Vitest runner here, so the application build is untouched.
 - **tests**: Dropped the `vite-tsconfig-paths` plugin in favour of the `resolve.tsconfigPaths` option that Vite 8 provides natively.
+- **dependencies**: Picked up the pending patch and minor releases across the app and the website - Better Auth 1.6.25, React 19.2.8, the Radix UI primitives, `react-hook-form`, `@hookform/resolvers`, `lucide-react`, `dropbox`, `basic-ftp` and the AWS SDK. Better Auth was checked field by field against `schema.prisma` first, since the 1.6.23 update was the one that added two-factor columns the schema never got.
+- **scripts**: `pnpm update:check` no longer ends in `Command failed with exit code 1`, and no longer warns about the `pnpm.overrides` in `docs/` and `website/`. It now checks the three projects the way they are actually installed instead of treating them as one workspace.
 
 ### 🐳 Docker
 
