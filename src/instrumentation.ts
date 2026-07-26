@@ -19,8 +19,10 @@ export async function register() {
         await scheduler.init();
 
         // 5. Validate credential profile assignments (flags adapters OFFLINE if missing)
-        const { validateAdapterCredentials } = await import('@/lib/server/startup-checks');
+        //    and the OIDC auto-redirect target (logs an error if it resolves to nothing)
+        const { validateAdapterCredentials, validateOidcAutoRedirect } = await import('@/lib/server/startup-checks');
         await validateAdapterCredentials();
+        await validateOidcAutoRedirect();
 
         // 6. Register graceful shutdown handlers
         const { registerShutdownHandlers } = await import('@/lib/server/shutdown');

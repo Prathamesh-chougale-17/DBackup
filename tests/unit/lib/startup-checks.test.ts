@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { validateAdapterCredentials } from '@/lib/server/startup-checks';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { validateAdapterCredentials, validateOidcAutoRedirect } from '@/lib/server/startup-checks';
 import prisma from '@/lib/prisma';
 import { registry } from '@/lib/core/registry';
 import { registerAdapters } from '@/lib/adapters';
@@ -20,6 +20,9 @@ vi.mock('@/lib/prisma', () => ({
         adapterConfig: {
             findMany: vi.fn(),
             update: vi.fn(),
+        },
+        ssoProvider: {
+            findUnique: vi.fn(),
         },
     },
 }));
@@ -128,5 +131,61 @@ describe('validateAdapterCredentials', () => {
     it('swallows errors so they never block application startup', async () => {
         (prisma.adapterConfig.findMany as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('DB connection lost'));
         await expect(validateAdapterCredentials()).resolves.toBeUndefined();
+    });
+});
+
+describe('validateOidcAutoRedirect', () => {
+    const savedEnv = process.env.OIDC_AUTO_REDIRECT;
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        delete process.env.OIDC_AUTO_REDIRECT;
+    });
+
+    afterEach(() => {
+        if (savedEnv === undefined) delete process.env.OIDC_AUTO_REDIRECT;
+        else process.env.OIDC_AUTO_REDIRECT = savedEnv;
+    });
+
+    it('does not touch the database when the variable is unset', async () => {
+        await expect(validateOidcAutoRedirect()).resolves.toBeUndefined();
+        expect(prisma.ssoProvider.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('looks up the configured provider by its providerId', async () => {
+        process.env.OIDC_AUTO_REDIRECT = 'authentik-742';
+        (prisma.ssoProvider.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+            providerId: 'authentik-742', name: 'Corporate Login', enabled: true,
+        });
+
+        await validateOidcAutoRedirect();
+
+        expect(prisma.ssoProvider.findUnique).toHaveBeenCalledWith({
+            where: { providerId: 'authentik-742' },
+            select: { providerId: true, name: true, enabled: true },
+        });
+    });
+
+    it('starts normally when the provider does not exist', async () => {
+        process.env.OIDC_AUTO_REDIRECT = 'gone';
+        (prisma.ssoProvider.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+
+        await expect(validateOidcAutoRedirect()).resolves.toBeUndefined();
+    });
+
+    it('starts normally when the provider exists but is disabled', async () => {
+        process.env.OIDC_AUTO_REDIRECT = 'authentik-742';
+        (prisma.ssoProvider.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+            providerId: 'authentik-742', name: 'Corporate Login', enabled: false,
+        });
+
+        await expect(validateOidcAutoRedirect()).resolves.toBeUndefined();
+    });
+
+    it('swallows errors so they never block application startup', async () => {
+        process.env.OIDC_AUTO_REDIRECT = 'authentik-742';
+        (prisma.ssoProvider.findUnique as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('DB connection lost'));
+
+        await expect(validateOidcAutoRedirect()).resolves.toBeUndefined();
     });
 });

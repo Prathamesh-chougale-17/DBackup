@@ -63,6 +63,20 @@ const envSchema = z.object({
     DATA_DIR: z
         .string()
         .default("/data"),
+
+    // Blocks browser-facing email/password sign-in and sign-up. Server-side
+    // auth.api calls (admin user creation, password reset) stay available.
+    DISABLE_EMAIL_LOGIN: z
+        .enum(["true", "false"])
+        .default("false"),
+
+    // providerId of the SSO provider the login page redirects to automatically.
+    // Only the format is checked here - whether the provider actually exists is
+    // verified against the database in startup-checks.ts.
+    OIDC_AUTO_REDIRECT: z
+        .string()
+        .regex(/^[a-z0-9-_]+$/, "OIDC_AUTO_REDIRECT must be an SSO provider ID (lowercase letters, numbers, dashes and underscores)")
+        .optional(),
 });
 
 export type ValidatedEnv = z.infer<typeof envSchema>;

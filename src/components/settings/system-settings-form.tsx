@@ -52,9 +52,11 @@ interface SystemSettingsFormProps {
     initialSystemTimezone?: string;
     initialFilenamePattern?: string;
     initialInstanceName?: string;
+    /** Reflects DISABLE_EMAIL_LOGIN. Read-only here - it is set in the environment. */
+    emailLoginDisabledByEnv?: boolean;
 }
 
-export function SystemSettingsForm({ initialMaxConcurrentJobs, initialDisablePasskeyLogin, initialSessionDuration = 604800, initialAuditLogRetentionDays = 90, initialStorageSnapshotRetentionDays = 90, initialNotificationLogRetentionDays = 90, initialCheckForUpdates = true, initialShowQuickSetup = false, initialSystemTimezone = "UTC", initialFilenamePattern = "{name}_yyyy-MM-dd_HH-mm-ss", initialInstanceName = "" }: SystemSettingsFormProps) {
+export function SystemSettingsForm({ initialMaxConcurrentJobs, initialDisablePasskeyLogin, initialSessionDuration = 604800, initialAuditLogRetentionDays = 90, initialStorageSnapshotRetentionDays = 90, initialNotificationLogRetentionDays = 90, initialCheckForUpdates = true, initialShowQuickSetup = false, initialSystemTimezone = "UTC", initialFilenamePattern = "{name}_yyyy-MM-dd_HH-mm-ss", initialInstanceName = "", emailLoginDisabledByEnv = false }: SystemSettingsFormProps) {
     const [openTimezone, setOpenTimezone] = useState(false);
     const timezones = Intl.supportedValuesOf('timeZone');
     const form = useForm<z.infer<typeof formSchema>>({
@@ -489,6 +491,17 @@ export function SystemSettingsForm({ initialMaxConcurrentJobs, initialDisablePas
                                 </FormItem>
                             )}
                         />
+
+                        {emailLoginDisabledByEnv && (
+                            <div className="rounded-lg border border-dashed p-4">
+                                <p className="text-base font-medium">Password sign-in is disabled</p>
+                                <p className="text-sm text-muted-foreground">
+                                    Set via <code className="text-xs">DISABLE_EMAIL_LOGIN=true</code>. Users
+                                    sign in with SSO or a passkey. Creating users and resetting passwords
+                                    from the Users page still works.
+                                </p>
+                            </div>
+                        )}
 
                         <FormField
                             control={form.control}

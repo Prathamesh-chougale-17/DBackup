@@ -39,6 +39,8 @@ All notable changes to DBackup are documented here.
 - **destinations**: New "Create as Directory Source" action (and its reverse) copies a storage adapter into the opposite role including its credentials, so one server can serve both purposes without being set up twice.
 - **jobs**: Creating and editing a backup job now opens a dedicated page instead of a modal, giving the folder tree room to work.
 - **vault**: A backup whose encryption profile was deleted can be reopened by pasting the key itself. The key is checked against that specific backup before anything is stored - for a file backup the check is exact, since its index carries an authentication tag - and is then saved as a new vault profile. That is what makes it work everywhere afterwards, including for restores that run unattended and have nobody to ask. Pasting a key that is already in the vault points at the existing profile instead of creating a second one. Requires permission to manage the vault.
+- **auth**: New `DISABLE_EMAIL_LOGIN` environment variable switches off password sign-in, leaving SSO and passkeys. The endpoints are rejected server-side rather than only hidden, and administrators keep creating users and resetting passwords from the Users page. Set it only after the first administrator and an SSO provider exist, since there is no bootstrap exception.
+- **SSO**: New `OIDC_AUTO_REDIRECT` environment variable takes a provider ID and sends visitors straight to that provider instead of showing the login page. It is skipped after a failed sign-in and right after signing out, and an ID matching no enabled provider logs an error at startup rather than stopping the application.
 
 ### 🐛 Bug Fixes
 

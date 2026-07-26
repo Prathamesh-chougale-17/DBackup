@@ -4,6 +4,7 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { getUserPermissions } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
+import { isEmailLoginDisabled } from "@/lib/auth/env-flags";
 import prisma from "@/lib/prisma";
 import { SystemSettingsForm } from "@/components/settings/system-settings-form";
 import { SystemTasksSettings } from "@/components/settings/system-tasks-settings";
@@ -37,6 +38,9 @@ export default async function SettingsPage() {
 
     const disablePasskeySetting = await prisma.systemSetting.findUnique({ where: { key: "auth.disablePasskeyLogin" } });
     const disablePasskeyLogin = disablePasskeySetting?.value === 'true';
+
+    // Deployment-level switch, not a stored setting - surfaced read-only in the form.
+    const emailLoginDisabledByEnv = isEmailLoginDisabled();
 
     const sessionDurationSetting = await prisma.systemSetting.findUnique({ where: { key: "auth.sessionDuration" } });
     const sessionDuration = sessionDurationSetting ? parseInt(sessionDurationSetting.value) : 604800;
@@ -136,6 +140,7 @@ export default async function SettingsPage() {
                     <SystemSettingsForm
                         initialMaxConcurrentJobs={maxConcurrentJobs}
                         initialDisablePasskeyLogin={disablePasskeyLogin}
+                        emailLoginDisabledByEnv={emailLoginDisabledByEnv}
                         initialSessionDuration={sessionDuration}
                         initialAuditLogRetentionDays={auditLogRetentionDays}
                         initialStorageSnapshotRetentionDays={storageSnapshotRetentionDays}

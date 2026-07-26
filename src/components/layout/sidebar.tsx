@@ -6,6 +6,7 @@ import { LayoutDashboard, Database, FolderOpen, CalendarClock, History, Settings
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { useSession, signOut } from "@/lib/auth/client"
+import { SKIP_SSO_AUTO_REDIRECT_KEY } from "@/components/auth/login-form"
 import Image from "next/image"
 import {
     DropdownMenu,
@@ -99,6 +100,10 @@ export function Sidebar({ permissions = [], isSuperAdmin = false, updateAvailabl
         await signOut({
             fetchOptions: {
                 onSuccess: () => {
+                    // Suppress the OIDC auto-redirect for exactly this one page load.
+                    // Without it the still-valid session at the identity provider signs
+                    // the user straight back in and logging out is impossible.
+                    sessionStorage.setItem(SKIP_SSO_AUTO_REDIRECT_KEY, "1")
                     router.push("/")
                 }
             }

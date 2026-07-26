@@ -95,6 +95,8 @@ Access the application at [https://localhost:3000](https://localhost:3000) (acce
 | `DISABLE_HTTPS` | ❌ | Set to `true` to use plain HTTP. Default: `false` (HTTPS). **Set this when running behind a reverse proxy** - see [Reverse Proxy Setup](#reverse-proxy-setup) |
 | `PUID` | ❌ | User ID the container runs as. Default: `1001` |
 | `PGID` | ❌ | Group ID the container runs as. Default: `1001` |
+| `DISABLE_EMAIL_LOGIN` | ❌ | Set to `true` to switch off password sign-in, leaving SSO and passkeys. Default: `false` |
+| `OIDC_AUTO_REDIRECT` | ❌ | SSO provider ID to redirect to instead of showing the login page. |
 
 → **[Full Environment Reference](/developer-guide/reference/environment)** for advanced configuration.
 

@@ -128,3 +128,5 @@ Entry format and full rules live in [docs/CLAUDE.md](docs/CLAUDE.md).
 - `ENCRYPTION_KEY` - system key for encrypting secrets at rest. Required.
 - `LOG_LEVEL` - `debug` | `info` (default) | `warn` | `error`.
 - `SQLITE_WAL_MODE` - `true` (default) | `false`. WAL is on by default for the Prisma SQLite DB. See `src/lib/prisma.ts`.
+- `DISABLE_EMAIL_LOGIN` - `true` | `false` (default). Rejects browser email sign-in and sign-up. Server-side `auth.api.*` calls stay open so admin user creation and password resets keep working. See `src/lib/auth/env-flags.ts`.
+- `OIDC_AUTO_REDIRECT` - `SsoProvider.providerId` to redirect to instead of rendering the login page. Format checked in `env-validation.ts`, existence in `startup-checks.ts`.

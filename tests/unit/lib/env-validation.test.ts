@@ -19,7 +19,7 @@ const MANAGED_ENV_VARS = [
     'BETTER_AUTH_SECRET', 'ENCRYPTION_KEY', 'BETTER_AUTH_URL',
     'PORT', 'LOG_LEVEL', 'TZ', 'DATABASE_URL', 'TMPDIR',
     'DISABLE_HTTPS', 'CERTS_DIR', 'DATA_DIR', 'TRUSTED_ORIGINS',
-    'SQLITE_WAL_MODE',
+    'SQLITE_WAL_MODE', 'DISABLE_EMAIL_LOGIN', 'OIDC_AUTO_REDIRECT',
 ];
 
 describe('validateEnvironment', () => {
@@ -53,6 +53,8 @@ describe('validateEnvironment', () => {
         expect(env.DATABASE_URL).toBe('file:./prisma/dev.db');
         expect(env.DISABLE_HTTPS).toBe('false');
         expect(env.SQLITE_WAL_MODE).toBe('true');
+        expect(env.DISABLE_EMAIL_LOGIN).toBe('false');
+        expect(env.OIDC_AUTO_REDIRECT).toBeUndefined();
     });
 
     it('respects overridden optional values', () => {
@@ -89,6 +91,33 @@ describe('validateEnvironment', () => {
         process.env.BETTER_AUTH_SECRET = VALID_SECRET;
         process.env.ENCRYPTION_KEY = 'a'.repeat(32);
         expect(() => validateEnvironment()).toThrow('Startup aborted');
+    });
+
+    it('accepts a disabled email login and an SSO provider ID', () => {
+        process.env.BETTER_AUTH_SECRET = VALID_SECRET;
+        process.env.ENCRYPTION_KEY = VALID_KEY;
+        process.env.DISABLE_EMAIL_LOGIN = 'true';
+        process.env.OIDC_AUTO_REDIRECT = 'authentik-742';
+
+        const env = validateEnvironment();
+
+        expect(env.DISABLE_EMAIL_LOGIN).toBe('true');
+        expect(env.OIDC_AUTO_REDIRECT).toBe('authentik-742');
+    });
+
+    it('rejects an OIDC_AUTO_REDIRECT that is not a provider ID', () => {
+        process.env.BETTER_AUTH_SECRET = VALID_SECRET;
+        process.env.ENCRYPTION_KEY = VALID_KEY;
+        // Uppercase and spaces are not valid in a providerId
+        process.env.OIDC_AUTO_REDIRECT = 'Authentik Main';
+        expect(() => validateEnvironment()).toThrow();
+    });
+
+    it('rejects a non-boolean DISABLE_EMAIL_LOGIN', () => {
+        process.env.BETTER_AUTH_SECRET = VALID_SECRET;
+        process.env.ENCRYPTION_KEY = VALID_KEY;
+        process.env.DISABLE_EMAIL_LOGIN = 'yes';
+        expect(() => validateEnvironment()).toThrow();
     });
 
     it('logs a warning and propagates when an optional field has an invalid value', () => {

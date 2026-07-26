@@ -13,6 +13,8 @@ services:
       - PUID=1001
       - PGID=1001
       - TEST_DB_HOST=host.docker.internal
+      # - DISABLE_EMAIL_LOGIN=true          # Switch off password sign-in, leaving SSO and passkeys
+      # - OIDC_AUTO_REDIRECT=authentik-742  # SSO provider ID to redirect to instead of the login page
     volumes:
       # All persistent data in one mount
       - ./.test/data:/data

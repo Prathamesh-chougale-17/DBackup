@@ -149,6 +149,34 @@ When SSO providers are configured:
 - Users can choose SSO or password login
 - Domain-matched users may auto-redirect
 
+Two environment variables change this. Both are set on the container rather than in the UI, because either one can lock you out and the lever has to work without signing in.
+
+### Switching off password login
+
+`DISABLE_EMAIL_LOGIN=true` removes the email and password form. Only SSO and passkeys remain, and the endpoints are rejected server-side rather than just hidden. Administrators keep creating users and resetting passwords under **Users**, since an account often has to exist before it can link to an SSO identity.
+
+Passkey login has its own switch under **Settings** → **General** and needs no environment variable.
+
+::: warning Order matters on a new instance
+Create the first administrator and configure your provider **before** setting this. There is no bootstrap exception - on an empty instance it leaves no way to sign in and no way to create an account.
+:::
+
+### Skipping the login page entirely
+
+`OIDC_AUTO_REDIRECT` takes a **provider ID** and sends visitors straight to that provider:
+
+```bash
+OIDC_AUTO_REDIRECT=authentik-742
+```
+
+The ID is shown on the provider card in this tab and is the same one in its callback URL.
+
+The redirect is skipped after a failed sign-in, so the error is readable instead of looping, and on the page load right after signing out, so signing out actually works. An ID matching no enabled provider logs an error at startup and leaves the redirect off rather than stopping the application.
+
+::: warning No way past it from the browser
+While this is set, nothing in the URL reaches the login form. If the provider is unreachable or misconfigured, remove the variable and restart.
+:::
+
 ## Security Considerations
 
 ### Token Storage
