@@ -96,6 +96,7 @@ All notable changes to DBackup are documented here.
 - **tests**: Dropped the `vite-tsconfig-paths` plugin in favour of the `resolve.tsconfigPaths` option that Vite 8 provides natively.
 - **dependencies**: Picked up the pending patch and minor releases across the app and the website - Better Auth 1.6.25, React 19.2.8, the Radix UI primitives, `react-hook-form`, `@hookform/resolvers`, `lucide-react`, `dropbox`, `basic-ftp` and the AWS SDK. Better Auth was checked field by field against `schema.prisma` first, since the 1.6.23 update was the one that added two-factor columns the schema never got.
 - **scripts**: `pnpm update:check` no longer ends in `Command failed with exit code 1`, and no longer warns about the `pnpm.overrides` in `docs/` and `website/`. It now checks the three projects the way they are actually installed instead of treating them as one workspace.
+- **tests**: Upgraded `vitest-mock-extended` from 3 to 5, which had been built against Vitest 3 while the suite runs on Vitest 4. It backs the Prisma mock that 87 test files share, so the version it targets should match the runner.
 
 ### 🐳 Docker
 
