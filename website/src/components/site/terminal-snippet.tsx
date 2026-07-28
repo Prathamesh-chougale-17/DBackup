@@ -8,10 +8,13 @@ import { cn } from "@/lib/utils";
 export function TerminalSnippet({
   code,
   highlightedHtml,
+  prompt,
   className,
 }: {
   code: string;
   highlightedHtml?: string;
+  /** Shell prompt shown before the code. Never selected or copied. */
+  prompt?: string;
   className?: string;
 }) {
   const [copied, setCopied] = useState(false);
@@ -40,6 +43,11 @@ export function TerminalSnippet({
         </button>
       </div>
       <pre className="code-highlight overflow-x-auto p-4 leading-relaxed">
+        {prompt ? (
+          <span className="select-none text-muted-foreground" aria-hidden="true">
+            {prompt}{" "}
+          </span>
+        ) : null}
         {highlightedHtml ? (
           <code dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
         ) : (

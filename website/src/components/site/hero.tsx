@@ -7,10 +7,11 @@ import { ContributorAvatars } from "@/components/site/contributor-avatars";
 import { GITHUB_REPO, GETTING_STARTED_URL } from "@/lib/content";
 import { highlightCode } from "@/lib/highlight";
 
-const HERO_SNIPPET = `$ docker run -d \\
+const HERO_SNIPPET = `docker run -d \\
   -p 3000:3000 \\
   -e ENCRYPTION_KEY=$(openssl rand -hex 32) \\
   -e BETTER_AUTH_SECRET=$(openssl rand -base64 32) \\
+  -e BETTER_AUTH_URL="https://localhost:3000" \\
   -v ./data:/data \\
   skyfay/dbackup:latest`;
 
@@ -61,6 +62,7 @@ export async function Hero() {
         <TerminalSnippet
           code={HERO_SNIPPET}
           highlightedHtml={highlightedHtml}
+          prompt="$"
           className="mx-auto mt-12 max-w-xl text-left"
         />
       </div>

@@ -2,6 +2,21 @@
 
 All notable changes to DBackup are documented here.
 
+## vNEXT
+*Release: In Progress*
+
+### 📝 Documentation
+
+- **website**: The `docker run` command in the hero now sets the required `BETTER_AUTH_URL`, and its `$` prompt stays on screen instead of being copied along, so the copied command runs as-is.
+
+### 🐳 Docker
+
+- **Image**: `skyfay/dbackup:vNEXT`
+- **Also tagged as**: `latest`, `vNEXT`
+- **CI Image**: `skyfay/dbackup:ci`
+- **Platforms**: linux/amd64, linux/arm64
+
+
 ## v3.0.0 - File & Folder Backups, Incremental Chains, and General Improvements & Fixes
 *Released: July 26, 2026*
 
