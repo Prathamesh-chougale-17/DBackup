@@ -280,9 +280,12 @@ export async function stepUpload(ctx: RunnerContext) {
                 );
 
                 if (!uploadSuccess) {
+                    // A transfer whose connection was dropped on cancel is a cancelled run,
+                    // not a destination that refused the file.
+                    ctx.abortSignal?.throwIfAborted();
                     throw new Error("Adapter returned false");
                 }
-            });
+            }, ctx.abortSignal);
 
             dest.uploadResult = { success: true, path: remotePath };
             ctx.log(`${destLabel} Upload complete: ${remotePath}`);
@@ -312,6 +315,11 @@ export async function stepUpload(ctx: RunnerContext) {
             }
 
         } catch (e: unknown) {
+            // A cancelled run is not a destination that rejected the backup. Swallowed here it
+            // would be recorded as a failed upload, the loop would carry on to the next
+            // destination, and the run would end as Partial instead of Cancelled.
+            ctx.abortSignal?.throwIfAborted();
+
             const message = e instanceof Error ? e.message : String(e);
             dest.uploadResult = { success: false, error: message };
             ctx.log(`${destLabel} Upload FAILED: ${message}`, 'error');

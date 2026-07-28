@@ -104,4 +104,39 @@ describe("formatExcludeSummary", () => {
         // 12 patterns * (1 header + 5 samples + 1 "and more") = 84 lines, not 60.000.
         expect(details.split("\n").length).toBeLessThanOrEqual(12 * 7);
     });
+
+    describe("pruned directories", () => {
+        it("reports directories that were skipped without being read", () => {
+            // A pruned tree contributes no files, so without this the summary would say
+            // nothing at all about the largest thing a pattern left out.
+            const breakdown = summariseExcluded([], ["node_modules/**"], [
+                { path: "node_modules", pattern: "node_modules/**" },
+                { path: "packages/app/node_modules", pattern: "node_modules/**" },
+            ]);
+
+            expect(breakdown.prunedDirectories).toBe(2);
+            expect(breakdown.byPattern[0]).toMatchObject({ pattern: "node_modules/**", prunedCount: 2 });
+
+            const { message, details } = formatExcludeSummary(breakdown);
+            expect(message).toContain("2 director(ies) not scanned");
+            expect(details).toContain("packages/app/node_modules");
+        });
+
+        it("counts files and pruned directories for the same pattern together", () => {
+            const breakdown = summariseExcluded(
+                [file("cache/a.tmp", 10)],
+                ["cache/**"],
+                [{ path: "cache/deep", pattern: "cache/**" }]
+            );
+
+            expect(breakdown.byPattern).toHaveLength(1);
+            expect(breakdown.byPattern[0]).toMatchObject({ files: 1, prunedCount: 1 });
+        });
+
+        it("says nothing about pruning when nothing was pruned", () => {
+            const { message } = formatExcludeSummary(summariseExcluded([file("a.log", 5)], ["*.log"]));
+
+            expect(message).not.toContain("not scanned");
+        });
+    });
 });

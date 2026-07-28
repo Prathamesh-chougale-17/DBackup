@@ -17,7 +17,6 @@ export interface Execution {
     status: "Running" | "Success" | "Failed" | "Pending" | "Partial" | "Cancelled";
     startedAt: string;
     endedAt?: string;
-    logs: string; // JSON string
     path?: string;
     metadata?: string;
     triggerType?: string | null;

@@ -19,6 +19,7 @@ import { verifyFileChecksum } from "@/lib/crypto/checksum";
 import { notify } from "@/services/notifications/system-notification-service";
 import { NOTIFICATION_EVENTS } from "@/lib/notifications";
 import { registerExecution, unregisterExecution } from "@/lib/execution/abort";
+import { createLogFlusher } from "@/lib/execution/log-flusher";
 import { processQueue } from "@/lib/execution/queue-manager";
 import type { RestoreInput } from "./types";
 import { resolveDecryptionKey } from "./smart-recovery";
@@ -48,25 +49,24 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
     }];
 
     // State
-    let lastLogUpdate = Date.now();
     let currentProgress = 0;
     let currentStage = "Initializing";
     let currentDetail: string | null = null;
     const stageStartTimes = new Map<string, number>();
     stageStartTimes.set("Initializing", Date.now());
 
+    const flusher = createLogFlusher({
+        executionId,
+        getLogs: () => internalLogs,
+        getMetadata: () => ({ progress: currentProgress, stage: currentStage, detail: currentDetail }),
+    });
+
     const flushLogs = async (force = false) => {
-        const now = Date.now();
-        if (force || now - lastLogUpdate > 1000) { // Update every 1 second
-            await prisma.execution.update({
-                where: { id: executionId },
-                data: {
-                    logs: JSON.stringify(internalLogs),
-                    metadata: JSON.stringify({ progress: currentProgress, stage: currentStage, detail: currentDetail })
-                }
-            }).catch(() => {});
-            lastLogUpdate = now;
+        if (force) {
+            await flusher.flush();
+            return;
         }
+        flusher.schedule();
     };
 
     const log = (msg: string, level: LogLevel = 'info', type: LogType = 'general', details?: string) => {
@@ -631,6 +631,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
             await fs.promises.unlink(tempFile).catch(() => {});
         }
         await flushLogs(true);
+        flusher.dispose();
         unregisterExecution(executionId);
         // Trigger queue so any backup jobs pending during this restore can start.
         processQueue().catch((e) => svcLog.error("Post-restore queue trigger failed", {}, wrapError(e)));

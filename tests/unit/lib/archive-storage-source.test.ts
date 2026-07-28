@@ -189,14 +189,18 @@ describe("openStorageArchiveSource", () => {
     it("removes the fallback temp file on dispose", async () => {
         const { archivePath, size } = await buildArchive(false);
         const calls = { rangeAttempts: 0, downloads: 0 };
-        const before = (await fs.readdir(os.tmpdir())).filter((f) => f.startsWith("archive-fetch-")).length;
+        // Scoped to this process. Vitest runs test files in parallel forks that share the OS
+        // temp directory, and two other suites open storage archive sources of their own - a
+        // plain prefix count picks theirs up mid-flight and fails at random.
+        const ownPrefix = `archive-fetch-${process.pid}-`;
+        const countOwn = async () => (await fs.readdir(os.tmpdir())).filter((f) => f.startsWith(ownPrefix)).length;
+        const before = await countOwn();
 
         const managed = await openStorageArchiveSource(brokenRangeAdapter(archivePath, calls), {} as never, "backup.tar", size);
         await readArchiveManifest(managed.source);
         await managed.dispose();
 
-        const after = (await fs.readdir(os.tmpdir())).filter((f) => f.startsWith("archive-fetch-")).length;
-        expect(after).toBe(before);
+        expect(await countOwn()).toBe(before);
     });
 
     it("produces byte-identical results on both paths", async () => {

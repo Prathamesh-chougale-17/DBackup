@@ -144,6 +144,42 @@ The adapter decides the range, because the sensible limit is a property of the p
 Raising it helps most when the files are small and the link has latency. It helps least when one
 large file dominates - a single transfer already fills a fast link on its own.
 
+### Exclude patterns, and why they are worth setting
+
+Before anything is transferred, the source tree has to be listed. On a connection-based adapter
+that is one round trip per **directory**, so a tree with thousands of folders spends real time
+here before the first byte moves. A `node_modules`, a `.git` or a package cache can easily be the
+majority of that.
+
+Exclude patterns are what avoid it. On SFTP, a pattern that excludes everything below a folder
+makes the walk skip that folder entirely rather than list it and throw the result away. The run
+reports what it skipped, so nothing disappears quietly:
+
+```
+48,213 file(s) skipped by exclude patterns (2.1 GB), plus 14 director(ies) not scanned at all
+```
+
+The distinction that decides whether a folder is skipped is the pattern's shape:
+
+| Pattern | Effect |
+| :--- | :--- |
+| `node_modules/**` | Excludes everything inside, so the folder is never listed. |
+| `**/node_modules/**` | Same, at any depth. |
+| `node_modules` | Excludes **nothing**. A pattern without a slash matches file names, and no file is named `node_modules`. |
+| `*.log` | Excludes log files wherever they are. Folders are still listed, because they hold other files too. |
+
+The third row is the one that catches people out. Write `node_modules/**`, not `node_modules`.
+
+Attach patterns per source under **Connections → Directory Sources**, or reuse a set across jobs
+with [Exclude Pattern Presets](/user-guide/features/templates).
+
+### While it runs
+
+The progress display names what it is doing rather than going quiet during the slow parts. A run
+reports `scanning, 12,480 file(s) in 1,200 director(ies)` while it walks the tree, then per-file
+counts while it transfers, then the hashing and packing steps. **Cancel** takes effect during any
+of them, within about one round trip.
+
 ### Behaviour worth choosing on
 
 **Rsync restores only what differs.** Restoring to an Rsync destination compares each file against

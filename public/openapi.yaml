@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: DBackup API
-  version: 3.0.0
+  version: 3.0.1
   description: |
     REST API for DBackup - a self-hosted database backup automation platform with encryption, compression, and smart retention.
 
@@ -334,7 +334,13 @@ paths:
     get:
       tags: [History]
       summary: List Execution History
-      description: Returns the last 100 executions, newest first, including job name.
+      description: |
+        Returns the last 100 executions, newest first, including job name.
+
+        Execution logs are **not** part of this response. Fetch them per execution from
+        `GET /executions/{id}?includeLogs=true`.
+
+        **Required permission:** `history:read`
       operationId: listHistory
       security:
         - BearerAuth: []
@@ -344,9 +350,16 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Execution"
+                type: object
+                properties:
+                  executions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Execution"
+                  systemTimezone:
+                    type: string
+                    description: IANA timezone this instance formats timestamps in
+                    example: Europe/Zurich
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -2509,14 +2522,18 @@ components:
     # ─── Executions ──────────────────────────────────────────────
     Execution:
       type: object
+      description: |
+        History list entry. Carries no execution logs - see
+        `GET /executions/{id}?includeLogs=true`.
       properties:
         id:
           type: string
         jobId:
           type: string
+          description: Null for system tasks, which belong to no job
         type:
           type: string
-          enum: [Backup, Restore]
+          enum: [Backup, Restore, IntegrityCheck, Verification]
         status:
           $ref: "#/components/schemas/ExecutionStatus"
         startedAt:
@@ -2526,6 +2543,18 @@ components:
           type: string
           format: date-time
           # nullable handled via type array
+        path:
+          type: string
+          description: Remote path of the backup produced, when one was written
+        metadata:
+          type: string
+          description: JSON string carrying live progress - `progress`, `stage`, `detail`
+        triggerType:
+          type: string
+          enum: [Manual, Scheduler, Api]
+        triggerLabel:
+          type: string
+          description: Who or what triggered the run, e.g. a user or API key name
         job:
           type: object
           properties:

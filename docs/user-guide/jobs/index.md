@@ -224,6 +224,20 @@ By default, one backup runs at a time. Configure concurrency:
 More concurrent jobs = higher CPU/memory/disk usage
 :::
 
+### Stuck Job Timeout
+
+A running job occupies one of those slots until it finishes. If a run stops making progress -
+a source that stopped answering, a network path that went away without closing the connection -
+it would hold its slot indefinitely and every job queued behind it would silently never start.
+
+**Settings** → **System** → **Stuck Job Timeout** sets how long a run may go without reporting
+progress before it is cancelled and marked failed. The default is 6 hours, and `Never (disabled)`
+switches the check off.
+
+The measure is progress, not age. A twelve-hour transfer that keeps reporting is left alone; a
+five-minute one that went quiet is not. The watchdog runs every five minutes and can be disabled
+per instance under **History** → **System Tasks**.
+
 ## Job Pipeline
 
 When a job runs, it goes through these steps:

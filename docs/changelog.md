@@ -2,17 +2,49 @@
 
 All notable changes to DBackup are documented here.
 
-## vNEXT
-*Release: In Progress*
+## v3.0.1 - File Backup Reliability Fixes and SFTP Improvements
+*Released: July 28, 2026*
+
+### ✨ Features
+
+- **settings**: New **Stuck Job Timeout** cancels a backup or restore that has stopped reporting progress, so it can no longer occupy a concurrency slot indefinitely and hold back every queued job. Default 6 hours, `Never` disables it.
+
+### 🐛 Bug Fixes
+
+- **runner**: Execution progress recorded within a second of the previous update was discarded instead of written, so a job doing slow work showed the state from before it started - most visibly a file backup sitting on `Taking job from queue...` while it was already collecting files. Also affected restores and integrity checks.
+- **SFTP**: Directory listings and disconnects could hang indefinitely when a connection stopped responding without closing, which is what left file backups running for hours with nothing in the log.
+- **runner**: Cancelling a file backup had no effect during collection, and only took effect between two files once it did - so a source of many small files reacted instantly while a source of a few large ones ignored it for the whole transfer. Cancel now interrupts the transfer itself, and works while listing, hashing, packing and uploading.
+- **shutdown**: A stuck execution blocked container restarts until the runtime forced the process to exit. Shutdown now cancels runs that outlast a five-minute grace period.
+- **history**: The live execution view updated more slowly the more history an instance had, because every poll transferred the full logs of the last 100 executions.
+- **history**: A running stage showed an elapsed time frozen at its last log line instead of counting up.
+
+### 🎨 Improvements
+
+- **SFTP**: Directory listings are substantially faster - folders are read in parallel, and a folder excluded in full is skipped instead of listed and discarded. Skipped folders are reported in the exclude summary.
+- **runner**: The collect phase now reports a live file and folder count while listing, byte progress for large files, and its hashing progress, instead of going silent during each.
+- **runner**: Checksums of collected files are computed in parallel.
+- **SFTP**: Downloads no longer spend an extra round trip asking for a file size the transfer already reports.
+
+### 🔄 Changed
+
+- **api**: `GET /api/history` no longer returns the `logs` field. It carried the complete log of all 100 returned executions on every call. Fetch a single execution's log from `GET /api/executions/:id?includeLogs=true` instead.
 
 ### 📝 Documentation
 
+- **api-docs**: Corrected the `GET /history` specification, which declared a bare array where the endpoint has always returned `{ executions, systemTimezone }`, and documented the `path`, `metadata`, `triggerType` and `triggerLabel` fields it returns. `IntegrityCheck` and `Verification` were missing from the execution type list.
+- **file-backups**: Added sections on exclude patterns and what a run reports while it works, including why `node_modules/**` skips a folder and `node_modules` does not.
+- **jobs**: Documented the Stuck Job Timeout setting.
 - **website**: The `docker run` command in the hero now sets the required `BETTER_AUTH_URL`, and its `$` prompt stays on screen instead of being copied along, so the copied command runs as-is.
+
+### 🧪 Tests
+
+- **runner**: Added coverage for deferred progress writes, the SFTP tree walk, unresponsive disconnects, exclude pruning decisions, cancelling a transfer that never reports back, and the stuck execution watchdog.
+- **archive**: Fixed a test that counted temp files across the whole OS temp directory and failed at random when another suite ran alongside it.
 
 ### 🐳 Docker
 
-- **Image**: `skyfay/dbackup:vNEXT`
-- **Also tagged as**: `latest`, `vNEXT`
+- **Image**: `skyfay/dbackup:v3.0.1`
+- **Also tagged as**: `latest`, `v3`
 - **CI Image**: `skyfay/dbackup:ci`
 - **Platforms**: linux/amd64, linux/arm64
 

@@ -10,6 +10,43 @@ let isShuttingDown = false;
 const POLL_INTERVAL_MS = 2000;
 
 /**
+ * How long a shutdown waits for running executions before cancelling them.
+ *
+ * Long enough that an ordinary backup finishes rather than being cut off, short enough that
+ * a stuck one cannot hold a restart open indefinitely. Docker's default stop timeout is 10 s
+ * and it sends SIGKILL after that, so anything beyond this is decided by the runtime anyway -
+ * better to end cleanly on our own terms and leave an accurate record behind.
+ */
+const SHUTDOWN_GRACE_MS = 5 * 60 * 1000;
+
+/**
+ * Signals every running execution to stop and records it as failed.
+ *
+ * Signalling first gives a run that is between steps the chance to unwind properly - close
+ * its connections, clean up its temp files. The database is then corrected regardless,
+ * because a row left as `Running` after the process is gone blocks the queue on the next
+ * start until something notices.
+ */
+async function abortRunningExecutions(): Promise<void> {
+    try {
+        const { abortExecution } = await import("@/lib/execution/abort");
+        const running = await prisma.execution.findMany({
+            where: { status: "Running" },
+            select: { id: true },
+        });
+
+        for (const { id } of running) abortExecution(id);
+
+        await prisma.execution.updateMany({
+            where: { status: "Running" },
+            data: { status: "Failed", endedAt: new Date() },
+        });
+    } catch (error) {
+        log.warn("Failed to cancel running executions during shutdown", { error: String(error) });
+    }
+}
+
+/**
  * Returns whether the application is currently shutting down.
  * Can be checked by the queue manager to skip starting new jobs.
  */
@@ -66,10 +103,13 @@ async function performShutdown(signal: string): Promise<void> {
         log.warn("Failed to stop scheduler", { error: String(error) });
     }
 
-    // 2. Wait for all running executions to complete (no timeout - the app
-    //    stays alive until every backup/restore finishes or a second signal
-    //    forces immediate exit)
+    // 2. Wait for running executions to finish, but not forever. A backup blocked on a
+    //    source that stopped answering never completes, and waiting on it turned an ordinary
+    //    restart into one that only ends when the container runtime loses patience and sends
+    //    SIGKILL. Past the deadline the remaining runs are cancelled and recorded as failed,
+    //    which is both true and visible - unlike a process killed mid-write.
     let lastLoggedCount = -1;
+    const deadline = Date.now() + SHUTDOWN_GRACE_MS;
 
     while (true) {
         try {
@@ -82,10 +122,19 @@ async function performShutdown(signal: string): Promise<void> {
                 break;
             }
 
+            if (Date.now() >= deadline) {
+                log.warn(
+                    `${runningCount} execution(s) did not finish within the shutdown grace period - cancelling them`,
+                    { runningCount, graceMs: SHUTDOWN_GRACE_MS },
+                );
+                await abortRunningExecutions();
+                break;
+            }
+
             if (runningCount !== lastLoggedCount) {
                 log.info(
                     `Waiting for ${runningCount} running execution(s) to finish before shutting down...`,
-                    { runningCount },
+                    { runningCount, graceMs: SHUTDOWN_GRACE_MS },
                 );
                 lastLoggedCount = runningCount;
             }

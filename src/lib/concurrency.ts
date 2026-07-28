@@ -40,6 +40,40 @@ export function createConcurrencyGate(limit: number): <T>(fn: () => Promise<T>) 
     };
 }
 
+/**
+ * Settles as soon as the signal does, whatever the wrapped promise goes on to do.
+ *
+ * Cancelling a transfer cannot depend on that transfer reporting its own failure, because a
+ * torn-down one does not always report anything. SFTP is the case that proved it: dropping the
+ * connection under a running `fastGet` leaves its promise pending forever, because
+ * ssh2-sftp-client suppresses the close event that would reject it once `end()` has been
+ * called, and ssh2's own error path then waits on a CLOSE reply the dead connection will never
+ * send. The transfer stopped, and the run went on waiting for it.
+ *
+ * The wait is therefore bounded here, above the adapter, where it holds for every adapter and
+ * depends on none of their internals. An abandoned transfer keeps what it holds - a local file
+ * descriptor, in practice - until the process collects it. That is the right trade against a
+ * run that hangs until someone restarts the container.
+ */
+export function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+    if (!signal) return promise;
+    if (signal.aborted) return Promise.reject(signal.reason);
+
+    return new Promise<T>((resolve, reject) => {
+        const onAbort = () => reject(signal.reason);
+        signal.addEventListener("abort", onAbort, { once: true });
+
+        // Detached before settling, not after. The signal outlives every individual transfer,
+        // so a listener released a microtask late is one still attached when the caller is
+        // already looking at the result.
+        const release = () => signal.removeEventListener("abort", onAbort);
+        promise.then(
+            (value) => { release(); resolve(value); },
+            (error) => { release(); reject(error); }
+        );
+    });
+}
+
 export async function mapWithConcurrency<T, R>(
     items: readonly T[],
     limit: number,

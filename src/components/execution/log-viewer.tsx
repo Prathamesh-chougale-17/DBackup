@@ -47,6 +47,17 @@ export function LogViewer({ logs, className, autoScroll = true, status, executio
   const [shouldAutoScroll, setShouldAutoScroll] = useState(autoScroll);
   const [activeStages, setActiveStages] = useState<string[]>([]);
   const [userInteracted, setUserInteracted] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  const isLive = status === "Running" || status === "Pending";
+
+  // Drives the active stage's elapsed time. Only while a run is live, and only once a second,
+  // since the display rounds to seconds anyway.
+  useEffect(() => {
+    if (!isLive) return;
+    const tick = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, [isLive]);
 
   // Parse Logs Helper
   const parsedLogs = useMemo(() => {
@@ -108,7 +119,13 @@ export function LogViewer({ logs, className, autoScroll = true, status, executio
               const isLast = i === maxStageIdx;
               const firstTs = stageLogs[0].timestamp;
               const lastTs = stageLogs[stageLogs.length - 1].timestamp;
-              const duration = new Date(lastTs).getTime() - new Date(firstTs).getTime();
+              // A finished stage is measured between its own log lines. The one still running
+              // is measured against now, because a stage that is working without logging - a
+              // long directory listing, a large file transfer - would otherwise show a
+              // duration frozen at its last log line and read as a stage that had stalled.
+              const isActiveStage = isLast && isRunning;
+              const endedAt = isActiveStage ? nowMs : new Date(lastTs).getTime();
+              const duration = endedAt - new Date(firstTs).getTime();
 
               const isPartialStage = stage === "Uploading" || stage === "Verifying Checksums";
               const isOverallPartial = status === "Partial";
@@ -142,7 +159,7 @@ export function LogViewer({ logs, className, autoScroll = true, status, executio
       }
 
       return groups;
-  }, [parsedLogs, status, executionType]);
+  }, [parsedLogs, status, executionType, nowMs]);
   // Track the currently running stage so the effect fires when it transitions.
   const runningStage = useMemo(
       () => groupedLogs.find(g => g.status === "running")?.stage ?? null,
@@ -162,13 +179,17 @@ export function LogViewer({ logs, className, autoScroll = true, status, executio
       });
   }, [runningStage, userInteracted]);
 
-  // Scroll to bottom on new logs if sticky
+  // Scroll to bottom on new logs if sticky.
+  //
+  // Keyed on how many lines there are rather than on the array itself: the array is rebuilt
+  // on every poll whether or not anything changed, and scrolling smoothly on every one of
+  // those fought with the user's own scrolling.
   useEffect(() => {
     if (shouldAutoScroll && scrollRef.current) {
         const div = scrollRef.current;
         div.scrollTo({ top: div.scrollHeight, behavior: "smooth" });
     }
-  }, [logs, shouldAutoScroll]);
+  }, [parsedLogs.length, shouldAutoScroll]);
 
   const handleScroll = () => {
       if (!scrollRef.current) return;

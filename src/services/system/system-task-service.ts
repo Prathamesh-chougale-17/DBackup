@@ -43,7 +43,8 @@ export const SYSTEM_TASKS = {
     CONFIG_BACKUP: "system.config_backup",
     INTEGRITY_CHECK: "system.integrity_check",
     REFRESH_STORAGE_STATS: "system.refresh_storage_stats",
-    WARMUP_STORAGE_CACHE: "system.warmup_storage_cache"
+    WARMUP_STORAGE_CACHE: "system.warmup_storage_cache",
+    STUCK_EXECUTION_CHECK: "system.stuck_execution_check"
 };
 
 export const DEFAULT_TASK_CONFIG = {
@@ -109,6 +110,13 @@ export const DEFAULT_TASK_CONFIG = {
         enabled: true,
         label: "Pre-warm Storage Cache",
         description: "Keeps the Storage Explorer cache fresh. Reconciles existing caches against remote storage to detect external changes, and pre-populates the cache for adapters not yet loaded."
+    },
+    [SYSTEM_TASKS.STUCK_EXECUTION_CHECK]: {
+        interval: "*/5 * * * *", // Every 5 minutes
+        runOnStartup: false,
+        enabled: true,
+        label: "Stuck Execution Watchdog",
+        description: "Fails backups and restores that have stopped reporting progress. A stuck run counts against the concurrent job limit for as long as it lasts, which silently prevents every job queued behind it from starting. Threshold configurable under Settings."
     }
 };
 
@@ -234,6 +242,11 @@ export class SystemTaskService {
             case SYSTEM_TASKS.HEALTH_CHECK:
                 await healthCheckService.performHealthCheck();
                 break;
+            case SYSTEM_TASKS.STUCK_EXECUTION_CHECK: {
+                const { sweepStuckExecutions } = await import("@/services/system/stuck-execution-service");
+                await sweepStuckExecutions();
+                break;
+            }
             case SYSTEM_TASKS.CLEAN_OLD_LOGS:
                 await this.runCleanOldLogs();
                 break;

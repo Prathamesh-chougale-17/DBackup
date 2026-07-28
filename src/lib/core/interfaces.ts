@@ -398,6 +398,74 @@ export interface DirectoryDownloadOptions {
      * with their own downloadDirectory (Rsync) ignore it.
      */
     concurrency?: number;
+    /**
+     * Aborts the collection.
+     *
+     * Checked before the listing, by the walk itself where the adapter supports it, and
+     * before each file transfer starts. Transfers already in flight run to completion, so
+     * cancellation is bounded by one file rather than by the rest of the source.
+     */
+    signal?: AbortSignal;
+    /**
+     * Live counts while the source is being listed, before a single byte has moved.
+     *
+     * A large tree spends minutes here. Without this the phase reports nothing at all for
+     * that whole time, which is indistinguishable from a run that has stopped.
+     */
+    onListProgress?: (progress: ListTreeProgress) => void;
+}
+
+/** A directory a walk refused to descend into, and the pattern that made it pointless. */
+export interface PrunedDirectory {
+    /** Path relative to the queried directory, POSIX separators, no leading slash. */
+    path: string;
+    /** The exclude pattern proving everything below it is excluded. */
+    pattern: string;
+}
+
+/** Live counts while a tree is being walked. */
+export interface ListTreeProgress {
+    files: number;
+    directories: number;
+    prunedDirectories: number;
+    /** Directory currently being read, relative to the queried directory. Empty for the root. */
+    currentPath: string;
+}
+
+/**
+ * Constraints and observers for a collection walk.
+ *
+ * Every field is advisory. An adapter honouring none of them is still correct: exclusions are
+ * applied again by the caller, progress is optional, and the caller checks the signal either
+ * side of the call. Honouring them is what turns correct into fast and interruptible.
+ */
+export interface ListTreeOptions {
+    /**
+     * Glob patterns, matched against the path relative to the queried directory - the same
+     * relative path the caller derives, so walk and filter agree on what a path means.
+     *
+     * Used only to skip descending into directories that cannot contain a wanted file, never
+     * to filter individual files. Deciding what ends up in the backup stays with the caller.
+     */
+    excludePatterns?: string[];
+    /** Aborts the walk. Implementations check between directory reads and throw. */
+    signal?: AbortSignal;
+    onProgress?: (progress: ListTreeProgress) => void;
+    /** How many directory reads may be in flight. Defaults to 1, which is a serial walk. */
+    concurrency?: number;
+}
+
+export interface ListTreeResult {
+    /** Identical in shape and path convention to what `list()` returns. */
+    files: FileInfo[];
+    /**
+     * Directories skipped whole.
+     *
+     * Reported rather than dropped: the exclude summary counts files, and a pruned tree
+     * contributes none, so without this a `node_modules/**` would turn "48,000 files skipped"
+     * into silence. A backup may not quietly leave things out.
+     */
+    pruned: PrunedDirectory[];
 }
 
 /** Result of downloading an entire remote directory tree to a local directory. */
@@ -523,6 +591,22 @@ export interface StorageAdapter extends BaseAdapter {
      * Lists files in a directory
      */
     list(config: AdapterConfig, remotePath: string): Promise<FileInfo[]>;
+
+    /**
+     * Optional: the same recursive listing `list()` produces, but built with the caller's
+     * constraints in hand - so an excluded directory is never read, progress arrives while
+     * the walk runs, and a cancelled run stops within one round trip.
+     *
+     * Exists for directory sources, where the tree is deep and mostly unwanted, and where
+     * `list()`'s "walk everything, filter afterwards" costs the whole tree before the first
+     * byte moves. Adapters that do not implement it keep working unchanged:
+     * `listTreeForCollection()` falls back to `list()`.
+     */
+    listTree?(
+        config: AdapterConfig,
+        remotePath: string,
+        options?: ListTreeOptions
+    ): Promise<ListTreeResult>;
 
     /**
      * Deletes a file

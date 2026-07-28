@@ -1,6 +1,16 @@
-import { StorageAdapter, StorageSession, FileInfo, DirectoryBrowseEntry } from "@/lib/core/interfaces";
+import {
+    StorageAdapter,
+    StorageSession,
+    FileInfo,
+    DirectoryBrowseEntry,
+    ListTreeOptions,
+    ListTreeResult,
+    PrunedDirectory,
+} from "@/lib/core/interfaces";
 import { normalizeSshPrivateKey } from "@/lib/ssh/pkcs8-compat";
 import { createConnectionPool } from "@/lib/adapters/storage/common/connection-pool";
+import { mapWithConcurrency } from "@/lib/concurrency";
+import { canPruneDirectory } from "@/lib/exclude-patterns";
 import { SFTPSchema } from "@/lib/adapters/definitions";
 import Client from "ssh2-sftp-client";
 import { Readable } from "stream";
@@ -20,6 +30,29 @@ interface SFTPConfig {
     passphrase?: string;
     pathPrefix?: string;
 }
+
+/**
+ * Keeps a connection from outliving the network it runs over.
+ *
+ * ssh2 disables both of these by default: no keepalive, and the socket's own inactivity
+ * timeout set to 0. `readyTimeout` covers the handshake and is cleared once the connection is
+ * ready. So a connection that stops being carried - a NAT entry expiring, a firewall dropping
+ * its state, a server that stops answering without closing - produces no event at all, and
+ * the request waiting on it waits forever. That is not theoretical: it is how a file backup
+ * came to sit on one directory listing for four hours.
+ *
+ * With keepalive on, ssh2 pings every interval and destroys the socket after
+ * `keepaliveCountMax` unanswered ones, which surfaces as a normal connection error the
+ * transfer can report. Same values as `src/lib/ssh/ssh-client.ts`, which already did this.
+ */
+const CONNECTION_TUNING = {
+    readyTimeout: 20000,
+    keepaliveInterval: 10000,
+    keepaliveCountMax: 3,
+} as const;
+
+/** How long a polite disconnect may take before the socket is dropped outright. */
+const DISCONNECT_TIMEOUT_MS = 5000;
 
 /**
  * Opens an SFTP session.
@@ -62,9 +95,45 @@ export const connectSFTP = async (config: SFTPConfig, onDisconnect?: (reason: st
         privateKey,
         // passphrase only needed for non-PKCS#8-encrypted keys
         passphrase: privateKey !== config.privateKey ? undefined : config.passphrase,
+        ...CONNECTION_TUNING,
     });
     return sftp;
 };
+
+/**
+ * Closes a connection without ever waiting indefinitely for it.
+ *
+ * `end()` in ssh2-sftp-client resolves only from the `'close'` event, and ssh2's `end()` does
+ * a graceful `sock.end()` - a FIN, not a destroy. A Node socket emits `'close'` only once
+ * both directions are closed, so if the peer never answers with its own FIN the promise stays
+ * pending forever. Keepalive does not rescue this: ssh2 stops the keepalive timer as soon as
+ * the socket is no longer writable, which `end()` has just made true.
+ *
+ * Every caller here closes in a `finally`, so a hanging disconnect stalls the whole backup
+ * after its real work is already done. Bounding it costs at most one dropped socket, which
+ * the server cleans up on its own.
+ */
+export async function endSftpClient(sftp: Client): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+        await Promise.race([
+            sftp.end(),
+            new Promise<void>((resolve) => {
+                timer = setTimeout(resolve, DISCONNECT_TIMEOUT_MS);
+                timer.unref?.();
+            }),
+        ]);
+    } catch {
+        // A disconnect that fails has still ended the connection as far as we are concerned.
+    } finally {
+        if (timer) clearTimeout(timer);
+        // Reaching past the wrapper on purpose: it exposes no way to drop a connection that
+        // will not close politely, and leaving the socket open would leak a file descriptor
+        // per backup run.
+        const raw = (sftp as unknown as { client?: { destroy?: () => void } }).client;
+        try { raw?.destroy?.(); } catch { /* already gone */ }
+    }
+}
 
 /** A pooled connection plus whether it is still usable, kept together so the pool can check it. */
 interface PooledClient {
@@ -276,13 +345,21 @@ async function performSftpDownload(
             : remotePath;
 
         // fastGet regardless of whether anyone watches progress: which transfer algorithm runs
-        // must not depend on whether a caller passed a callback. Directory collection reports
-        // progress per file rather than per byte and passes none, and that alone used to put
-        // every file of a file backup on the slow single-request path.
-        const total = onProgress ? (await sftp.stat(source)).size : 0;
+        // must not depend on whether a caller passed a callback. Directory collection used to
+        // pass none, and that alone put every file of a file backup on the slow
+        // single-request path.
+        //
+        // The size comes from the transfer's own step callback rather than from a stat, so
+        // watching progress costs nothing. It used to cost one extra round trip per file,
+        // which is the wrong price to pay on the adapter where round trips are the bottleneck.
+        //
+        // fastGet still spends an FSTAT of its own to learn the size before reading. Passing its
+        // `fileSize` option would skip that - one of four round trips per file. The caller knows
+        // the size from the listing but does not pass it down yet. See PERF-SFTP-MULTIPLEX in
+        // `openSession` below for the measurements and the larger win alongside it.
         await sftp.fastGet(source, localPath, {
             ...TRANSFER_TUNING,
-            step: (transferred: number) => onProgress?.(transferred, total),
+            step: (transferred: number, _chunk: number, total: number) => onProgress?.(transferred, total),
         });
         return true;
     } catch (error) {
@@ -336,6 +413,117 @@ async function performSftpUpload(
     }
 }
 
+/**
+ * Walks a source tree for collection: skipping what is excluded, reporting as it goes, and
+ * stopping when asked.
+ *
+ * Kept apart from `list()` rather than replacing it. `list()` also serves retention, integrity
+ * checks and the browse UI, where the tree is a flat directory of backup files and none of
+ * this applies - and where its depth-first order has been the behaviour all along. This walk
+ * is breadth-first because that is what allows several directories to be read at once, which
+ * is the entire point: SFTP spends one round trip per directory, so a tree of a few thousand
+ * folders is minutes of pure waiting on a serial walk and seconds on a parallel one.
+ *
+ * Paths handed to the exclude predicate are relative to the queried directory, matching what
+ * `toRelativePath()` derives on the caller's side. Getting that wrong would apply
+ * `node_modules/**` at the wrong depth and either prune nothing or prune the wrong subtree.
+ */
+async function walkSftpTree(
+    config: SFTPConfig,
+    dir: string,
+    options?: ListTreeOptions
+): Promise<ListTreeResult> {
+    const normalize = (p: string) => p.replace(/\\/g, '/');
+    const prefix = config.pathPrefix ? normalize(config.pathPrefix) : "";
+    const startDir = prefix ? path.posix.join(prefix, dir) : (dir || ".");
+    const limit = Math.max(1, options?.concurrency ?? 1);
+
+    const files: FileInfo[] = [];
+    const pruned: PrunedDirectory[] = [];
+    let directoriesRead = 0;
+
+    const pool = createConnectionPool<PooledClient>({
+        limit,
+        connect: async () => {
+            const entry: PooledClient = { client: null as unknown as Client, alive: true };
+            entry.client = await connectSFTP(config, () => { entry.alive = false; });
+            return entry;
+        },
+        disconnect: async (entry) => { await endSftpClient(entry.client); },
+        isAlive: (entry) => entry.alive,
+    });
+
+    try {
+        options?.signal?.throwIfAborted();
+
+        const exists = await pool.withConnection(({ client }) => client.exists(startDir));
+        if (exists !== 'd') return { files, pruned };
+
+        // One level at a time. Every directory of a level is read concurrently, and the
+        // directories they reveal become the next level.
+        let frontier: string[] = [""];
+
+        while (frontier.length > 0) {
+            const next = await mapWithConcurrency(frontier, limit, async (relDir): Promise<string[]> => {
+                options?.signal?.throwIfAborted();
+
+                const currentDir = relDir ? path.posix.join(startDir, relDir) : startDir;
+                const items = await pool.withConnection(({ client }) => client.list(currentDir));
+                const children: string[] = [];
+
+                for (const item of items) {
+                    const childRel = relDir ? `${relDir}/${item.name}` : item.name;
+
+                    if (item.type === 'd') {
+                        const pattern = canPruneDirectory(childRel, options?.excludePatterns);
+                        if (pattern) {
+                            pruned.push({ path: childRel, pattern });
+                            continue;
+                        }
+                        children.push(childRel);
+                    } else if (item.type === '-') {
+                        // Same convention as list(): relative to the adapter's configured
+                        // root, not to the queried directory - the caller strips the rest.
+                        const fullPath = path.posix.join(currentDir, item.name);
+                        let relativePath = fullPath;
+                        if (prefix && fullPath.startsWith(prefix)) {
+                            relativePath = fullPath.substring(prefix.length);
+                        }
+                        if (relativePath.startsWith('/')) relativePath = relativePath.substring(1);
+
+                        files.push({
+                            name: item.name,
+                            path: relativePath,
+                            size: item.size,
+                            lastModified: new Date(item.modifyTime),
+                        });
+                    }
+                }
+
+                // Counters are mutated between awaits, which Node never interleaves.
+                directoriesRead++;
+                options?.onProgress?.({
+                    files: files.length,
+                    directories: directoriesRead,
+                    prunedDirectories: pruned.length,
+                    currentPath: relDir,
+                });
+
+                return children;
+            });
+
+            frontier = next.flat();
+        }
+
+        return { files, pruned };
+    } catch (error) {
+        log.error("SFTP tree walk failed", { host: config.host, dir }, wrapError(error));
+        throw error;
+    } finally {
+        await pool.close();
+    }
+}
+
 export const SFTPAdapter: StorageAdapter = {
     id: "sftp",
     type: "storage",
@@ -344,9 +532,31 @@ export const SFTPAdapter: StorageAdapter = {
     credentials: { primary: "SSH_KEY" },
 
     async openSession(config: SFTPConfig, onLog?, options?): Promise<StorageSession> {
-        // One connection unless the caller transfers several files at once, in which case the
-        // pool holds exactly as many as it allows in flight - the handshake count follows the
-        // configured concurrency instead of the number of files.
+        // PERF-SFTP-MULTIPLEX
+        //
+        // One connection per transfer in flight. This is the reason the concurrency ceiling is
+        // 8 (see `transferConcurrency` for sftp in `src/lib/adapters/definitions/index.ts`), and
+        // that ceiling is self-imposed rather than protocol-imposed: SFTP multiplexes by request
+        // id - ssh2 tracks them in `this._requests[reqid]` - so a single connection can carry
+        // any number of concurrent operations. `fastGet` already relies on this, issuing 64
+        // parallel reads over one channel. N parallel *files* would need no extra login either.
+        //
+        // Why it matters: a small file costs four round trips (OPEN, FSTAT, READ, CLOSE), so a
+        // source of many small files is bound by latency, not bandwidth. Measured over a ~40 ms
+        // link, 766 files of ~23 KB took 88s at concurrency 4 and 45s at 8 - linear, with the
+        // link nowhere near saturated. Multiplexing over one connection would lift the ceiling
+        // entirely, up to what the server's own sftp-server process can chew through.
+        //
+        // Two cheaper wins live nearby, in `performSftpDownload`: `fastGet` accepts a
+        // `fileSize` option and skips its FSTAT when given one, and the size is already known
+        // from the listing - one of four round trips, for one argument.
+        //
+        // Not done here on purpose: it inverts the pooling model below and belongs in its own
+        // change, measured on its own.
+        //
+        // Liveness is tracked by the connection telling us it dropped, rather than by inspecting
+        // the client afterwards: the default has to be "usable", so that a future library change
+        // cannot silently turn pooling off by making every connection look dead.
         // Liveness is tracked by the connection telling us it dropped, rather than by inspecting
         // the client afterwards: the default has to be "usable", so that a future library change
         // cannot silently turn pooling off by making every connection look dead.
@@ -357,7 +567,7 @@ export const SFTPAdapter: StorageAdapter = {
                 entry.client = await connectSFTP(config, () => { entry.alive = false; });
                 return entry;
             },
-            disconnect: async (entry) => { await entry.client.end().catch(() => { }); },
+            disconnect: async (entry) => { await endSftpClient(entry.client); },
             isAlive: (entry) => entry.alive,
         });
 
@@ -410,8 +620,12 @@ export const SFTPAdapter: StorageAdapter = {
             if (onLog && error instanceof Error) onLog(`SFTP upload failed: ${error.message}`, 'error', 'storage', error.stack);
             return false;
         } finally {
-            if (sftp) await sftp.end();
+            if (sftp) await endSftpClient(sftp);
         }
+    },
+
+    async listTree(config: SFTPConfig, dir: string = "", options?: ListTreeOptions): Promise<ListTreeResult> {
+        return walkSftpTree(config, dir, options);
     },
 
     async list(config: SFTPConfig, dir: string = ""): Promise<FileInfo[]> {
@@ -474,7 +688,7 @@ export const SFTPAdapter: StorageAdapter = {
             log.error("SFTP list failed", { host: config.host, dir }, wrapError(error));
             throw error;
         } finally {
-            if (sftp) await sftp.end();
+            if (sftp) await endSftpClient(sftp);
         }
     },
 
@@ -500,7 +714,7 @@ export const SFTPAdapter: StorageAdapter = {
             log.error("SFTP browseDirectories failed", { host: config.host, subPath }, wrapError(error));
             throw error;
         } finally {
-            if (sftp) await sftp.end();
+            if (sftp) await endSftpClient(sftp);
         }
     },
 
@@ -516,13 +730,13 @@ export const SFTPAdapter: StorageAdapter = {
             const stream = sftp.createReadStream(source, { start, end }) as NodeJS.ReadableStream;
             // The connection has to outlive the stream, so it is closed on completion
             // rather than in a finally block here.
-            const close = () => { void sftp.end().catch(() => { }); };
+            const close = () => { void endSftpClient(sftp); };
             stream.on("end", close);
             stream.on("error", close);
             stream.on("close", close);
             return stream;
         } catch (error) {
-            await sftp.end().catch(() => { });
+            await endSftpClient(sftp);
             log.error("SFTP ranged download failed", { host: config.host, remotePath, start, end }, wrapError(error));
             throw error;
         }
@@ -537,7 +751,7 @@ export const SFTPAdapter: StorageAdapter = {
             log.error("SFTP download failed", { host: config.host, remotePath }, wrapError(error));
             return false;
         } finally {
-            if (sftp) await sftp.end();
+            if (sftp) await endSftpClient(sftp);
         }
     },
 
@@ -561,7 +775,7 @@ export const SFTPAdapter: StorageAdapter = {
             // Quietly fail if file not found (expected for missing .meta.json)
             return null;
         } finally {
-            if (sftp) await sftp.end();
+            if (sftp) await endSftpClient(sftp);
         }
     },
 
@@ -580,7 +794,7 @@ export const SFTPAdapter: StorageAdapter = {
             log.error("SFTP delete failed", { host: config.host, remotePath }, wrapError(error));
             return false;
         } finally {
-            if (sftp) await sftp.end();
+            if (sftp) await endSftpClient(sftp);
         }
     },
 
@@ -595,7 +809,7 @@ export const SFTPAdapter: StorageAdapter = {
             const message = error instanceof Error ? error.message : String(error);
             return { success: false, message: `SFTP Connection failed: ${message}` };
         } finally {
-            if (sftp) await sftp.end();
+            if (sftp) await endSftpClient(sftp);
         }
     },
 
@@ -629,7 +843,7 @@ export const SFTPAdapter: StorageAdapter = {
             return { success: false, message: `SFTP Connection failed: ${message}` };
         } finally {
             if (remoteFileCreated) await sftp?.delete(destination).catch(() => {});
-            if (sftp) await sftp.end();
+            if (sftp) await endSftpClient(sftp);
         }
     }
 

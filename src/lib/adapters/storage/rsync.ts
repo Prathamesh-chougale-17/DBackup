@@ -1,6 +1,6 @@
 import { StorageAdapter, StorageSession, FileInfo, DirectoryDownloadResult, DirectoryFileEntry, DirectoryBrowseEntry } from "@/lib/core/interfaces";
 import { RsyncSchema, type SFTPConfig } from "@/lib/adapters/definitions";
-import { connectSFTP } from "./sftp";
+import { connectSFTP, endSftpClient } from "./sftp";
 import { Readable } from "stream";
 import Rsync from "rsync";
 import { exec, execFile } from "child_process";
@@ -659,13 +659,13 @@ export const RsyncAdapter: StorageAdapter = {
             const stream = sftp.createReadStream(source, { start, end }) as NodeJS.ReadableStream;
             // The session has to outlive the stream, so it is closed on completion rather
             // than in a finally block here.
-            const close = () => { void sftp.end().catch(() => { }); };
+            const close = () => { void endSftpClient(sftp); };
             stream.on("end", close);
             stream.on("error", close);
             stream.on("close", close);
             return stream;
         } catch (error) {
-            await sftp.end().catch(() => { });
+            await endSftpClient(sftp);
             log.error("Rsync ranged download via SFTP failed", { host: config.host, remotePath, start, end }, wrapError(error));
             throw error;
         }
