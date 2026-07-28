@@ -289,6 +289,13 @@ export interface CreateArchiveOptions {
     concurrency?: number;
     /** Reports entries written so far, for the runner's live progress display. */
     onProgress?: (done: number, total: number, label: string) => void;
+    /**
+     * Aborts packing between entries.
+     *
+     * Packing runs after everything has been collected and can take minutes on a large
+     * source, so it is the last place a cancelled run would otherwise sit and wait.
+     */
+    signal?: AbortSignal;
 }
 
 export interface CreateArchiveResult {

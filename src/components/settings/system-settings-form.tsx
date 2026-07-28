@@ -26,8 +26,20 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 
+/** Offered thresholds. `0` is the explicit opt-out rather than a hidden special case. */
+const STUCK_TIMEOUT_CHOICES = [
+    { minutes: 0, label: "Never (disabled)" },
+    { minutes: 30, label: "30 minutes" },
+    { minutes: 60, label: "1 hour" },
+    { minutes: 180, label: "3 hours" },
+    { minutes: 360, label: "6 hours" },
+    { minutes: 720, label: "12 hours" },
+    { minutes: 1440, label: "24 hours" },
+] as const;
+
 const formSchema = z.object({
     maxConcurrentJobs: z.coerce.number().min(1).max(10),
+    stuckTimeoutMinutes: z.coerce.number().min(0).max(10080).default(360),
     disablePasskeyLogin: z.boolean().default(false),
     sessionDuration: z.coerce.number().min(3600).max(7776000).default(604800),
     auditLogRetentionDays: z.coerce.number().min(1).max(1825).default(90),
@@ -42,6 +54,7 @@ const formSchema = z.object({
 
 interface SystemSettingsFormProps {
     initialMaxConcurrentJobs: number;
+    initialStuckTimeoutMinutes?: number;
     initialDisablePasskeyLogin?: boolean;
     initialSessionDuration?: number;
     initialAuditLogRetentionDays?: number;
@@ -56,13 +69,14 @@ interface SystemSettingsFormProps {
     emailLoginDisabledByEnv?: boolean;
 }
 
-export function SystemSettingsForm({ initialMaxConcurrentJobs, initialDisablePasskeyLogin, initialSessionDuration = 604800, initialAuditLogRetentionDays = 90, initialStorageSnapshotRetentionDays = 90, initialNotificationLogRetentionDays = 90, initialCheckForUpdates = true, initialShowQuickSetup = false, initialSystemTimezone = "UTC", initialFilenamePattern = "{name}_yyyy-MM-dd_HH-mm-ss", initialInstanceName = "", emailLoginDisabledByEnv = false }: SystemSettingsFormProps) {
+export function SystemSettingsForm({ initialMaxConcurrentJobs, initialStuckTimeoutMinutes = 360, initialDisablePasskeyLogin, initialSessionDuration = 604800, initialAuditLogRetentionDays = 90, initialStorageSnapshotRetentionDays = 90, initialNotificationLogRetentionDays = 90, initialCheckForUpdates = true, initialShowQuickSetup = false, initialSystemTimezone = "UTC", initialFilenamePattern = "{name}_yyyy-MM-dd_HH-mm-ss", initialInstanceName = "", emailLoginDisabledByEnv = false }: SystemSettingsFormProps) {
     const [openTimezone, setOpenTimezone] = useState(false);
     const timezones = Intl.supportedValuesOf('timeZone');
     const form = useForm<z.infer<typeof formSchema>>({
         resolver: zodResolver(formSchema) as any,
         defaultValues: {
             maxConcurrentJobs: initialMaxConcurrentJobs,
+            stuckTimeoutMinutes: initialStuckTimeoutMinutes,
             disablePasskeyLogin: initialDisablePasskeyLogin === true,
             sessionDuration: initialSessionDuration,
             auditLogRetentionDays: initialAuditLogRetentionDays,
@@ -182,6 +196,40 @@ export function SystemSettingsForm({ initialMaxConcurrentJobs, initialDisablePas
                                             {Array.from({ length: 10 }, (_, i) => i + 1).map((num) => (
                                                 <SelectItem key={num} value={String(num)}>
                                                     {num} Job{num > 1 ? "s" : ""}
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                    <FormMessage />
+                                </FormItem>
+                            )}
+                        />
+
+                        <FormField
+                            control={form.control}
+                            name="stuckTimeoutMinutes"
+                            render={({ field }) => (
+                                <FormItem>
+                                    <FormLabel>Stuck Job Timeout</FormLabel>
+                                    <FormDescription>
+                                        Fail a backup or restore that has stopped reporting progress for this long.
+                                        A stuck run occupies a slot for as long as it lasts, which keeps every job
+                                        queued behind it from starting. Long transfers keep reporting and are not
+                                        affected.
+                                    </FormDescription>
+                                    <Select
+                                        onValueChange={(val) => handleAutoSave("stuckTimeoutMinutes", Number(val))}
+                                        defaultValue={String(field.value)}
+                                    >
+                                        <FormControl>
+                                            <SelectTrigger>
+                                                <SelectValue placeholder="Select timeout" />
+                                            </SelectTrigger>
+                                        </FormControl>
+                                        <SelectContent>
+                                            {STUCK_TIMEOUT_CHOICES.map(({ minutes, label }) => (
+                                                <SelectItem key={minutes} value={String(minutes)}>
+                                                    {label}
                                                 </SelectItem>
                                             ))}
                                         </SelectContent>

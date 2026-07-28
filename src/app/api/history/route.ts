@@ -15,12 +15,24 @@ export async function GET(_req: NextRequest) {
 
         const [executions, tzSetting] = await Promise.all([
             prisma.execution.findMany({
-                include: {
-                    job: {
-                        select: {
-                            name: true,
-                        }
-                    }
+                // Explicit, and deliberately without `logs`. That column holds the entire log
+                // of a run as JSON, and this endpoint is polled every two seconds while a job
+                // is running - returning a hundred of them made each poll take long enough
+                // that the client dropped the next tick, so the live view updated slower the
+                // more history an instance had. The open dialog fetches the one log it needs
+                // from /api/executions/[id].
+                select: {
+                    id: true,
+                    jobId: true,
+                    type: true,
+                    status: true,
+                    startedAt: true,
+                    endedAt: true,
+                    path: true,
+                    metadata: true,
+                    triggerType: true,
+                    triggerLabel: true,
+                    job: { select: { name: true } },
                 },
                 orderBy: { startedAt: 'desc' },
                 take: 100

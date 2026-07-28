@@ -18,6 +18,7 @@ import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { PIPELINE_STAGES } from "@/lib/core/logs";
 import { resolveTransferConcurrency } from "@/lib/adapters/transfer-concurrency";
+import { mapWithConcurrency } from "@/lib/concurrency";
 
 const log = logger.child({ step: "combined-dump" });
 
@@ -32,6 +33,18 @@ const DB_FORMAT_BY_ADAPTER: Record<string, DumpFormat> = {
 
 /** Adapters whose dump() already applies its own native compression - per-entry external compression is skipped for their dumps to avoid double-compressing already-compressed bytes. */
 const NATIVE_COMPRESSION_ADAPTERS = new Set(["postgres"]);
+
+/**
+ * How many collected files are hashed at once.
+ *
+ * A mix of disk reads and SHA-256, so it scales with cores, and it is capped for the same
+ * reason the archive writer caps its own: the work is bursty and the machine is also serving
+ * the application.
+ */
+const HASH_CONCURRENCY = Math.max(2, Math.min(8, os.cpus().length || 4));
+
+/** How often the hashing phase refreshes its progress text. */
+const HASH_PROGRESS_EVERY = 25;
 
 /**
  * Combined dump path for jobs that have directory sources (JobSource), used instead of the
@@ -161,6 +174,9 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
         if (dbTotal > 0) ctx.setStage(PIPELINE_STAGES.DUMPING);
         let dbDone = 0;
         for (const dbName of dbNames) {
+            // Between databases rather than only between steps, so cancelling a multi-DB job
+            // does not have to wait out every remaining dump first.
+            ctx.abortSignal?.throwIfAborted();
             const format = DB_FORMAT_BY_ADAPTER[job.source!.adapterId] ?? "sql";
             const dest = path.join(workDir, "databases", `${dbName}.${format}`);
             await fs.mkdir(path.dirname(dest), { recursive: true });
@@ -183,10 +199,17 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
         // limits, and the sources of a single job can be both.
         let dirDone = 0;
         for (const source of ctx.sources) {
+            // Checked before acquireSnapshot below, so a cancelled run never creates a shadow
+            // copy it then has to release.
+            ctx.abortSignal?.throwIfAborted();
             const displayPath = source.remotePath || "/";
             const label = `${source.configName}: ${displayPath}`;
             const logPrefix = `[Directory: ${displayPath} via ${source.configName}]`;
             ctx.log(`${logPrefix} Starting collection...`, 'info', 'storage');
+            // Said before anything slow starts. The detail text is otherwise still the
+            // previous source's final count, and a run that has moved on looks like a run
+            // that has stopped.
+            ctx.updateDetail(`${label}: preparing...`);
 
             const localDir = path.join(workDir, "sources", source.jobSourceId);
             const unitBase = dirDone;
@@ -237,6 +260,14 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
                 {
                     concurrency: resolveTransferConcurrency(source.adapter.id, readConfig),
                     ...(shouldDownload ? { shouldDownload } : {}),
+                    ...(ctx.abortSignal ? { signal: ctx.abortSignal } : {}),
+                    // Only the detail text, deliberately. During listing there is no
+                    // denominator yet, so the stage bar has nothing honest to say and stays
+                    // where the previous source left it.
+                    onListProgress: ({ files, directories, prunedDirectories }) => ctx.updateDetail(
+                        `${label}: scanning, ${files} file(s) in ${directories} director(ies)`
+                        + (prunedDirectories > 0 ? `, ${prunedDirectories} skipped` : '')
+                    ),
                 }
             );
 
@@ -254,21 +285,37 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
                 ctx.status = "Partial";
             }
 
-            const fileIndex: SourceFileEntry[] = [];
             for (const e of result.entries) {
-                const before = previousFiles?.get(e.relativePath);
+                // Not transferred, so its bytes stay where they already are.
+                if (e.unchanged) carriedKeys.add(fileKey(source.jobSourceId, e.relativePath));
+            }
 
-                if (e.unchanged) {
-                    // Not transferred, so its bytes stay where they already are.
-                    carriedKeys.add(fileKey(source.jobSourceId, e.relativePath));
-                    continue;
-                }
-
-                // Content hash of the raw (pre-compression, pre-encryption) file. Lands in
-                // the archive index, which is itself sealed when the job is encrypted - a
-                // plaintext hash sitting in the clear would be a confirmation oracle
-                // against known files.
+            // Content hash of the raw (pre-compression, pre-encryption) file. Lands in the
+            // archive index, which is itself sealed when the job is encrypted - a plaintext
+            // hash sitting in the clear would be a confirmation oracle against known files.
+            //
+            // Hashing is a second full read of everything just collected. Done one file at a
+            // time with nothing reported, it left the run looking finished-but-frozen for as
+            // long as the source was large - the last silent stretch of the collect phase.
+            const toHash = result.entries.filter((e) => !e.unchanged);
+            let hashed = 0;
+            ctx.updateDetail(`${label}: hashing ${toHash.length} file(s)...`);
+            const checksums = await mapWithConcurrency(toHash, HASH_CONCURRENCY, async (e) => {
+                ctx.abortSignal?.throwIfAborted();
                 const checksum = await calculateFileChecksum(path.join(localDir, e.relativePath));
+                hashed++;
+                if (hashed % HASH_PROGRESS_EVERY === 0) {
+                    ctx.updateDetail(`${label}: hashing ${hashed}/${toHash.length} file(s)`);
+                }
+                return checksum;
+            });
+
+            // Rebuilt in listing order, which mapWithConcurrency preserves - the index is
+            // compared against the previous snapshot's, so its layout has to stay stable.
+            const fileIndex: SourceFileEntry[] = [];
+            toHash.forEach((e, i) => {
+                const before = previousFiles?.get(e.relativePath);
+                const checksum = checksums[i];
 
                 // The file was transferred, but its content is identical to what the chain
                 // already holds - mtime moved without the bytes changing, which happens on
@@ -276,7 +323,7 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
                 // second copy of the same content.
                 if (before?.h && before.h === checksum) {
                     carriedKeys.add(fileKey(source.jobSourceId, e.relativePath));
-                    continue;
+                    return;
                 }
 
                 fileIndex.push({
@@ -285,7 +332,7 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
                     mtime: e.lastModified.toISOString(),
                     checksum,
                 });
-            }
+            });
 
             if (plan.type === "incremental") {
                 const carriedHere = result.entries.length - fileIndex.length;
@@ -339,6 +386,7 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
                 ctx.updateStageProgress(Math.min(100, Math.round((done / total) * 100)));
                 ctx.updateDetail(`Packing ${done}/${total}: ${label}`);
             },
+            ...(ctx.abortSignal ? { signal: ctx.abortSignal } : {}),
             ...(encryptionProfileId
                 ? { encryption: { masterKey: await getProfileMasterKey(encryptionProfileId), profileId: encryptionProfileId } }
                 : {}),

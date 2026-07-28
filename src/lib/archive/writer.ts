@@ -375,6 +375,10 @@ export async function createArchive(
         for (let i = 0; i < lookahead; i++) startMaterialize(i);
 
         for (let i = 0; i < planned.length; i++) {
+            // Packing a large source is minutes of work after collection has finished, so a
+            // cancel arriving here has to be honoured rather than waited out. The finally
+            // block below cleans up whatever was compressed ahead.
+            options.signal?.throwIfAborted();
             const entry = planned[i];
             const materialized = await pending[i]!;
             pending[i] = undefined;

@@ -1,10 +1,7 @@
 import prisma from "@/lib/prisma";
 import { LogEntry, LogLevel, LogType, INTEGRITY_CHECK_STAGE_PROGRESS_MAP } from "@/lib/core/logs";
-import { logger } from "@/lib/logging/logger";
-import { wrapError } from "@/lib/logging/errors";
+import { createLogFlusher, LogFlusher } from "@/lib/execution/log-flusher";
 import { formatDuration } from "@/lib/utils";
-
-const log = logger.child({ module: "SystemTaskRunner" });
 
 export class SystemTaskRunner {
   private executionId: string;
@@ -13,10 +10,8 @@ export class SystemTaskRunner {
   private currentProgress = 0;
   private currentDetail = "";
   private stageStartTimes = new Map<string, number>();
-  private lastLogFlush = 0;
-  private isFlushing = false;
-  private hasPendingFlush = false;
   private stageProgressMap: Record<string, [number, number]>;
+  private flusher: LogFlusher;
 
   private constructor(
     executionId: string,
@@ -24,6 +19,15 @@ export class SystemTaskRunner {
   ) {
     this.executionId = executionId;
     this.stageProgressMap = stageProgressMap;
+    this.flusher = createLogFlusher({
+      executionId,
+      getLogs: () => this.logs,
+      getMetadata: () => ({
+        progress: this.currentProgress,
+        stage: this.currentStage,
+        detail: this.currentDetail,
+      }),
+    });
   }
 
   static async create(
@@ -72,6 +76,8 @@ export class SystemTaskRunner {
 
   async finish(status: "Success" | "Failed" | "Partial"): Promise<void> {
     await this.flushLogs(true);
+    // Nothing deferred may land after the final write below, which carries the end status.
+    this.flusher.dispose();
     await prisma.execution.update({
       where: { id: this.executionId },
       data: {
@@ -139,43 +145,10 @@ export class SystemTaskRunner {
   }
 
   async flushLogs(force = false): Promise<void> {
-    const now = Date.now();
-    const shouldRun = force || now - this.lastLogFlush > 1000;
-    if (!shouldRun) return;
-
-    if (this.isFlushing) {
-      this.hasPendingFlush = true;
+    if (force) {
+      await this.flusher.flush();
       return;
     }
-
-    this.isFlushing = true;
-    const performUpdate = async () => {
-      try {
-        this.lastLogFlush = Date.now();
-        await prisma.execution.update({
-          where: { id: this.executionId },
-          data: {
-            logs: JSON.stringify(this.logs),
-            metadata: JSON.stringify({
-              progress: this.currentProgress,
-              stage: this.currentStage,
-              detail: this.currentDetail,
-            }),
-          },
-        });
-      } catch (error) {
-        log.error("Failed to flush logs", { executionId: this.executionId }, wrapError(error));
-      }
-    };
-
-    try {
-      await performUpdate();
-      if (this.hasPendingFlush) {
-        this.hasPendingFlush = false;
-        await performUpdate();
-      }
-    } finally {
-      this.isFlushing = false;
-    }
+    this.flusher.schedule();
   }
 }

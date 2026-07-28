@@ -5,6 +5,7 @@ import { LogLevel, LogType } from "@/lib/core/logs";
 import { mapWithConcurrency } from "@/lib/concurrency";
 import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
 import { summariseExcluded, formatExcludeSummary } from "@/lib/exclude-summary";
+import { listTreeForCollection } from "./list-tree";
 
 /** Strips a queried remotePath prefix from a FileInfo.path (which list() returns relative to the adapter root). */
 export function toRelativePath(filePath: string, remotePath: string): string {
@@ -21,6 +22,15 @@ export function toRelativePath(filePath: string, remotePath: string): string {
 
 type OnProgress = (processedBytes: number, totalBytes: number, processedFiles: number, totalFiles: number) => void;
 type OnLog = (msg: string, level?: LogLevel, type?: LogType, details?: string) => void;
+
+/**
+ * How often a transfer still in flight may report.
+ *
+ * The reports end up rebuilding a progress string and touching the execution row, and SFTP
+ * delivers a step callback per 32 KB chunk across several parallel files. A quarter of a
+ * second is well under what reads as live and well over what costs anything.
+ */
+const PARTIAL_PROGRESS_INTERVAL_MS = 250;
 
 /**
  * Generic fallback for StorageAdapter.downloadDirectory: lists the remote directory tree
@@ -55,7 +65,12 @@ export async function downloadDirectoryGeneric(
     onLog?: OnLog,
     options?: DirectoryDownloadOptions
 ): Promise<DirectoryDownloadResult> {
-    const allFiles = await adapter.list(config, remotePath);
+    const { files: allFiles, pruned } = await listTreeForCollection(adapter, config, remotePath, {
+        excludePatterns,
+        signal: options?.signal,
+        onProgress: options?.onListProgress,
+        concurrency: options?.concurrency,
+    });
 
     const entries: { relativePath: string; sourcePath: string; size: number; lastModified: Date }[] = [];
     const excluded: { path: string; size: number }[] = [];
@@ -72,8 +87,8 @@ export async function downloadDirectoryGeneric(
     // backup is exactly what nobody notices until they need it. Reported per pattern rather
     // than per file - a source with a node_modules in it would otherwise write tens of
     // thousands of paths into the execution log, on every run.
-    if (excluded.length > 0 && onLog) {
-        const { message, details } = formatExcludeSummary(summariseExcluded(excluded, excludePatterns ?? []));
+    if ((excluded.length > 0 || pruned.length > 0) && onLog) {
+        const { message, details } = formatExcludeSummary(summariseExcluded(excluded, excludePatterns ?? [], pruned));
         onLog(message, "info", "storage", details);
     }
 
@@ -82,6 +97,10 @@ export async function downloadDirectoryGeneric(
     let processedBytes = 0;
     let processedFiles = 0;
     let skippedFiles = 0;
+    // Bytes of transfers still running. Counted apart from `processedBytes` so a file can
+    // report while it is arriving without being counted twice when it lands.
+    let liveBytes = 0;
+    let lastPartialReport = 0;
 
     // Each file yields exactly one outcome; mapWithConcurrency keeps them in input order, so
     // the resulting entries/failures lists have the same layout the old serial loop produced,
@@ -95,7 +114,35 @@ export async function downloadDirectoryGeneric(
         // parallelism - Node never interleaves these statements.
         processedBytes += bytes;
         processedFiles++;
-        onProgress?.(processedBytes, totalBytes, processedFiles, totalFiles);
+        onProgress?.(processedBytes + liveBytes, totalBytes, processedFiles, totalFiles);
+    };
+
+    /** How much of each in-flight file has arrived, so its share can be removed when it lands. */
+    const partialByIndex = new Map<number, number>();
+
+    /**
+     * Reports a transfer that is still running.
+     *
+     * Without this a source is only heard from when a file completes, so one large file is
+     * indistinguishable from a stalled run for as long as it takes to arrive - which over a
+     * network source is exactly when someone is watching. Throttled because the callback ends
+     * up rebuilding a progress string, and a 32 KB chunk size means thousands of calls a
+     * second otherwise.
+     */
+    const partial = (index: number, transferred: number) => {
+        if (!onProgress) return;
+        liveBytes += transferred - (partialByIndex.get(index) ?? 0);
+        partialByIndex.set(index, transferred);
+
+        const now = Date.now();
+        if (now - lastPartialReport < PARTIAL_PROGRESS_INTERVAL_MS) return;
+        lastPartialReport = now;
+        onProgress(processedBytes + liveBytes, totalBytes, processedFiles, totalFiles);
+    };
+
+    const settle = (index: number) => {
+        liveBytes -= partialByIndex.get(index) ?? 0;
+        partialByIndex.delete(index);
     };
 
     // Per-file "started/finished" chatter from an adapter would put one or two lines in the
@@ -116,11 +163,18 @@ export async function downloadDirectoryGeneric(
         ? await adapter.openSession(config, onLog, { concurrency }).catch(() => undefined)
         : undefined;
     const fetchFile = session?.download
-        ? (sourcePath: string, target: string) => session.download!(sourcePath, target)
-        : (sourcePath: string, target: string) => adapter.download(config, sourcePath, target, undefined, fileOnLog);
+        ? (sourcePath: string, target: string, onBytes: (transferred: number) => void) =>
+            session.download!(sourcePath, target, onBytes)
+        : (sourcePath: string, target: string, onBytes: (transferred: number) => void) =>
+            adapter.download(config, sourcePath, target, onBytes, fileOnLog);
 
     try {
-        const outcomes = await mapWithConcurrency(entries, concurrency, async (entry): Promise<Outcome> => {
+        const outcomes = await mapWithConcurrency(entries, concurrency, async (entry, index): Promise<Outcome> => {
+            // Throwing unwinds this worker, and every sibling throws on its next turn, so a
+            // cancelled run stops after the transfers already in flight rather than after the
+            // rest of the source.
+            options?.signal?.throwIfAborted();
+
             // Incremental backups skip files the chain already holds. They still belong to the
             // snapshot, so they are reported as unchanged rather than dropped - the archive
             // writer carries them forward by reference.
@@ -143,7 +197,15 @@ export async function downloadDirectoryGeneric(
             }
             await fs.mkdir(path.dirname(localFilePath), { recursive: true });
 
-            const success = await fetchFile(entry.sourcePath, localFilePath);
+            let success: boolean;
+            try {
+                success = await fetchFile(entry.sourcePath, localFilePath, (transferred) => partial(index, transferred));
+            } finally {
+                // Whether it arrived or not, this file is no longer in flight - its partial
+                // count has to go, or every failure would inflate the total from then on.
+                settle(index);
+            }
+
             if (!success) {
                 // Recorded, not swallowed: the file is absent from the archive, and a backup
                 // that hides that is worse than one that admits it.

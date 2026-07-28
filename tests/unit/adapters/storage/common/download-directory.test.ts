@@ -268,3 +268,122 @@ describe("downloadDirectory (dispatcher)", () => {
         expect(adapter.list).toHaveBeenCalled();
     });
 });
+
+describe("listTree capability", () => {
+    beforeEach(() => vi.clearAllMocks());
+
+    function withListTree(adapter: StorageAdapter, impl: ReturnType<typeof vi.fn>): StorageAdapter {
+        (adapter as unknown as Record<string, unknown>).listTree = impl;
+        return adapter;
+    }
+
+    it("prefers the adapter's own walker and hands it the exclude patterns", async () => {
+        const adapter = withListTree(
+            makeAdapter([]),
+            vi.fn().mockResolvedValue({ files: [makeFile("Job/a.txt", 10)], pruned: [] })
+        );
+
+        const result = await downloadDirectoryGeneric(adapter, {}, "Job", "/local/job", ["node_modules/**"]);
+
+        expect(result.files).toBe(1);
+        expect(adapter.list).not.toHaveBeenCalled();
+        expect((adapter as unknown as { listTree: ReturnType<typeof vi.fn> }).listTree)
+            .toHaveBeenCalledWith({}, "Job", expect.objectContaining({ excludePatterns: ["node_modules/**"] }));
+    });
+
+    it("still filters what the walker returned, so a buggy walker cannot smuggle files in", async () => {
+        // Pruning decides what gets looked at. What ends up in the backup stays the caller's
+        // decision, and this is the invariant that keeps a broken adapter from changing it.
+        const adapter = withListTree(
+            makeAdapter([]),
+            vi.fn().mockResolvedValue({
+                files: [makeFile("Job/keep.txt", 10), makeFile("Job/skip.log", 10)],
+                pruned: [],
+            })
+        );
+
+        const result = await downloadDirectoryGeneric(adapter, {}, "Job", "/local/job", ["*.log"]);
+
+        expect(result.entries.map((e) => e.relativePath)).toEqual(["keep.txt"]);
+    });
+
+    it("reports pruned directories rather than letting them vanish from the summary", async () => {
+        const adapter = withListTree(
+            makeAdapter([]),
+            vi.fn().mockResolvedValue({
+                files: [],
+                pruned: [{ path: "node_modules", pattern: "node_modules/**" }],
+            })
+        );
+
+        const onLog = vi.fn();
+        await downloadDirectoryGeneric(adapter, {}, "Job", "/local/job", ["node_modules/**"], undefined, onLog);
+
+        const summary = onLog.mock.calls.find(([msg]) => String(msg).includes("not scanned"));
+        expect(summary).toBeDefined();
+        expect(String(summary![0])).toContain("1 director(ies) not scanned");
+    });
+
+    it("falls back to list() for an adapter without the capability", async () => {
+        const adapter = makeAdapter([makeFile("Job/a.txt", 10)]);
+
+        const result = await downloadDirectoryGeneric(adapter, {}, "Job", "/local/job");
+
+        expect(result.files).toBe(1);
+        expect(adapter.list).toHaveBeenCalled();
+    });
+});
+
+describe("cancellation", () => {
+    beforeEach(() => vi.clearAllMocks());
+
+    it("refuses to start when the signal is already aborted", async () => {
+        const adapter = makeAdapter([makeFile("Job/a.txt", 10)]);
+        const controller = new AbortController();
+        controller.abort();
+
+        await expect(
+            downloadDirectoryGeneric(adapter, {}, "Job", "/local/job", undefined, undefined, undefined, {
+                signal: controller.signal,
+            })
+        ).rejects.toThrow();
+        expect(adapter.list).not.toHaveBeenCalled();
+    });
+
+    it("stops downloading the rest of the source once cancelled", async () => {
+        const files = Array.from({ length: 20 }, (_, i) => makeFile(`Job/f${i}.txt`, 1));
+        const controller = new AbortController();
+        let downloaded = 0;
+
+        const adapter = makeAdapter(files, async () => {
+            downloaded++;
+            if (downloaded === 3) controller.abort();
+            return true;
+        });
+
+        await expect(
+            downloadDirectoryGeneric(adapter, {}, "Job", "/local/job", undefined, undefined, undefined, {
+                signal: controller.signal,
+                concurrency: 1,
+            })
+        ).rejects.toThrow();
+
+        // Bounded by the transfers already in flight, not by the rest of the source.
+        expect(downloaded).toBeLessThan(files.length);
+    });
+});
+
+describe("per-file transfer progress", () => {
+    beforeEach(() => vi.clearAllMocks());
+
+    it("passes a progress callback down so a large file is not silence", async () => {
+        // Without this a single big file reports nothing until it has fully arrived, which is
+        // indistinguishable from a stalled run.
+        const adapter = makeAdapter([makeFile("Job/big.bin", 1000)], async (_c, _r, _l) => true);
+
+        await downloadDirectoryGeneric(adapter, {}, "Job", "/local/job", undefined, vi.fn());
+
+        const downloadCall = (adapter.download as ReturnType<typeof vi.fn>).mock.calls[0];
+        expect(typeof downloadCall[3]).toBe("function");
+    });
+});

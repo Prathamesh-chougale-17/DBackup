@@ -574,10 +574,9 @@ describe("SFTPAdapter", () => {
     // ===== download() fastGet step callback =====
 
     describe("download() fastGet step callback", () => {
-        it("invokes onProgress via fastGet step callback", async () => {
-            mockSftpStat.mockResolvedValue({ size: 2048 });
-            let stepCb: ((transferred: number) => void) | undefined;
-            mockSftpFastGet.mockImplementation((_src: unknown, _dst: unknown, opts: { step?: (t: number) => void }) => {
+        it("reports transferred and total bytes from the transfer itself", async () => {
+            let stepCb: ((transferred: number, chunk: number, total: number) => void) | undefined;
+            mockSftpFastGet.mockImplementation((_src: unknown, _dst: unknown, opts: { step?: (t: number, c: number, total: number) => void }) => {
                 stepCb = opts?.step;
                 return Promise.resolve(undefined);
             });
@@ -585,8 +584,18 @@ describe("SFTPAdapter", () => {
             const onProgress = vi.fn();
             await SFTPAdapter.download(config, "Job/backup.sql", "/tmp/out.sql", onProgress);
 
-            stepCb?.(1024);
+            stepCb?.(1024, 512, 2048);
             expect(onProgress).toHaveBeenCalledWith(1024, 2048);
+        });
+
+        it("does not stat the file just to learn its size", async () => {
+            mockSftpFastGet.mockResolvedValue(undefined);
+
+            await SFTPAdapter.download(config, "Job/backup.sql", "/tmp/out.sql", vi.fn());
+
+            // One stat per file is a full round trip on the adapter where round trips are the
+            // bottleneck, and the size already arrives with the transfer.
+            expect(mockSftpStat).not.toHaveBeenCalled();
         });
     });
 

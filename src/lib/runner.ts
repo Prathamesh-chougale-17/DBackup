@@ -10,6 +10,7 @@ import { LogEntry, LogLevel, LogType, PipelineStage, PIPELINE_STAGES, stageProgr
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { registerExecution, unregisterExecution } from "@/lib/execution/abort";
+import { createLogFlusher } from "@/lib/execution/log-flusher";
 import { formatDuration } from "@/lib/utils";
 
 const log = logger.child({ module: "Runner" });
@@ -103,7 +104,6 @@ export async function performExecution(executionId: string, jobId: string) {
     let currentProgress = 0;
     let currentStage = "Initializing";
     let currentDetail = "";
-    let lastLogUpdate = 0;
     const stageStartTimes = new Map<string, number>();
 
     // Declare ctx early
@@ -122,7 +122,6 @@ export async function performExecution(executionId: string, jobId: string) {
                  stage: currentStage
              };
              logs.push(entry);
-             lastLogUpdate = Date.now();
         },
         updateProgress: async (p: number, s?: string) => {
             if (s) currentStage = s;
@@ -151,48 +150,11 @@ export async function performExecution(executionId: string, jobId: string) {
         return l;
     });
 
-    // Throttled flush function
-    let isFlushing = false;
-    let hasPendingFlush = false;
-
-    const flushLogs = async (id: string, force = false) => {
-        const now = Date.now();
-        const shouldRun = force || (now - lastLogUpdate > 1000);
-
-        if (!shouldRun) return;
-
-        if (isFlushing) {
-            hasPendingFlush = true;
-            return;
-        }
-
-        isFlushing = true;
-
-        const performUpdate = async () => {
-             try {
-                lastLogUpdate = Date.now();
-                await prisma.execution.update({
-                    where: { id: id },
-                    data: {
-                        logs: JSON.stringify(logs),
-                        metadata: JSON.stringify({ progress: currentProgress, stage: currentStage, detail: currentDetail })
-                    }
-                });
-            } catch (error) {
-                jobLog.error("Failed to flush logs", {}, wrapError(error));
-            }
-        };
-
-        try {
-            await performUpdate();
-            if (hasPendingFlush) {
-                hasPendingFlush = false;
-                 await performUpdate();
-            }
-        } finally {
-            isFlushing = false;
-        }
-    };
+    const flusher = createLogFlusher({
+        executionId,
+        getLogs: () => logs,
+        getMetadata: () => ({ progress: currentProgress, stage: currentStage, detail: currentDetail }),
+    });
 
     const logEntry = (message: string, level: LogLevel = 'info', type: LogType = 'general', details?: string) => {
         const entry: LogEntry = {
@@ -207,7 +169,7 @@ export async function performExecution(executionId: string, jobId: string) {
         jobLog.debug(message, { stage: currentStage, level });
         logs.push(entry);
 
-        flushLogs(executionId);
+        flusher.schedule();
     };
 
     const updateProgress = (percent: number, stage?: string) => {
@@ -215,7 +177,7 @@ export async function performExecution(executionId: string, jobId: string) {
         if (stage) currentStage = stage;
         currentDetail = ""; // Clear detail on legacy updateProgress calls
         if (ctx) ctx.metadata = { ...ctx.metadata, progress: currentProgress, stage: currentStage };
-        flushLogs(executionId);
+        flusher.schedule();
     };
 
     /** Set the active pipeline stage. Automatically logs stage transition with duration. */
@@ -240,21 +202,21 @@ export async function performExecution(executionId: string, jobId: string) {
         stageStartTimes.set(stage, Date.now());
         currentProgress = stageProgress(stage, 0);
         if (ctx) ctx.metadata = { ...ctx.metadata, progress: currentProgress, stage: currentStage, detail: currentDetail };
-        flushLogs(executionId);
+        flusher.schedule();
     };
 
     /** Update the live detail text without changing the stage (e.g. "125.5 MB dumped...") */
     const updateDetail = (detail: string) => {
         currentDetail = detail;
         if (ctx) ctx.metadata = { ...ctx.metadata, detail: currentDetail };
-        flushLogs(executionId);
+        flusher.schedule();
     };
 
     /** Update internal progress within the current stage (0–100) → maps to global progress */
     const updateStageProgress = (internalPercent: number) => {
         currentProgress = stageProgress(currentStage as PipelineStage, internalPercent);
         if (ctx) ctx.metadata = { ...ctx.metadata, progress: currentProgress };
-        flushLogs(executionId);
+        flusher.schedule();
     };
 
     // Read lock option stored in the initial metadata at enqueue time.
@@ -327,7 +289,7 @@ export async function performExecution(executionId: string, jobId: string) {
         logEntry(ctx.status === "Partial" ? "Job completed with partial success" : "Job completed successfully");
 
         // Final flush
-        await flushLogs(executionId, true);
+        await flusher.flush();
 
     } catch (error) {
         const wrapped = wrapError(error);
@@ -341,10 +303,14 @@ export async function performExecution(executionId: string, jobId: string) {
             logEntry(`ERROR: ${wrapped.message}`);
             jobLog.error("Execution failed", {}, wrapped);
         }
-        await flushLogs(executionId, true);
+        await flusher.flush();
     } finally {
         // Remove from running executions map
         unregisterExecution(executionId);
+
+        // No deferred write may outlive the run: stepFinalize writes the final status below,
+        // and a flush landing after it would overwrite that row with pre-completion progress.
+        flusher.dispose();
 
         // 4. Cleanup & Final Update (sets EndTime, Status in DB)
         await stepCleanup(ctx);

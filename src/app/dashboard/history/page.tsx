@@ -21,6 +21,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { LogViewer } from "@/components/execution/log-viewer";
 import { sanitizeLogs } from "@/lib/logs/sanitize";
+import { LogEntry } from "@/lib/core/logs";
 import { formatLogsAsText, generateLogFilename } from "@/lib/logs/format";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
@@ -42,6 +43,7 @@ function HistoryContent() {
     const [systemTasks, setSystemTasks] = useState<Execution[]>([]);
     const [systemTimezone, setSystemTimezone] = useState("UTC");
     const [selectedLog, setSelectedLog] = useState<Execution | null>(null);
+    const [selectedLogEntries, setSelectedLogEntries] = useState<LogEntry[]>([]);
     const [activeTab, setActiveTab] = useState("activity");
 
     // Notification log state
@@ -57,15 +59,20 @@ function HistoryContent() {
     // Auto-open logic
     const executionId = searchParams.get("executionId");
 
-    // Sync selectedLog with latest executions data to enable live updates in modal
+    // Sync selectedLog with latest executions data to enable live updates in modal.
+    // Compared by the fields the dialog actually renders rather than by stringifying the whole
+    // row - that ran on every poll and every unrelated re-render.
     useEffect(() => {
-        if (selectedLog) {
-            const allExecs = [...executions, ...systemTasks];
-            const updatedLog = allExecs.find(e => e.id === selectedLog.id);
-            if (updatedLog && JSON.stringify(updatedLog) !== JSON.stringify(selectedLog)) {
-                setSelectedLog(updatedLog);
-            }
-        }
+        if (!selectedLog) return;
+        const allExecs = [...executions, ...systemTasks];
+        const updatedLog = allExecs.find(e => e.id === selectedLog.id);
+        if (!updatedLog) return;
+
+        const changed = updatedLog.status !== selectedLog.status
+            || updatedLog.metadata !== selectedLog.metadata
+            || updatedLog.endedAt !== selectedLog.endedAt
+            || updatedLog.path !== selectedLog.path;
+        if (changed) setSelectedLog(updatedLog);
     }, [executions, systemTasks, selectedLog]);
 
     useEffect(() => {
@@ -119,9 +126,56 @@ function HistoryContent() {
 
     useEffect(() => {
         fetchHistory();
-        const interval = setInterval(fetchHistory, hasRunningJob ? 2000 : 5000);
-        return () => clearInterval(interval);
+        const interval = setInterval(() => {
+            // A hidden tab is polling for nobody, and browsers throttle its timers anyway -
+            // which made the first update after switching back arrive stale.
+            if (typeof document !== "undefined" && document.hidden) return;
+            fetchHistory();
+        }, hasRunningJob ? 2000 : 5000);
+
+        const onVisible = () => { if (!document.hidden) fetchHistory(); };
+        document.addEventListener("visibilitychange", onVisible);
+        return () => {
+            clearInterval(interval);
+            document.removeEventListener("visibilitychange", onVisible);
+        };
     }, [fetchHistory, hasRunningJob]);
+
+    // The open execution's log, fetched on its own.
+    //
+    // The list endpoint no longer carries log blobs, so this is where the log viewer's content
+    // comes from. Scoped to the one open dialog, which is the only place a full log is ever
+    // shown, and stopped as soon as the run reaches a terminal state - a finished log does not
+    // change again.
+    const selectedId = selectedLog?.id ?? null;
+    const selectedIsLive = selectedLog?.status === "Running" || selectedLog?.status === "Pending";
+
+    const fetchSelectedLogs = useCallback(async (id: string) => {
+        try {
+            const res = await fetch(`/api/executions/${encodeURIComponent(id)}?includeLogs=true`);
+            if (!res.ok) return;
+            const result = await res.json();
+            if (Array.isArray(result?.data?.logs)) setSelectedLogEntries(result.data.logs);
+        } catch (e) {
+            log.error("Failed to load execution logs", {}, wrapError(e));
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!selectedId) {
+            setSelectedLogEntries([]);
+            return;
+        }
+
+        fetchSelectedLogs(selectedId);
+        if (!selectedIsLive) return;
+
+        const interval = setInterval(() => {
+            if (typeof document !== "undefined" && document.hidden) return;
+            fetchSelectedLogs(selectedId);
+        }, 2000);
+        return () => clearInterval(interval);
+    }, [selectedId, selectedIsLive, fetchSelectedLogs]);
 
     // Fetch notification logs when that tab becomes active
     useEffect(() => {
@@ -143,14 +197,6 @@ function HistoryContent() {
             .then(result => { if (result) setExecutionNotifications(result.data); })
             .catch(() => {});
     }, [selectedLog]);
-
-    const parseLogs = (json: string) => {
-        try {
-            return JSON.parse(json);
-        } catch {
-            return ["Invalid log format"];
-        }
-    };
 
     const handleCancelExecution = useCallback(async (executionId: string) => {
         setIsCancelling(true);
@@ -174,7 +220,7 @@ function HistoryContent() {
 
     const handleCopyLogs = useCallback(() => {
         if (!selectedLog) return;
-        const logs = sanitizeLogs(parseLogs(selectedLog.logs));
+        const logs = sanitizeLogs(selectedLogEntries);
         const text = formatLogsAsText(logs, {
             jobName: selectedLog.job?.name ?? selectedLog.type ?? "Unknown",
             type: selectedLog.type ?? "Backup",
@@ -187,11 +233,11 @@ function HistoryContent() {
         navigator.clipboard.writeText(text)
             .then(() => toast.success("Logs copied to clipboard"))
             .catch(() => toast.error("Failed to copy logs"));
-    }, [selectedLog]);
+    }, [selectedLog, selectedLogEntries]);
 
     const handleDownloadLog = useCallback(() => {
         if (!selectedLog) return;
-        const logs = sanitizeLogs(parseLogs(selectedLog.logs));
+        const logs = sanitizeLogs(selectedLogEntries);
         const text = formatLogsAsText(logs, {
             jobName: selectedLog.job?.name ?? selectedLog.type ?? "Unknown",
             type: selectedLog.type ?? "Backup",
@@ -212,7 +258,7 @@ function HistoryContent() {
         a.download = filename;
         a.click();
         URL.revokeObjectURL(url);
-    }, [selectedLog]);
+    }, [selectedLog, selectedLogEntries]);
 
     const columns = useMemo(() => createColumns(setSelectedLog), []);
     const systemTaskColumns = useMemo(() => createSystemTaskColumns(setSelectedLog), []);
@@ -297,19 +343,20 @@ function HistoryContent() {
         },
     ], []);
 
-    const parseMetadata = (json?: string | null) => {
-        if (!json) return null;
+    // Keyed on the raw string so it is re-parsed only when the server actually sent a new one,
+    // not on every render caused by an unrelated piece of state on this page.
+    const metadata = useMemo(() => {
+        if (!selectedLog?.metadata) return null;
         try {
-            return JSON.parse(json);
+            return JSON.parse(selectedLog.metadata) as Record<string, unknown>;
         } catch {
             return null;
         }
-    };
+    }, [selectedLog?.metadata]);
 
-    const metadata = selectedLog ? parseMetadata(selectedLog.metadata) : null;
-    const progress = metadata?.progress ?? 0;
-    const stage = metadata?.stage || (selectedLog?.type === "Restore" ? "Restoring..." : "Initializing...");
-    const detail = metadata?.detail || null;
+    const progress = (metadata?.progress as number | undefined) ?? 0;
+    const stage = (metadata?.stage as string | undefined) || (selectedLog?.type === "Restore" ? "Restoring..." : "Initializing...");
+    const detail = (metadata?.detail as string | undefined) || null;
 
     return (
         <div className="space-y-6">
@@ -487,7 +534,7 @@ function HistoryContent() {
 
                     <div className="flex-1 min-h-0 bg-background/5">
                          <LogViewer
-                            logs={selectedLog ? parseLogs(selectedLog.logs) : []}
+                            logs={selectedLogEntries}
                             status={selectedLog?.status}
                             executionType={selectedLog?.type}
                             systemTimezone={systemTimezone}

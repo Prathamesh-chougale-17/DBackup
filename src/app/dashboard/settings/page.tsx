@@ -7,6 +7,7 @@ import { PERMISSIONS } from "@/lib/auth/permissions";
 import { isEmailLoginDisabled } from "@/lib/auth/env-flags";
 import prisma from "@/lib/prisma";
 import { SystemSettingsForm } from "@/components/settings/system-settings-form";
+import { STUCK_TIMEOUT_SETTING, DEFAULT_STUCK_TIMEOUT_MINUTES } from "@/services/system/stuck-execution-service";
 import { SystemTasksSettings } from "@/components/settings/system-tasks-settings";
 import { ConfigBackupSettings } from "@/components/settings/config-backup-settings";
 import { NotificationSettings } from "@/components/settings/notification-settings";
@@ -34,6 +35,12 @@ export default async function SettingsPage() {
     // Load Settings
     const maxJobsSetting = await prisma.systemSetting.findUnique({ where: { key: "maxConcurrentJobs" } });
     const maxConcurrentJobs = maxJobsSetting ? parseInt(maxJobsSetting.value) : 1;
+
+    const stuckTimeoutSetting = await prisma.systemSetting.findUnique({ where: { key: STUCK_TIMEOUT_SETTING } });
+    const parsedStuckTimeout = stuckTimeoutSetting ? parseInt(stuckTimeoutSetting.value, 10) : NaN;
+    const stuckTimeoutMinutes = Number.isFinite(parsedStuckTimeout) && parsedStuckTimeout >= 0
+        ? parsedStuckTimeout
+        : DEFAULT_STUCK_TIMEOUT_MINUTES;
 
 
     const disablePasskeySetting = await prisma.systemSetting.findUnique({ where: { key: "auth.disablePasskeyLogin" } });
@@ -139,6 +146,7 @@ export default async function SettingsPage() {
                 <TabsContent value="general" className="space-y-4">
                     <SystemSettingsForm
                         initialMaxConcurrentJobs={maxConcurrentJobs}
+                        initialStuckTimeoutMinutes={stuckTimeoutMinutes}
                         initialDisablePasskeyLogin={disablePasskeyLogin}
                         emailLoginDisabledByEnv={emailLoginDisabledByEnv}
                         initialSessionDuration={sessionDuration}
