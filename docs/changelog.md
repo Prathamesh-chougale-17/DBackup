@@ -25,8 +25,13 @@ All notable changes to DBackup are documented here.
 - **runner**: Checksums of collected files are computed in parallel.
 - **SFTP**: Downloads no longer spend an extra round trip asking for a file size the transfer already reports.
 
+### 🔄 Changed
+
+- **api**: `GET /api/history` no longer returns the `logs` field. It carried the complete log of all 100 returned executions on every call. Fetch a single execution's log from `GET /api/executions/:id?includeLogs=true` instead.
+
 ### 📝 Documentation
 
+- **api-docs**: Corrected the `GET /history` specification, which declared a bare array where the endpoint has always returned `{ executions, systemTimezone }`, and documented the `path`, `metadata`, `triggerType` and `triggerLabel` fields it returns. `IntegrityCheck` and `Verification` were missing from the execution type list.
 - **file-backups**: Added sections on exclude patterns and what a run reports while it works, including why `node_modules/**` skips a folder and `node_modules` does not.
 - **jobs**: Documented the Stuck Job Timeout setting.
 - **website**: The `docker run` command in the hero now sets the required `BETTER_AUTH_URL`, and its `$` prompt stays on screen instead of being copied along, so the copied command runs as-is.
