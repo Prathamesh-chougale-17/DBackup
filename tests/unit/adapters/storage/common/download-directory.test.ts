@@ -350,6 +350,61 @@ describe("cancellation", () => {
         expect(adapter.list).not.toHaveBeenCalled();
     });
 
+    it("interrupts a transfer already running instead of waiting it out", async () => {
+        // The reported bug: cancel worked on a source of 766 small files and did nothing on one
+        // of 2 large files. With two files and two workers there is no next iteration to check
+        // the signal at, so the only way out is dropping the connection underneath.
+        //
+        // The transfer here NEVER settles, not even once the session is closed. That is what a
+        // torn-down SFTP transfer actually does: ssh2-sftp-client suppresses the close event
+        // that would reject it, and ssh2 then waits on a CLOSE reply that never arrives. A first
+        // attempt at this fix closed the session and waited for the library to report the
+        // failure, which left the run hanging exactly as before.
+        const controller = new AbortController();
+        let closed = false;
+
+        const adapter = makeAdapter([makeFile("Job/a.bin", 200_000_000), makeFile("Job/b.bin", 200_000_000)]);
+        (adapter as unknown as Record<string, unknown>).openSession = vi.fn().mockResolvedValue({
+            download: () => new Promise<boolean>(() => { /* never settles, by design */ }),
+            close: async () => { closed = true; },
+        });
+
+        const run = downloadDirectoryGeneric(adapter, {}, "Job", "/local/job", undefined, undefined, undefined, {
+            signal: controller.signal,
+            concurrency: 2,
+        });
+
+        // Both workers are now inside a transfer, with no iteration left to check at.
+        await new Promise((r) => setTimeout(r, 10));
+        controller.abort();
+
+        await expect(run).rejects.toThrow();
+        // Stopped waiting, and let go of the sockets on the way out.
+        expect(closed).toBe(true);
+    });
+
+    it("does not report a cancelled transfer as a file missing from the backup", async () => {
+        const controller = new AbortController();
+
+        const adapter = makeAdapter([makeFile("Job/a.bin", 100)], async () => {
+            controller.abort();
+            // What a dropped connection looks like to the caller.
+            return false;
+        });
+
+        const onLog = vi.fn();
+        await expect(
+            downloadDirectoryGeneric(adapter, {}, "Job", "/local/job", undefined, undefined, onLog, {
+                signal: controller.signal,
+                concurrency: 1,
+            })
+        ).rejects.toThrow();
+
+        // "MISSING from this backup" on every in-flight file would turn a deliberate cancel
+        // into an alarming report about data that is not actually gone.
+        expect(onLog.mock.calls.some(([msg]) => String(msg).includes("Failed to download"))).toBe(false);
+    });
+
     it("stops downloading the rest of the source once cancelled", async () => {
         const files = Array.from({ length: 20 }, (_, i) => makeFile(`Job/f${i}.txt`, 1));
         const controller = new AbortController();

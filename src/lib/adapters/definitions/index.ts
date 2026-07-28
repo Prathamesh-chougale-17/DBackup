@@ -54,9 +54,14 @@ export const ADAPTER_DEFINITIONS: AdapterDefinition[] = [
         // Every transfer is a fresh SSH login, and OpenSSH starts refusing connections above
         // `MaxStartups` - ten concurrent unauthenticated ones by default. Eight leaves room for
         // the administrator's own session and anything else logging in at that moment, which a
-        // backup quietly taking the last slots would otherwise lock out. Raising the ceiling buys
-        // little in any case: with 64 chunks in flight per file, one transfer already fills a
-        // fast link, so past a handful of files the limit is the link rather than the count.
+        // backup quietly taking the last slots would otherwise lock out.
+        //
+        // The ceiling follows from opening one connection per transfer, not from the protocol -
+        // see PERF-SFTP-MULTIPLEX in `src/lib/adapters/storage/sftp.ts`. The reasoning here used
+        // to end with "raising it buys little, one transfer already fills a fast link". That
+        // holds for large files and is wrong for many small ones, where round trips are the
+        // limit: measured over a ~40 ms link, 766 files of ~23 KB took 88s at four and 45s at
+        // eight. Linear, with no sign of the link being the constraint.
         transferConcurrency: { default: 4, max: 8 },
     },
     {

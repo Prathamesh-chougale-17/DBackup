@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { mapWithConcurrency } from "@/lib/concurrency";
+import { describe, it, expect, vi } from "vitest";
+import { mapWithConcurrency, untilAborted } from "@/lib/concurrency";
 
 /** A deferred promise plus its resolver, for controlling task completion order in a test. */
 function deferred<T>() {
@@ -67,5 +67,50 @@ describe("mapWithConcurrency", () => {
     it("passes the index to the worker", async () => {
         const seen = await mapWithConcurrency(["a", "b", "c"], 2, async (item, i) => `${i}:${item}`);
         expect(seen).toEqual(["0:a", "1:b", "2:c"]);
+    });
+});
+
+describe("untilAborted", () => {
+    it("stops waiting on a promise that never settles", async () => {
+        // The whole reason it exists: a torn-down SFTP transfer settles neither way, so waiting
+        // for it to report its own failure means waiting forever.
+        const controller = new AbortController();
+        const never = new Promise<string>(() => { });
+
+        const waiting = untilAborted(never, controller.signal);
+        controller.abort();
+
+        await expect(waiting).rejects.toThrow();
+    });
+
+    it("passes a normal result straight through", async () => {
+        const controller = new AbortController();
+        await expect(untilAborted(Promise.resolve("done"), controller.signal)).resolves.toBe("done");
+    });
+
+    it("passes a rejection straight through", async () => {
+        const controller = new AbortController();
+        await expect(untilAborted(Promise.reject(new Error("boom")), controller.signal)).rejects.toThrow("boom");
+    });
+
+    it("rejects immediately when the signal has already fired", async () => {
+        const controller = new AbortController();
+        controller.abort();
+
+        await expect(untilAborted(new Promise<void>(() => { }), controller.signal)).rejects.toThrow();
+    });
+
+    it("is a no-op without a signal", async () => {
+        await expect(untilAborted(Promise.resolve(42), undefined)).resolves.toBe(42);
+    });
+
+    it("does not leave a listener behind once the promise settles", async () => {
+        // One per file in flight otherwise, on a signal that lives for the whole run.
+        const controller = new AbortController();
+        const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+
+        await untilAborted(Promise.resolve("ok"), controller.signal);
+
+        expect(removeSpy).toHaveBeenCalled();
     });
 });

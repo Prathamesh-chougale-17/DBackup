@@ -13,7 +13,7 @@ All notable changes to DBackup are documented here.
 
 - **runner**: Execution progress recorded within a second of the previous update was discarded instead of written, so a job doing slow work showed the state from before it started - most visibly a file backup sitting on `Taking job from queue...` while it was already collecting files. Also affected restores and integrity checks.
 - **SFTP**: Directory listings and disconnects could hang indefinitely when a connection stopped responding without closing, which is what left file backups running for hours with nothing in the log.
-- **runner**: Cancelling a file backup during collection had no effect. Cancel now takes effect while listing, transferring, hashing and packing.
+- **runner**: Cancelling a file backup had no effect during collection, and only took effect between two files once it did - so a source of many small files reacted instantly while a source of a few large ones ignored it for the whole transfer. Cancel now interrupts the transfer itself, and works while listing, hashing, packing and uploading.
 - **shutdown**: A stuck execution blocked container restarts until the runtime forced the process to exit. Shutdown now cancels runs that outlast a five-minute grace period.
 - **history**: The live execution view updated more slowly the more history an instance had, because every poll transferred the full logs of the last 100 executions.
 - **history**: A running stage showed an elapsed time frozen at its last log line instead of counting up.
@@ -33,7 +33,8 @@ All notable changes to DBackup are documented here.
 
 ### 🧪 Tests
 
-- **runner**: Added coverage for deferred progress writes, the SFTP tree walk, unresponsive disconnects, exclude pruning decisions, and the stuck execution watchdog.
+- **runner**: Added coverage for deferred progress writes, the SFTP tree walk, unresponsive disconnects, exclude pruning decisions, cancelling a transfer that never reports back, and the stuck execution watchdog.
+- **archive**: Fixed a test that counted temp files across the whole OS temp directory and failed at random when another suite ran alongside it.
 
 ### 🐳 Docker
 

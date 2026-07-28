@@ -352,6 +352,11 @@ async function performSftpDownload(
         // The size comes from the transfer's own step callback rather than from a stat, so
         // watching progress costs nothing. It used to cost one extra round trip per file,
         // which is the wrong price to pay on the adapter where round trips are the bottleneck.
+        //
+        // fastGet still spends an FSTAT of its own to learn the size before reading. Passing its
+        // `fileSize` option would skip that - one of four round trips per file. The caller knows
+        // the size from the listing but does not pass it down yet. See PERF-SFTP-MULTIPLEX in
+        // `openSession` below for the measurements and the larger win alongside it.
         await sftp.fastGet(source, localPath, {
             ...TRANSFER_TUNING,
             step: (transferred: number, _chunk: number, total: number) => onProgress?.(transferred, total),
@@ -527,9 +532,31 @@ export const SFTPAdapter: StorageAdapter = {
     credentials: { primary: "SSH_KEY" },
 
     async openSession(config: SFTPConfig, onLog?, options?): Promise<StorageSession> {
-        // One connection unless the caller transfers several files at once, in which case the
-        // pool holds exactly as many as it allows in flight - the handshake count follows the
-        // configured concurrency instead of the number of files.
+        // PERF-SFTP-MULTIPLEX
+        //
+        // One connection per transfer in flight. This is the reason the concurrency ceiling is
+        // 8 (see `transferConcurrency` for sftp in `src/lib/adapters/definitions/index.ts`), and
+        // that ceiling is self-imposed rather than protocol-imposed: SFTP multiplexes by request
+        // id - ssh2 tracks them in `this._requests[reqid]` - so a single connection can carry
+        // any number of concurrent operations. `fastGet` already relies on this, issuing 64
+        // parallel reads over one channel. N parallel *files* would need no extra login either.
+        //
+        // Why it matters: a small file costs four round trips (OPEN, FSTAT, READ, CLOSE), so a
+        // source of many small files is bound by latency, not bandwidth. Measured over a ~40 ms
+        // link, 766 files of ~23 KB took 88s at concurrency 4 and 45s at 8 - linear, with the
+        // link nowhere near saturated. Multiplexing over one connection would lift the ceiling
+        // entirely, up to what the server's own sftp-server process can chew through.
+        //
+        // Two cheaper wins live nearby, in `performSftpDownload`: `fastGet` accepts a
+        // `fileSize` option and skips its FSTAT when given one, and the size is already known
+        // from the listing - one of four round trips, for one argument.
+        //
+        // Not done here on purpose: it inverts the pooling model below and belongs in its own
+        // change, measured on its own.
+        //
+        // Liveness is tracked by the connection telling us it dropped, rather than by inspecting
+        // the client afterwards: the default has to be "usable", so that a future library change
+        // cannot silently turn pooling off by making every connection look dead.
         // Liveness is tracked by the connection telling us it dropped, rather than by inspecting
         // the client afterwards: the default has to be "usable", so that a future library change
         // cannot silently turn pooling off by making every connection look dead.

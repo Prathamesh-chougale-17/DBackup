@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { StorageAdapter, AdapterConfig, DirectoryDownloadOptions, DirectoryDownloadResult, DirectoryFileEntry } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
-import { mapWithConcurrency } from "@/lib/concurrency";
+import { mapWithConcurrency, untilAborted } from "@/lib/concurrency";
 import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
 import { summariseExcluded, formatExcludeSummary } from "@/lib/exclude-summary";
 import { listTreeForCollection } from "./list-tree";
@@ -168,11 +168,20 @@ export async function downloadDirectoryGeneric(
         : (sourcePath: string, target: string, onBytes: (transferred: number) => void) =>
             adapter.download(config, sourcePath, target, onBytes, fileOnLog);
 
+    // A transfer already running cannot be interrupted from the outside - neither ssh2's
+    // fastGet nor most SDK downloads take a signal - so the connections underneath are dropped
+    // instead, which fails the reads immediately.
+    //
+    // Without this, cancelling only ever took effect between two files. That is instant on a
+    // source of many small files and never on a source of a few large ones: with two files and
+    // two workers there is no next iteration to check at, so a cancel waited out the whole
+    // transfer. Same reason a single large file ignored it.
+    const abortTransfers = () => { void session?.close().catch(() => { }); };
+    if (session) options?.signal?.addEventListener("abort", abortTransfers, { once: true });
+
     try {
         const outcomes = await mapWithConcurrency(entries, concurrency, async (entry, index): Promise<Outcome> => {
-            // Throwing unwinds this worker, and every sibling throws on its next turn, so a
-            // cancelled run stops after the transfers already in flight rather than after the
-            // rest of the source.
+            // Throwing unwinds this worker, and every sibling throws on its next turn.
             options?.signal?.throwIfAborted();
 
             // Incremental backups skip files the chain already holds. They still belong to the
@@ -199,7 +208,15 @@ export async function downloadDirectoryGeneric(
 
             let success: boolean;
             try {
-                success = await fetchFile(entry.sourcePath, localFilePath, (transferred) => partial(index, transferred));
+                success = await untilAborted(
+                    fetchFile(entry.sourcePath, localFilePath, (transferred) => partial(index, transferred)),
+                    options?.signal
+                );
+            } catch (error) {
+                // A transfer torn down by the cancellation above is a cancelled run, not a
+                // file the source refused to hand over.
+                options?.signal?.throwIfAborted();
+                throw error;
             } finally {
                 // Whether it arrived or not, this file is no longer in flight - its partial
                 // count has to go, or every failure would inflate the total from then on.
@@ -207,6 +224,10 @@ export async function downloadDirectoryGeneric(
             }
 
             if (!success) {
+                // Same distinction: a download that returned false because its connection was
+                // dropped on cancel must not be reported as a file missing from the backup.
+                options?.signal?.throwIfAborted();
+
                 // Recorded, not swallowed: the file is absent from the archive, and a backup
                 // that hides that is worse than one that admits it.
                 onLog?.(`Failed to download ${entry.sourcePath}`, "error", "storage");
@@ -230,6 +251,9 @@ export async function downloadDirectoryGeneric(
 
         return { files: resultEntries.length, bytes: processedBytes, entries: resultEntries, failures };
     } finally {
+        // Removed explicitly: one signal outlives every source of the job, so a listener left
+        // behind would accumulate one per source and close a session that has moved on.
+        options?.signal?.removeEventListener("abort", abortTransfers);
         await session?.close().catch(() => { });
     }
 }
