@@ -65,14 +65,26 @@ export async function downloadDirectoryGeneric(
     onLog?: OnLog,
     options?: DirectoryDownloadOptions
 ): Promise<DirectoryDownloadResult> {
-    const { files: allFiles, pruned } = await listTreeForCollection(adapter, config, remotePath, {
+    const { files: allFiles, pruned, unsupportedSymlinks } = await listTreeForCollection(adapter, config, remotePath, {
         excludePatterns,
         signal: options?.signal,
         onProgress: options?.onListProgress,
         concurrency: options?.concurrency,
     });
 
-    const entries: { relativePath: string; sourcePath: string; size: number; lastModified: Date }[] = [];
+    // Links the adapter saw but could not describe. Named rather than counted, because "18
+    // links were skipped" tells nobody which certificate is going to be missing. Capped so a
+    // pathological tree cannot write thousands of lines into the execution record.
+    if (unsupportedSymlinks && unsupportedSymlinks.length > 0) {
+        const shown = unsupportedSymlinks.slice(0, 50);
+        onLog?.(
+            `${unsupportedSymlinks.length} symbolic link(s) could not be collected from this source and are NOT in this backup`,
+            "warning", "storage",
+            shown.join("\n") + (unsupportedSymlinks.length > shown.length ? `\n... and ${unsupportedSymlinks.length - shown.length} more` : "")
+        );
+    }
+
+    const entries: { relativePath: string; sourcePath: string; size: number; lastModified: Date; linkTarget?: string }[] = [];
     const excluded: { path: string; size: number }[] = [];
     for (const file of allFiles) {
         const relativePath = toRelativePath(file.path, remotePath);
@@ -80,7 +92,13 @@ export async function downloadDirectoryGeneric(
             excluded.push({ path: relativePath, size: file.size });
             continue;
         }
-        entries.push({ relativePath, sourcePath: file.path, size: file.size, lastModified: file.lastModified });
+        entries.push({
+            relativePath,
+            sourcePath: file.path,
+            size: file.size,
+            lastModified: file.lastModified,
+            ...(file.linkTarget !== undefined ? { linkTarget: file.linkTarget } : {}),
+        });
     }
 
     // Excluding files silently is the one thing a backup must not do: what is missing from a
@@ -183,6 +201,28 @@ export async function downloadDirectoryGeneric(
         const outcomes = await mapWithConcurrency(entries, concurrency, async (entry, index): Promise<Outcome> => {
             // Throwing unwinds this worker, and every sibling throws on its next turn.
             options?.signal?.throwIfAborted();
+
+            // A symbolic link has no bytes to fetch: its content is the target string, which
+            // the listing already produced. Downloading it would read whatever it points at
+            // and store those bytes under the link's own path - a different tree than the one
+            // being backed up, and one that duplicates data the source deliberately shares.
+            //
+            // Checked before `shouldDownload`, and that order is load-bearing. There is no
+            // transfer to skip here, so the predicate has nothing to decide - and answering
+            // "unchanged" would mark the link for carry-forward, which links deliberately do
+            // not take part in. It would drop out of the snapshot entirely.
+            if (entry.linkTarget !== undefined) {
+                bump(0);
+                return {
+                    kind: "entry",
+                    entry: {
+                        relativePath: entry.relativePath,
+                        size: 0,
+                        lastModified: entry.lastModified,
+                        linkTarget: entry.linkTarget,
+                    },
+                };
+            }
 
             // Incremental backups skip files the chain already holds. They still belong to the
             // snapshot, so they are reported as unchanged rather than dropped - the archive

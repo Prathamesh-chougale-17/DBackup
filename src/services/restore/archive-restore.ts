@@ -32,7 +32,7 @@ import { resolveTransferConcurrency } from "@/lib/adapters/transfer-concurrency"
 import { resolveSelection } from "@/lib/archive/browse";
 import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
 import { summariseExcluded, formatExcludeSummary } from "@/lib/exclude-summary";
-import { entryKey, IndexFileLine } from "@/lib/archive/types";
+import { entryKey, IndexFileLine, partitionSymlinks } from "@/lib/archive/types";
 import { getTempDir } from "@/lib/temp-dir";
 import { openArchiveForRestore } from "./file-restore";
 import type { RestoreInput } from "./types";
@@ -234,9 +234,13 @@ export async function restoreArchiveSnapshot(
             const concurrency = Math.min(
                 ...[...targets.values()].map((t) => resolveTransferConcurrency(t.adapter.id, t.config)),
             );
+            // Links have no entry to read and are recreated after every file has landed, the
+            // same order extractArchiveFrom() uses and for the same security reason.
+            const { payloads, symlinks } = partitionSymlinks(workItems);
+
             const sessions = createDestinationSessions(concurrency, log);
             try {
-                await forEachSnapshotFile(archive, workItems, async (file, content) => {
+                await forEachSnapshotFile(archive, payloads, async (file, content) => {
                     const target = targets.get(file.src)!;
                     const stagePath = path.join(getTempDir(), `restore-${process.pid}-${crypto.randomUUID()}`);
                     let digest: string | undefined;
@@ -275,6 +279,36 @@ export async function restoreArchiveSnapshot(
                     done++;
                     updateDetail(`Files: ${done}/${workItems.length} restored`);
                 }, concurrency);
+
+                // Symbolic links, once every regular file is in place.
+                for (const { src, file } of symlinks) {
+                    const target = targets.get(src)!;
+                    const label = labels.get(src) ?? src;
+                    try {
+                        if (!target.adapter.createSymlink) {
+                            // Object storage has no symbolic links. Counted as a failure so the
+                            // run reports Partial rather than claiming a complete restore that
+                            // is quietly missing them.
+                            throw new Error(
+                                `'${target.adapter.id}' has no symbolic links, so this link to '${file.lnk}' was not restored`
+                            );
+                        }
+                        await target.adapter.createSymlink(
+                            target.config,
+                            safeRemoteJoin(target.basePath, file.p),
+                            file.lnk
+                        );
+                        perSourceDone.set(src, (perSourceDone.get(src) ?? 0) + 1);
+                    } catch (e: unknown) {
+                        const message = e instanceof Error ? e.message : String(e);
+                        perSourceFailed.set(src, (perSourceFailed.get(src) ?? 0) + 1);
+                        errors.push({ entry: `${label}/${file.p}`, error: message });
+                        log(`Failed to restore symlink '${file.p}' to ${target.label}: ${message}`, 'error', 'storage');
+                    }
+
+                    done++;
+                    updateDetail(`Files: ${done}/${workItems.length} restored`);
+                }
             } finally {
                 await sessions.close();
             }

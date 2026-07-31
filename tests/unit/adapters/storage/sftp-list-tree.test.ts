@@ -2,12 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SFTPAdapter, endSftpClient, connectSFTP } from "@/lib/adapters/storage/sftp";
 import { toRelativePath } from "@/lib/adapters/storage/common/download-directory";
 
-const { mockSftpConnect, mockSftpEnd, mockSftpList, mockSftpExists, mockDestroy } = vi.hoisted(() => ({
+const { mockSftpConnect, mockSftpEnd, mockSftpList, mockSftpExists, mockDestroy, rawSftpChannel } = vi.hoisted(() => ({
     mockSftpConnect: vi.fn().mockResolvedValue(undefined),
     mockSftpEnd: vi.fn().mockResolvedValue(undefined),
     mockSftpList: vi.fn(),
     mockSftpExists: vi.fn(),
     mockDestroy: vi.fn(),
+    /** The raw ssh2 SFTP channel, which real connections expose and some do not. */
+    rawSftpChannel: { current: undefined as unknown },
 }));
 
 vi.mock("ssh2-sftp-client", () => {
@@ -18,6 +20,9 @@ vi.mock("ssh2-sftp-client", () => {
         exists = mockSftpExists;
         // The raw ssh2 client the wrapper holds - what endSftpClient reaches for.
         client = { destroy: mockDestroy };
+        // ssh2-sftp-client has no readlink/symlink of its own, so the adapter reaches through
+        // to this. Left undefined by default, which exercises the longname fallback.
+        get sftp() { return rawSftpChannel.current; }
     }
     return { default: MockSFTPClient };
 });
@@ -220,5 +225,78 @@ describe("endSftpClient", () => {
 
         await expect(endSftpClient(client)).resolves.toBeUndefined();
         expect(mockDestroy).toHaveBeenCalled();
+    });
+});
+
+describe("SFTPAdapter.listTree and symbolic links", () => {
+    const link = (name: string, longname?: string) => ({
+        name, type: "l", size: 0, modifyTime: 1_700_000_000_000, ...(longname ? { longname } : {}),
+    });
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mockSftpConnect.mockResolvedValue(undefined);
+        mockSftpEnd.mockResolvedValue(undefined);
+    });
+
+    afterEach(() => { rawSftpChannel.current = undefined; });
+
+    it("reads a link's target through the raw ssh2 channel", async () => {
+        // realPath() would resolve the link the whole way to its destination, which is exactly
+        // the information a backup must not store - so readlink is what has to be used.
+        rawSftpChannel.current = {
+            readlink: (p: string, cb: (e: undefined, t: string) => void) =>
+                cb(undefined, p.endsWith("cert.pem") ? "../archive/cert1.pem" : ""),
+        };
+        serveTree({
+            ".": [dir("live"), dir("archive")],
+            "live": [link("cert.pem")],
+            "archive": [file("cert1.pem")],
+        });
+
+        const result = await SFTPAdapter.listTree!(config, "");
+
+        const found = result.files.find((f) => f.path === "live/cert.pem")!;
+        expect(found.linkTarget).toBe("../archive/cert1.pem");
+        expect(found.size).toBe(0);
+        expect(result.unsupportedSymlinks).toBeUndefined();
+    });
+
+    it("falls back to parsing the target out of longname", async () => {
+        // No readlink on this connection, but most servers put the target in the ls -l style
+        // long name of a listing, which is enough to store the link faithfully.
+        serveTree({
+            ".": [link("cert.pem", "lrwxrwxrwx 1 u g 24 Jan  1 00:00 cert.pem -> ../archive/cert1.pem")],
+        });
+
+        const result = await SFTPAdapter.listTree!(config, "");
+
+        expect(result.files[0].linkTarget).toBe("../archive/cert1.pem");
+    });
+
+    it("reports a link whose target it cannot read at all", async () => {
+        serveTree({ ".": [link("cert.pem"), file("real.txt")] });
+
+        const result = await SFTPAdapter.listTree!(config, "");
+
+        // Named rather than dropped: a link missing from a backup that nobody was told about
+        // is the failure mode that only surfaces during a restore.
+        expect(result.files.map((f) => f.path)).toEqual(["real.txt"]);
+        expect(result.unsupportedSymlinks).toEqual(["cert.pem"]);
+    });
+
+    it("does not descend into a link that points at a directory", async () => {
+        rawSftpChannel.current = {
+            readlink: (_p: string, cb: (e: undefined, t: string) => void) => cb(undefined, "real"),
+        };
+        serveTree({
+            ".": [link("alias"), dir("real")],
+            "real": [file("inside.txt")],
+            "alias": [file("should-not-be-listed.txt")],
+        });
+
+        const result = await SFTPAdapter.listTree!(config, "");
+
+        expect(result.files.map((f) => f.path).sort()).toEqual(["alias", "real/inside.txt"]);
     });
 });

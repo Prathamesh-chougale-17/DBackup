@@ -14,7 +14,7 @@ import { openEntry } from "@/lib/crypto/entry-cipher";
 import { INDEX_MEMBER, MANIFEST_MEMBER, TAR_BLOCK_SIZE } from "./format";
 import { parseIndex } from "./index-file";
 import { readAll } from "./sources";
-import { ArchiveByteSource, ArchiveIndex, ArchiveManifest, entryKey, IndexEntryLine, IndexFileLine } from "./types";
+import { ArchiveByteSource, ArchiveIndex, ArchiveManifest, entryKey, IndexEntryLine, IndexFileLine, isSymlinkLine } from "./types";
 
 /**
  * Bytes read when looking for the manifest. A real manifest is under 2 KB; the probe is
@@ -239,7 +239,15 @@ export async function openArchiveFile(
     file: IndexFileLine,
     masterKey?: Buffer
 ): Promise<NodeJS.ReadableStream> {
-    const entry = index.entries.get(entryKey(file.a, file.n));
+    // A symbolic link is the one index line with nothing to open: its content is the target
+    // string in the index itself. Callers branch on it before they get here, so reaching this
+    // point means a caller forgot - which has to say so rather than fail later as a confusing
+    // "missing entry undefined".
+    if (isSymlinkLine(file)) {
+        throw new Error(`'${file.p}' is a symbolic link and has no content to read - handle it via its 'lnk' target`);
+    }
+
+    const entry = file.n === undefined ? undefined : index.entries.get(entryKey(file.a, file.n));
     if (!entry) {
         throw new Error(`Archive index is inconsistent: file '${file.p}' references missing entry ${file.n}`);
     }
@@ -272,6 +280,10 @@ export async function readArchiveFile(
 export function groupFilesByEntry(files: IndexFileLine[]): Map<string, IndexFileLine[]> {
     const grouped = new Map<string, IndexFileLine[]>();
     for (const file of files) {
+        // Symbolic links point at no entry, so they have nothing to group against. Dropped
+        // here rather than trusted to every caller, since a single one that forgets would ask
+        // for entry `undefined` and fail the whole restore.
+        if (file.n === undefined) continue;
         const key = entryKey(file.a, file.n);
         const existing = grouped.get(key);
         if (existing) existing.push(file);

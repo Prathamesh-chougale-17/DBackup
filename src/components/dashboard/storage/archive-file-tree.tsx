@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ChevronRight, ChevronDown, Folder, FileText } from "lucide-react";
+import { ChevronRight, ChevronDown, Folder, FileText, Link2 } from "lucide-react";
 import { formatBytes } from "@/lib/utils";
 import {
     ArchiveTreeSelection,
@@ -23,6 +23,8 @@ interface BrowseEntry {
     size: number;
     mtime?: string;
     fileCount?: number;
+    /** Target when this entry is a symbolic link. Shown next to the name. */
+    link?: string;
 }
 
 interface ArchiveFileTreeProps {
@@ -160,18 +162,30 @@ export function ArchiveFileTree({
 
                         {entry.type === "directory"
                             ? <Folder className="h-4 w-4 shrink-0 text-blue-500" />
-                            : <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />}
+                            : entry.link !== undefined
+                                ? <Link2 className="h-4 w-4 shrink-0 text-muted-foreground" />
+                                : <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />}
 
-                        <span className="min-w-0 flex-1 truncate text-sm">{entry.name}</span>
+                        <span className="min-w-0 flex-1 truncate text-sm">
+                            {entry.name}
+                            {entry.link !== undefined && (
+                                // The target is the whole content of a link, so showing it is
+                                // showing the file - a bare name would say nothing about what
+                                // is actually being restored.
+                                <span className="text-muted-foreground"> {"→"} {entry.link}</span>
+                            )}
+                        </span>
 
                         {entry.type === "directory" && entry.fileCount !== undefined && (
                             <span className="shrink-0 text-xs text-muted-foreground">
                                 {entry.fileCount} file{entry.fileCount === 1 ? "" : "s"}
                             </span>
                         )}
-                        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-                            {formatBytes(entry.size)}
-                        </span>
+                        {entry.link === undefined && (
+                            <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                                {formatBytes(entry.size)}
+                            </span>
+                        )}
                     </div>
 
                     {entry.type === "directory" && isOpen && renderLevel(entry.path, depth + 1)}

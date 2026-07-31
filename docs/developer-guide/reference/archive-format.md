@@ -100,7 +100,8 @@ anything.
     "profileId": "<uuid>"
   },
   "bundled": true,                    // small files packed together (encrypted archives only)
-  "counts": { "databases": 1, "directorySources": 2, "files": 48120, "entries": 96 },
+  // `files` includes symbolic links. `symlinks` is absent when the archive holds none.
+  "counts": { "databases": 1, "directorySources": 2, "files": 48120, "entries": 96, "symlinks": 12 },
   "totalSize": 91234567,              // logical, uncompressed
   "indexMember": "index"
 }
@@ -185,11 +186,14 @@ One object per line streams in constant memory.
 
 // Logical file
 {"k":"f","src":"<jobSourceId>","p":"www/index.php","s":4211,"m":"2026-07-22T10:00:00.000Z","h":"<sha256>","n":2,"o":0,"l":4211}
+
+// Symbolic link: no bytes anywhere, so no `n`
+{"k":"f","src":"<jobSourceId>","p":"live/npm-10/cert.pem","s":0,"m":"2026-07-22T10:00:00.000Z","lnk":"../../archive/npm-10/cert1.pem"}
 ```
 
 | Field | Meaning |
 | :--- | :--- |
-| `n` | Entry ordinal, **unique within its own archive**. Also the nonce counter. |
+| `n` | Entry ordinal, **unique within its own archive**. Also the nonce counter. Absent on symbolic links. |
 | `a` | Archive holding these bytes. Absent means this archive. Set on carried-forward content. |
 | `off` | Byte offset of the member's payload within the archive |
 | `size` | Bytes stored in the TAR, i.e. after compression and sealing |
@@ -198,9 +202,39 @@ One object per line streams in constant memory.
 | `bundle` | Present when the entry holds several small files |
 | `p` / `s` / `m` / `h` | File path, uncompressed size, mtime, SHA-256 of the plaintext |
 | `o` / `l` | Byte range within the *decompressed* entry. Only for bundled files. |
+| `lnk` | Symbolic link target, raw and unresolved. Its presence marks the line as a link. |
 
 Separating physical entries (`e`) from logical files (`f`) is what makes bundling possible:
 many `f` lines can point at one `e` line.
+
+## Symbolic links
+
+A link is stored as the link, never as a copy of what it points at. `lnk` holds the target
+exactly as the source stored it - a relative target stays relative. Resolving it would be
+wrong twice over: a relative target only means something from the link's own directory, and
+following it would pull in bytes from outside the source that was asked for.
+
+Three rules follow, and a reader has to implement all three:
+
+1. **`lnk` present means `n` absent.** A link has no payload and no entry. Resolving one is
+   the mistake to guard against - it is what turns a link into a failed restore.
+2. **Unencrypted archives also carry a real TAR symlink member** (typeflag `2`, `linkname`,
+   zero payload), so `tar -xf` alone produces a correct tree. Encrypted archives carry none:
+   a target is a path, a TAR header is cleartext, and writing it there would publish user
+   data next to the entries that exist to hide exactly that. Encrypted archives keep targets
+   in the sealed index only.
+3. **Create links last, after every regular file.** This is a security requirement, not a
+   style preference. Path containment checks operate on strings and never consult the
+   filesystem, so an archive holding `foo -> /etc/cron.d` followed by a file `foo/x` passes
+   every check and still writes outside the output directory - the classic TAR symlink
+   traversal. Writing all files before any link exists closes it regardless of what the
+   targets say.
+
+Links never take part in incremental carry-forward. They store no bytes, so there is nothing
+to reference, and every snapshot restates its links in full.
+
+`counts.symlinks` in the manifest reports how many the archive holds, so a reader that cannot
+recreate them can still say how many it is dropping.
 
 Because ordinals repeat between archives, an entry is addressed by the pair `(a, n)`, not
 by `n` alone. The ordinal has to stay as it was in its own archive, since that is what

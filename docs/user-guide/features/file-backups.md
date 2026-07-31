@@ -58,18 +58,22 @@ paid for it.
 **Every storage adapter can be a directory source.** What differs is how comfortable it is
 to configure and how a restore behaves:
 
-| Adapter | Pick folders by browsing | Restore one file without fetching the whole archive |
-| :--- | :---: | :---: |
-| Local Filesystem | ✅ | ✅ |
-| SFTP | ✅ | ✅ |
-| Rsync (SSH) | ✅ | ✅ |
-| FTP / FTPS | ✅ | ✅ |
-| WebDAV | ✅ | ✅ |
-| Amazon S3 / S3-compatible | ✅ | ✅ |
-| Google Drive | ✅ | ✅ |
-| Dropbox | ✅ | ✅ |
-| Microsoft OneDrive | ✅ | ✅ |
-| SMB / Samba | ✅ | ❌ |
+| Adapter | Pick folders by browsing | Restore one file without fetching the whole archive | Symbolic links |
+| :--- | :---: | :---: | :---: |
+| Local Filesystem | ✅ | ✅ | ✅ |
+| SFTP | ✅ | ✅ | ✅ |
+| Rsync (SSH) | ✅ | ✅ | ✅ |
+| FTP / FTPS | ✅ | ✅ | ⚠️ |
+| WebDAV | ✅ | ✅ | — |
+| Amazon S3 / S3-compatible | ✅ | ✅ | — |
+| Google Drive | ✅ | ✅ | — |
+| Dropbox | ✅ | ✅ | — |
+| Microsoft OneDrive | ✅ | ✅ | — |
+| SMB / Samba | ✅ | ❌ | — |
+
+A dash means the protocol has no symbolic links at all, so there is nothing to preserve.
+⚠️ means links are detected and named in the run log but cannot be stored: FTP has no
+standard way to read a link's target.
 
 ### Pick folders by browsing
 
@@ -218,6 +222,35 @@ An unencrypted archive is a plain TAR: `tar -xf backup.tar` works with no DBacku
 An encrypted one needs the [Recovery Kit](/user-guide/security/recovery-kit), which reads
 it with nothing but Node.js. The layout is specified byte by byte in the
 [Archive Format reference](/developer-guide/reference/archive-format).
+
+### Symbolic links
+
+Symbolic links are backed up **as links**, with their target stored exactly as it was
+written. A relative target stays relative, so it still points at the right place after a
+restore.
+
+The file a link points at is **not** pulled into the backup on its own account. It is
+included only if it happens to sit inside the source folder anyway. This is what makes a
+Let's Encrypt directory restore correctly: `live/` holds the links, `archive/` holds the real
+certificates, and backing up the parent folder captures both in their original relationship.
+
+A link that points outside the source is stored as the link it is, pointing where it always
+pointed. Nothing from outside the folder you selected is ever collected.
+
+Two consequences worth knowing:
+
+- **A link to a folder is stored as a link, not followed.** The folder's contents are backed
+  up only if that folder is itself inside the source. This matches how `tar` and `rsync -a`
+  behave. The run log names every folder link it stored, so a source that is mostly links to
+  data living elsewhere does not look bigger than it is.
+- **Restoring to object storage cannot recreate them.** S3, Google Drive, OneDrive, Dropbox
+  and WebDAV have no symbolic links. Such a restore names every link it had to skip and
+  finishes as *Partial* rather than reporting a success it did not deliver. Restoring to a
+  local path, over SFTP, or as a `.tar.gz` download recreates them properly.
+
+File permissions and ownership are not yet preserved. A restored file gets default
+permissions, so anything relying on a restrictive mode (a private key at `0600`) needs it set
+again after a restore.
 
 ## Restoring
 

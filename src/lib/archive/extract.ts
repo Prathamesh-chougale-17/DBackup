@@ -25,6 +25,7 @@ import {
     IndexDatabaseLine,
     IndexDirectoryLine,
     IndexFileLine,
+    isSymlinkLine,
 } from "./types";
 
 export interface ExtractOptions {
@@ -47,6 +48,14 @@ export interface ExtractResult {
     databaseFiles: { entry: IndexDatabaseLine; path: string }[];
     /** Extracted directory roots. Files land under <root>/<relativePath>. */
     directoryRoots: { entry: IndexDirectoryLine; path: string }[];
+    /**
+     * Symbolic links that could not be created.
+     *
+     * Reported rather than thrown, so one bad link does not cost the caller everything else
+     * that was restored - and reported rather than dropped, because a link missing from a
+     * restored tree is exactly the silence this format change exists to end.
+     */
+    skippedSymlinks: { path: string; reason: string }[];
 }
 
 /**
@@ -125,7 +134,12 @@ export async function extractArchiveFrom(
     }
 
     const rootBySourceId = new Map(directoryRoots.map((r) => [r.entry.src, r.path]));
-    const wantedFiles = index.files.filter((f) => wantedSourceIds.has(f.src));
+    const selectedFiles = index.files.filter((f) => wantedSourceIds.has(f.src));
+
+    // Links are held back here and created at the very end, once every regular file has
+    // landed. See createSymlinks() for why that order is a security property.
+    const symlinks = selectedFiles.filter(isSymlinkLine);
+    const wantedFiles = selectedFiles.filter((f) => !isSymlinkLine(f));
 
     // Grouped by archive first: files carried over from earlier archives of an incremental
     // chain live elsewhere, and opening one sibling at a time bounds peak disk usage on
@@ -172,7 +186,65 @@ export async function extractArchiveFrom(
         }
     }
 
-    return { manifest, index, databaseFiles, directoryRoots };
+    const skippedSymlinks = await createSymlinks(symlinks, rootBySourceId);
+
+    return { manifest, index, databaseFiles, directoryRoots, skippedSymlinks };
+}
+
+/**
+ * Recreates symbolic links, and does it last on purpose.
+ *
+ * A link in an archive is a write primitive aimed at any path on the host. `safeJoin` cannot
+ * stop that on its own: `path.resolve` works on strings and never asks the filesystem, so an
+ * archive holding `foo -> /etc/cron.d` followed by a file `foo/x` passes every containment
+ * check and still writes outside the target. That is the classic tar symlink traversal, and
+ * it is a remote code execution on the DBackup host, not a tidiness problem.
+ *
+ * Creating every link only after the last regular file has been written closes it completely,
+ * whatever the targets say: at the moment a file is written, no link from this archive exists
+ * for its path to travel through. That is the whole defence, so this call must stay after the
+ * file loop - moving it, or interleaving it for tidier code, silently reopens the hole.
+ *
+ * Targets themselves are stored verbatim, including absolute ones. A link's target is content,
+ * not a path this code is about to follow, and a restore to the original location is exactly
+ * where an absolute target is correct.
+ */
+async function createSymlinks(
+    symlinks: readonly (IndexFileLine & { lnk: string })[],
+    rootBySourceId: ReadonlyMap<string, string>
+): Promise<{ path: string; reason: string }[]> {
+    const skipped: { path: string; reason: string }[] = [];
+
+    for (const link of symlinks) {
+        const root = rootBySourceId.get(link.src);
+        if (!root) continue;
+        const target = safeJoin(root, link.p);
+        await fs.mkdir(path.dirname(target), { recursive: true });
+
+        // Anything already at this path was written by the file loop above, which means the
+        // index claims one path is both a link and a real file or directory. No source can be
+        // both, so the index is inconsistent or was tampered with - and the resolution is to
+        // keep the data. Deleting a directory of just-restored files to make room for a link
+        // would destroy the restore, and would hand the traversal back its second step.
+        const existing = await fs.lstat(target).catch(() => undefined);
+        if (existing && !existing.isSymbolicLink()) {
+            skipped.push({ path: link.p, reason: "a file or directory was restored to that path" });
+            continue;
+        }
+
+        try {
+            // An earlier link at the same path is replaced. `unlink` takes the link itself,
+            // never what it points at, so re-running a restore cannot delete real data.
+            if (existing) await fs.unlink(target);
+            await fs.symlink(link.lnk, target);
+        } catch (error: unknown) {
+            // One link that cannot be created must not cost the caller everything else that
+            // was restored successfully. It is reported instead, and the caller decides.
+            skipped.push({ path: link.p, reason: error instanceof Error ? error.message : String(error) });
+        }
+    }
+
+    return skipped;
 }
 
 /** Convenience wrapper for extracting an archive that is already on local disk. */

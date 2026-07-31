@@ -31,7 +31,7 @@ import { archiveIndexVerifier, KeyOverride, resolveBackupKey } from "@/services/
 import { resolveTransferConcurrency } from "@/lib/adapters/transfer-concurrency";
 import { archiveIndexService } from "@/services/backup/archive-index-service";
 import { getTempDir } from "@/lib/temp-dir";
-import { ArchiveIndex, ArchiveManifest, IndexFileLine } from "@/lib/archive/types";
+import { ArchiveIndex, ArchiveManifest, IndexFileLine, partitionSymlinks } from "@/lib/archive/types";
 import { logger } from "@/lib/logging/logger";
 import { wrapError, NotFoundError, ValidationError } from "@/lib/logging/errors";
 import fs from "fs/promises";
@@ -287,6 +287,10 @@ export async function streamFileRestore(input: FileRestoreInput): Promise<NodeJS
     }
 
     const bySrc = new Map(files.map((f) => [f.file, f.src]));
+    // Links carry no bytes, so they are written straight into the tar as symlink members
+    // rather than going through the entry reader. A browser download is therefore always
+    // complete: `tar` recreates them on extraction with nothing else required.
+    const { payloads, symlinks } = partitionSymlinks(files);
     const tarPack = pack();
     const gzip = createGzip();
     tarPack.pipe(gzip);
@@ -300,7 +304,7 @@ export async function streamFileRestore(input: FileRestoreInput): Promise<NodeJS
     // pushed into the stream rather than thrown, since the caller already holds it.
     void (async () => {
         try {
-            await forEachSnapshotFile(archive, files, async (file, content) => {
+            await forEachSnapshotFile(archive, payloads, async (file, content) => {
                 const entry = tarPack.entry({ name: `${bySrc.get(file) ?? file.src}/${file.p}`, size: file.s });
                 let digest: string | undefined;
                 await pipeline(content, hashingStream((d) => { digest = d; }), entry);
@@ -315,6 +319,19 @@ export async function streamFileRestore(input: FileRestoreInput): Promise<NodeJS
                     );
                 }
             });
+
+            // After every regular file, matching how extractArchiveFrom() orders it and for
+            // the same reason: `tar` follows an existing symlink when it writes a file
+            // underneath one, so a link must never precede the files it could swallow.
+            for (const { file, src } of symlinks) {
+                await new Promise<void>((resolve, reject) => {
+                    tarPack.entry(
+                        { name: `${src}/${file.p}`, type: "symlink", linkname: file.lnk, size: 0 },
+                        (err) => (err ? reject(err) : resolve())
+                    );
+                });
+            }
+
             tarPack.finalize();
         } catch (e: unknown) {
             const wrapped = wrapError(e);
@@ -412,6 +429,10 @@ export async function restoreFilesToStorage(
     let restored = 0;
     let restoredBytes = 0;
 
+    // Split before anything runs. Links have no entry to fetch, and they are created after
+    // every file for the same reason extractArchiveFrom() does it that way.
+    const { payloads, symlinks } = partitionSymlinks(files);
+
     // Write-back stages each file independently, so several run at once - the round-trip
     // win when restoring to a network destination. Each target states how many it can take;
     // the files of every target share one pipeline, so the smallest wins. Anything else
@@ -424,7 +445,7 @@ export async function restoreFilesToStorage(
     const sessions = createDestinationSessions(concurrency);
 
     try {
-        await forEachSnapshotFile(archive, files, async (file, content) => {
+        await forEachSnapshotFile(archive, payloads, async (file, content) => {
             const target = targets.get(file.src);
             if (!target) {
                 failed.push({ path: file.p, error: "No restore target resolved for this directory source" });
@@ -456,6 +477,40 @@ export async function restoreFilesToStorage(
                 await fs.unlink(stagePath).catch(() => { });
             }
         }, concurrency);
+
+        // Last, after every file has been uploaded. Not a cosmetic ordering: a destination
+        // that resolves paths through its own filesystem would otherwise let a file land
+        // inside a link created moments earlier, which is the tar traversal problem wearing a
+        // different hat.
+        for (const { file, src } of symlinks) {
+            const target = targets.get(src);
+            if (!target) {
+                failed.push({ path: file.p, error: "No restore target resolved for this directory source" });
+                continue;
+            }
+
+            const remotePath = safeRemoteJoin(target.basePath, file.p);
+            if (!target.adapter.createSymlink) {
+                // Named individually and counted as a failure, which downgrades the restore.
+                // Object storage has no symbolic links, and reporting a complete restore that
+                // is missing them is exactly the silence this whole change exists to end.
+                failed.push({
+                    path: file.p,
+                    error: `'${target.adapter.id}' has no symbolic links, so '${file.p}' -> '${file.lnk}' was not restored`,
+                });
+                continue;
+            }
+
+            try {
+                await target.adapter.createSymlink(target.config, remotePath, file.lnk);
+                restored++;
+                onProgress?.(restored, files.length, file.p);
+            } catch (e: unknown) {
+                const message = e instanceof Error ? e.message : String(e);
+                failed.push({ path: file.p, error: message });
+                log.warn("Failed to restore symlink", { file: file.p, target: target.label }, wrapError(e));
+            }
+        }
     } finally {
         await sessions.close();
         await archive.dispose();

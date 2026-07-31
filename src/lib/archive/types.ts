@@ -71,10 +71,18 @@ export interface ArchiveManifest {
     counts: {
         databases: number;
         directorySources: number;
-        /** Logical file count across all directory sources. */
+        /** Logical file count across all directory sources. Includes symbolic links. */
         files: number;
         /** Physical entry count, lower than `files` when bundling is active. */
         entries: number;
+        /**
+         * Symbolic links among `files`. Absent on archives written before links were stored.
+         *
+         * A count, not a listing - the manifest is cleartext, so it may carry the shape of the
+         * archive but never its contents. It exists so a reader that cannot restore links can
+         * still say how many it is dropping instead of silently omitting them.
+         */
+        symlinks?: number;
     };
     /** Logical uncompressed total across databases and directory files. */
     totalSize: number;
@@ -159,14 +167,29 @@ export interface IndexFileLine {
     src: string;
     /** Path relative to the directory source root, POSIX separators. */
     p: string;
-    /** Uncompressed size. */
+    /** Uncompressed size. Always 0 for a symbolic link. */
     s: number;
     /** ISO 8601 mtime. */
     m: string;
     /** SHA-256 of the plaintext content. Safe to store here because the index is sealed. */
     h?: string;
-    /** Ordinal of the physical entry holding this file's bytes, within archive `a`. */
-    n: number;
+    /**
+     * Symbolic link target, raw and unresolved. Its presence is what marks this line as a
+     * link rather than a file, and a link has no bytes - so `s` is 0 and `n` is absent.
+     *
+     * A target is a path and therefore user data, which is why it lives here in the sealed
+     * index rather than in a tar header. Unencrypted archives additionally carry a real tar
+     * symlink member, where publishing the target costs nothing that the member names have
+     * not already given away.
+     */
+    lnk?: string;
+    /**
+     * Ordinal of the physical entry holding this file's bytes, within archive `a`.
+     *
+     * Absent exactly when `lnk` is set. Every reader has to handle that: resolving an entry
+     * for a line that has none is what would turn a symlink into a crash mid-restore.
+     */
+    n?: number;
     /**
      * Archive holding this file's bytes. Absent means the archive this index belongs to.
      *
@@ -210,6 +233,35 @@ export function entryKey(archive: string | undefined, ordinal: number): string {
     return `${archive ?? ""}#${ordinal}`;
 }
 
+/**
+ * Whether an index line describes a symbolic link rather than a file with bytes.
+ *
+ * The single place that decides what "is a symlink" means, so the rule cannot drift between
+ * the writer, the readers and the restore paths. Every caller that is about to resolve a
+ * physical entry has to ask this first - a link has none.
+ */
+export function isSymlinkLine(file: IndexFileLine): file is IndexFileLine & { lnk: string } {
+    return file.lnk !== undefined;
+}
+
+/**
+ * Splits index lines into the ones carrying bytes and the symbolic links among them.
+ *
+ * The returned links have `lnk` narrowed to a string, so a caller cannot forget that a link
+ * always has a target and end up writing `undefined` into a restored tree.
+ */
+export function partitionSymlinks<T extends { file: IndexFileLine }>(
+    items: readonly T[]
+): { payloads: T[]; symlinks: (Omit<T, "file"> & { file: IndexFileLine & { lnk: string } })[] } {
+    const payloads: T[] = [];
+    const symlinks: (Omit<T, "file"> & { file: IndexFileLine & { lnk: string } })[] = [];
+    for (const item of items) {
+        if (isSymlinkLine(item.file)) symlinks.push({ ...item, file: item.file });
+        else payloads.push(item);
+    }
+    return { payloads, symlinks };
+}
+
 /** Parsed index, grouped for lookup. */
 export interface ArchiveIndex {
     header: IndexHeaderLine;
@@ -233,6 +285,11 @@ export interface SourceFileEntry {
     mtime: string;
     /** SHA-256 of the plaintext content. */
     checksum?: string;
+    /**
+     * Raw symbolic link target. Set means nothing was collected to disk under `path`, so the
+     * writer stores the target instead of reading bytes that are not there.
+     */
+    linkTarget?: string;
 }
 
 export type ArchiveSourceEntry =

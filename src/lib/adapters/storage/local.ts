@@ -1,4 +1,5 @@
-import { StorageAdapter, FileInfo, DirectoryBrowseEntry } from "@/lib/core/interfaces";
+import { StorageAdapter, FileInfo, DirectoryBrowseEntry, ListTreeOptions, ListTreeResult, PrunedDirectory } from "@/lib/core/interfaces";
+import { canPruneDirectory } from "@/lib/exclude-patterns";
 import { calculateFileChecksum } from "@/lib/crypto/checksum";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { LocalStorageSchema } from "@/lib/adapters/definitions";
@@ -42,6 +43,114 @@ function resolveSafePath(basePath: string, relativePath: string): string {
         throw new AdapterError("local-filesystem", "path-validation", `Access denied: Illegal path traversal detected. Base: ${resolvedBase}, Target: ${resolvedTarget}`);
     }
     return resolvedTarget;
+}
+
+/**
+ * Walks a local source tree for collection: skipping what is excluded, reporting as it goes,
+ * and stopping when asked.
+ *
+ * Deliberately separate from `list()`, which stays as it is. `list()` also serves retention,
+ * integrity checks and the destination browser, where the tree is a flat directory of backup
+ * files - none of this applies there, and a symbolic link has no meaning in that context.
+ *
+ * Uses `readdir` without `recursive`, one directory at a time, for two reasons that both
+ * matter here. Node's recursive walk cannot be interrupted and reports nothing until it has
+ * read everything, so a large source looked frozen and ignored a cancel. And it silently
+ * refuses to descend into a symlinked directory, which is correct behaviour hidden behind a
+ * flag - done explicitly, the link gets recorded on the way past instead of vanishing.
+ */
+async function walkLocalTree(
+    basePath: string,
+    startDir: string,
+    options?: ListTreeOptions
+): Promise<ListTreeResult> {
+    const files: FileInfo[] = [];
+    const pruned: PrunedDirectory[] = [];
+    let directoriesRead = 0;
+
+    const walk = async (relDir: string): Promise<void> => {
+        options?.signal?.throwIfAborted();
+
+        const currentDir = relDir ? path.join(startDir, relDir) : startDir;
+        let entries;
+        try {
+            entries = await fs.readdir(currentDir, { withFileTypes: true });
+        } catch (error) {
+            // A directory that cannot be read at all is the walk's own root failing, or one
+            // subtree the user has no access to. The root has to propagate so the caller can
+            // report an unusable source; a subtree is skipped, matching every other adapter's
+            // walker.
+            if (relDir === "") throw error;
+            return;
+        }
+
+        directoriesRead++;
+        options?.onProgress?.({
+            files: files.length,
+            directories: directoriesRead,
+            prunedDirectories: pruned.length,
+            currentPath: relDir,
+        });
+
+        const subdirectories: string[] = [];
+        for (const entry of entries) {
+            const childRel = relDir ? `${relDir}/${entry.name}` : entry.name;
+            const fullPath = path.join(currentDir, entry.name);
+
+            // Checked before isDirectory(), because a Dirent for a link to a directory
+            // answers isSymbolicLink() and nothing else - asking the other way round is how
+            // these went missing in the first place.
+            if (entry.isSymbolicLink()) {
+                let target: string;
+                try {
+                    target = await fs.readlink(fullPath);
+                } catch (error) {
+                    // The link exists but its target cannot be read, which is not the same as
+                    // a dangling link (readlink answers fine for those). Nothing to store, so
+                    // it is reported as unsupported rather than dropped.
+                    log.warn("Could not read symlink target", { path: childRel }, wrapError(error));
+                    continue;
+                }
+                const stats = await fs.lstat(fullPath).catch(() => undefined);
+                files.push({
+                    name: entry.name,
+                    path: path.relative(basePath, fullPath),
+                    size: 0,
+                    lastModified: stats?.mtime ?? new Date(0),
+                    linkTarget: target,
+                });
+                continue;
+            }
+
+            if (entry.isDirectory()) {
+                const pattern = canPruneDirectory(childRel, options?.excludePatterns);
+                if (pattern) {
+                    pruned.push({ path: childRel, pattern });
+                    continue;
+                }
+                subdirectories.push(childRel);
+                continue;
+            }
+
+            if (!entry.isFile()) continue;
+
+            const stats = await fs.stat(fullPath).catch(() => undefined);
+            if (!stats) continue;
+            files.push({
+                name: entry.name,
+                path: path.relative(basePath, fullPath),
+                size: stats.size,
+                lastModified: stats.mtime,
+            });
+        }
+
+        // Depth-first and serial. Local directory reads hit the page cache rather than a
+        // network round trip, so there is nothing here for parallelism to hide.
+        for (const child of subdirectories) await walk(child);
+    };
+
+    await walk("");
+    return { files, pruned };
 }
 
 export const LocalFileSystemAdapter: StorageAdapter = {
@@ -203,6 +312,31 @@ export const LocalFileSystemAdapter: StorageAdapter = {
             log.error("Local list failed", { remotePath }, wrapError(error));
             throw error;
         }
+    },
+
+    async listTree(config: { basePath: string }, remotePath: string = "", options?: ListTreeOptions): Promise<ListTreeResult> {
+        const dirPath = resolveSafePath(config.basePath, remotePath);
+        try {
+            await fs.access(dirPath);
+        } catch {
+            // A source path that is not there yet lists as empty, same as `list()` does for a
+            // missing subfolder. The runner reports the empty collection either way.
+            return { files: [], pruned: [] };
+        }
+        return walkLocalTree(path.resolve(config.basePath), dirPath, options);
+    },
+
+    async createSymlink(config: { basePath: string }, remotePath: string, target: string): Promise<void> {
+        const linkPath = resolveSafePath(config.basePath, remotePath);
+        await fs.mkdir(path.dirname(linkPath), { recursive: true });
+        // Replaced rather than merged. `symlink` fails on an existing path, and a restore that
+        // stops at the first link the target already has is not a restore. `unlink` is used
+        // deliberately instead of `rm -r`: it removes the link itself, never what it points
+        // at, so re-running a restore cannot walk through an old link and delete real data.
+        await fs.unlink(linkPath).catch(() => { });
+        // `target` is written verbatim. Resolving it would break every relative link, which is
+        // the common case - `../../archive/cert1.pem` only means anything from where it lives.
+        await fs.symlink(target, linkPath);
     },
 
     async browseDirectories(config: { basePath: string }, subPath: string = ""): Promise<DirectoryBrowseEntry[]> {

@@ -1,4 +1,4 @@
-import { StorageAdapter, StorageSession, FileInfo, DirectoryBrowseEntry } from "@/lib/core/interfaces";
+import { StorageAdapter, StorageSession, FileInfo, DirectoryBrowseEntry, ListTreeResult } from "@/lib/core/interfaces";
 import { FTPSchema } from "@/lib/adapters/definitions";
 import { createConnectionPool } from "@/lib/adapters/storage/common/connection-pool";
 import { Client, FileInfo as FTPFileInfo } from "basic-ftp";
@@ -166,6 +166,117 @@ async function performFtpUpload(
         log.error("FTP upload failed", { host: config.host, remotePath }, wrapError(error));
         if (onLog && error instanceof Error) onLog(`FTP upload failed: ${error.message}`, "error", "storage", error.stack);
         return false;
+    }
+}
+
+/**
+ * Recursively lists an FTP tree, separating out the symbolic links it cannot describe.
+ *
+ * One walker behind both `list()` and `listTree()`, so retention and collection can never
+ * disagree about what is in a directory. Only the reporting differs: `list()` returns files
+ * and nothing else, exactly as it always has.
+ */
+async function walkFtpTree(
+    config: FTPConfig,
+    dir: string
+): Promise<{ files: FileInfo[]; symlinkPaths: string[] }> {
+    let client: Client | null = null;
+    try {
+        client = await connectFTP(config);
+
+        const normalize = (p: string) => p.replace(/\\/g, "/");
+
+        const prefix = config.pathPrefix ? normalize(config.pathPrefix) : "";
+        const startDir = prefix
+            ? path.posix.join(prefix, dir)
+            : (dir || "/");
+
+        const files: FileInfo[] = [];
+        const symlinkPaths: string[] = [];
+        let warnedAboutMissingTimestamp = false;
+
+        /** Path relative to the adapter's configured root, the convention every adapter uses. */
+        const toAdapterPath = (fullPath: string): string => {
+            let relativePath = normalize(fullPath);
+            if (prefix && relativePath.startsWith(prefix)) {
+                relativePath = relativePath.substring(prefix.length);
+            }
+            return relativePath.startsWith("/") ? relativePath.substring(1) : relativePath;
+        };
+
+        const walk = async (currentDir: string) => {
+            let items: FTPFileInfo[];
+            try {
+                items = await client!.list(currentDir);
+            } catch (error: unknown) {
+                // Root directory listing failure: propagate so the stats cache uses DB fallback.
+                if (currentDir === startDir) throw error;
+                // Sub-directory listing failure: skip silently and continue the walk.
+                return;
+            }
+
+            for (const item of items) {
+                // Skip . and .. entries
+                if (item.name === "." || item.name === "..") continue;
+
+                const fullPath = path.posix.join(currentDir, item.name);
+
+                if (item.isDirectory) {
+                    await walk(fullPath);
+                } else if (item.isSymbolicLink) {
+                    // Recorded, not stored. `LIST` output is free-form per server and `MLSD`
+                    // has no facet for a link target, so there is nothing dependable to put in
+                    // the archive - and a guessed target is worse than an honest gap.
+                    symlinkPaths.push(toAdapterPath(fullPath));
+                } else if (item.isFile) {
+                    const relativePath = toAdapterPath(fullPath);
+
+                    // modifiedAt is only available when the server supports MLSD.
+                    // Fall back to parsing the timestamp from the filename (DBackup naming
+                    // templates always embed yyyy-MM-dd_HH-mm-ss). Without a real timestamp
+                    // all files would share new Date() and collapse into one daily GFS bucket.
+                    let lastModified = item.modifiedAt;
+                    if (!lastModified) {
+                        lastModified = extractDateFromFilename(item.name);
+                        if (!warnedAboutMissingTimestamp) {
+                            log.warn(
+                                "FTP server does not provide file modification times (no MLSD). " +
+                                "Falling back to date extracted from the backup filename. " +
+                                "This requires the Naming Template to include a date pattern (e.g. yyyy-MM-dd). " +
+                                "If your template does not contain a date, GFS retention will not work correctly. " +
+                                "Enable MLSD on your FTP server to remove this dependency.",
+                                { host: config.host, dir }
+                            );
+                            warnedAboutMissingTimestamp = true;
+                        }
+                        if (!lastModified) {
+                            log.warn(
+                                "FTP: could not parse a date from the filename. " +
+                                "The Naming Template likely does not contain a date pattern (yyyy-MM-dd). " +
+                                "GFS retention will treat this file as the newest and may delete older backups incorrectly.",
+                                { name: item.name }
+                            );
+                            lastModified = new Date();
+                        }
+                    }
+
+                    files.push({
+                        name: item.name,
+                        path: relativePath,
+                        size: item.size,
+                        lastModified,
+                    });
+                }
+            }
+        };
+
+        await walk(startDir);
+        return { files, symlinkPaths };
+    } catch (error: unknown) {
+        log.error("FTP list failed", { host: config.host, dir }, wrapError(error));
+        throw error;
+    } finally {
+        if (client) client.close();
     }
 }
 
@@ -344,94 +455,20 @@ export const FTPAdapter: StorageAdapter = {
     },
 
     async list(config: FTPConfig, dir: string = ""): Promise<FileInfo[]> {
-        let client: Client | null = null;
-        try {
-            client = await connectFTP(config);
+        return (await walkFtpTree(config, dir)).files;
+    },
 
-            const normalize = (p: string) => p.replace(/\\/g, "/");
-
-            const prefix = config.pathPrefix ? normalize(config.pathPrefix) : "";
-            const startDir = prefix
-                ? path.posix.join(prefix, dir)
-                : (dir || "/");
-
-            const files: FileInfo[] = [];
-            let warnedAboutMissingTimestamp = false;
-
-            const walk = async (currentDir: string) => {
-                let items: FTPFileInfo[];
-                try {
-                    items = await client!.list(currentDir);
-                } catch (error: unknown) {
-                    // Root directory listing failure: propagate so the stats cache uses DB fallback.
-                    if (currentDir === startDir) throw error;
-                    // Sub-directory listing failure: skip silently and continue the walk.
-                    return;
-                }
-
-                for (const item of items) {
-                    // Skip . and .. entries
-                    if (item.name === "." || item.name === "..") continue;
-
-                    const fullPath = path.posix.join(currentDir, item.name);
-
-                    if (item.isDirectory) {
-                        await walk(fullPath);
-                    } else if (item.isFile) {
-                        // Calculate relative path (strip prefix)
-                        let relativePath = normalize(fullPath);
-                        if (prefix && relativePath.startsWith(prefix)) {
-                            relativePath = relativePath.substring(prefix.length);
-                        }
-                        if (relativePath.startsWith("/")) relativePath = relativePath.substring(1);
-
-                        // modifiedAt is only available when the server supports MLSD.
-                        // Fall back to parsing the timestamp from the filename (DBackup naming
-                        // templates always embed yyyy-MM-dd_HH-mm-ss). Without a real timestamp
-                        // all files would share new Date() and collapse into one daily GFS bucket.
-                        let lastModified = item.modifiedAt;
-                        if (!lastModified) {
-                            lastModified = extractDateFromFilename(item.name);
-                            if (!warnedAboutMissingTimestamp) {
-                                log.warn(
-                                    "FTP server does not provide file modification times (no MLSD). " +
-                                    "Falling back to date extracted from the backup filename. " +
-                                    "This requires the Naming Template to include a date pattern (e.g. yyyy-MM-dd). " +
-                                    "If your template does not contain a date, GFS retention will not work correctly. " +
-                                    "Enable MLSD on your FTP server to remove this dependency.",
-                                    { host: config.host, dir }
-                                );
-                                warnedAboutMissingTimestamp = true;
-                            }
-                            if (!lastModified) {
-                                log.warn(
-                                    "FTP: could not parse a date from the filename. " +
-                                    "The Naming Template likely does not contain a date pattern (yyyy-MM-dd). " +
-                                    "GFS retention will treat this file as the newest and may delete older backups incorrectly.",
-                                    { name: item.name }
-                                );
-                                lastModified = new Date();
-                            }
-                        }
-
-                        files.push({
-                            name: item.name,
-                            path: relativePath,
-                            size: item.size,
-                            lastModified,
-                        });
-                    }
-                }
-            };
-
-            await walk(startDir);
-            return files;
-        } catch (error: unknown) {
-            log.error("FTP list failed", { host: config.host, dir }, wrapError(error));
-            throw error;
-        } finally {
-            if (client) client.close();
-        }
+    /**
+     * Collection walk. Identical to `list()`, except that it reports the symbolic links it
+     * had to leave behind.
+     *
+     * FTP has no standard way to read a link's target: `LIST` output is free-form per server
+     * and `MLSD` has no facet for it, so there is nothing dependable to store. Rather than
+     * pretend, the links are named and the run says out loud that they are not in the backup.
+     */
+    async listTree(config: FTPConfig, dir: string = ""): Promise<ListTreeResult> {
+        const { files, symlinkPaths } = await walkFtpTree(config, dir);
+        return { files, pruned: [], ...(symlinkPaths.length > 0 ? { unsupportedSymlinks: symlinkPaths } : {}) };
     },
 
     async delete(config: FTPConfig, remotePath: string): Promise<boolean> {

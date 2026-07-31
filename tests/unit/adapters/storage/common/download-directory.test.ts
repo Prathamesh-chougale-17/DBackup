@@ -442,3 +442,69 @@ describe("per-file transfer progress", () => {
         expect(typeof downloadCall[3]).toBe("function");
     });
 });
+
+describe("symbolic links during collection", () => {
+    beforeEach(() => vi.clearAllMocks());
+
+    function makeLink(path: string, target: string): FileInfo {
+        return { name: path.split("/").pop()!, path, size: 0, lastModified: new Date("2026-01-01"), linkTarget: target };
+    }
+
+    it("carries a link through without downloading anything for it", async () => {
+        const adapter = makeAdapter([
+            makeFile("Job/archive/cert1.pem", 100),
+            makeLink("Job/live/cert.pem", "../archive/cert1.pem"),
+        ]);
+
+        const result = await downloadDirectoryGeneric(adapter, {}, "Job", "/local/job");
+
+        // Downloading a link would fetch whatever it points at and store those bytes under the
+        // link's own path, which is a different tree than the one being backed up.
+        expect((adapter.download as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1]))
+            .toEqual(["Job/archive/cert1.pem"]);
+
+        const link = result.entries.find((e) => e.relativePath === "live/cert.pem")!;
+        expect(link.linkTarget).toBe("../archive/cert1.pem");
+        expect(link.size).toBe(0);
+        expect(link.unchanged, "a link is never marked unchanged - it does not carry forward").toBeUndefined();
+    });
+
+    it("never asks shouldDownload about a link", async () => {
+        // If it did and the answer were "unchanged", the link would be queued for carry-forward
+        // and then dropped by carryForward(), vanishing from the incremental entirely.
+        const adapter = makeAdapter([makeLink("Job/live/cert.pem", "../archive/cert1.pem")]);
+        const shouldDownload = vi.fn().mockReturnValue(false);
+
+        const result = await downloadDirectoryGeneric(
+            adapter, {}, "Job", "/local/job", undefined, undefined, undefined, { shouldDownload }
+        );
+
+        expect(shouldDownload).not.toHaveBeenCalled();
+        expect(result.entries[0].linkTarget).toBe("../archive/cert1.pem");
+    });
+
+    it("still applies exclude patterns to links", async () => {
+        const adapter = makeAdapter([makeLink("Job/live/cert.pem", "../archive/cert1.pem")]);
+
+        const result = await downloadDirectoryGeneric(adapter, {}, "Job", "/local/job", ["live/**"]);
+
+        expect(result.entries).toEqual([]);
+    });
+
+    it("names the links an adapter could not describe instead of dropping them silently", async () => {
+        const adapter = makeAdapter([makeFile("Job/a.txt", 10)]);
+        adapter.listTree = vi.fn().mockResolvedValue({
+            files: [makeFile("Job/a.txt", 10)],
+            pruned: [],
+            unsupportedSymlinks: ["live/cert.pem", "live/chain.pem"],
+        });
+        const onLog = vi.fn();
+
+        await downloadDirectoryGeneric(adapter, {}, "Job", "/local/job", undefined, undefined, onLog);
+
+        const warning = onLog.mock.calls.find((c) => c[1] === "warning");
+        expect(warning?.[0]).toContain("2 symbolic link(s) could not be collected");
+        expect(warning?.[3], "the paths matter - a count tells nobody what is missing")
+            .toContain("live/cert.pem");
+    });
+});

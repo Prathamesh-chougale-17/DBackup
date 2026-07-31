@@ -35,6 +35,14 @@ export interface BrowseEntry {
     checksum?: string;
     /** Number of files beneath this entry. Directories only. */
     fileCount?: number;
+    /**
+     * Symbolic link target, when this entry is a link. Files only.
+     *
+     * `type` stays "file" rather than gaining a third value: a link is selectable and
+     * restorable exactly like a file, and widening the union would ripple through the tree's
+     * selection logic for a distinction that is purely how it is drawn.
+     */
+    link?: string;
 }
 
 /** Normalizes a browse prefix to "" or "some/dir/". */
@@ -72,6 +80,7 @@ export function browseLevel(index: ArchiveIndex, jobSourceId: string, prefix?: s
                 size: file.s,
                 mtime: file.m,
                 ...(file.h ? { checksum: file.h } : {}),
+                ...(file.lnk !== undefined ? { link: file.lnk } : {}),
             });
             continue;
         }

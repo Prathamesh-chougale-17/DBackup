@@ -1546,7 +1546,13 @@ function commandList(archivePath, hexKey) {
             console.log(`\nDirectory source: ${dir.label}`);
             console.log(`  id: ${dir.src}  files: ${dir.fileCount}  size: ${formatBytes(dir.totalSize)}`);
             for (const file of index.files.filter((f) => f.src === dir.src)) {
-                console.log(`  ${formatBytes(file.s).padStart(10)}  ${file.m}  ${file.p}`);
+                // A link's size is always 0, so printing it says nothing. The target is the
+                // content, so that is what belongs on the line.
+                const shown = file.lnk !== undefined
+                    ? `${file.p} -> ${file.lnk}`
+                    : file.p;
+                const size = file.lnk !== undefined ? "symlink" : formatBytes(file.s);
+                console.log(`  ${size.padStart(10)}  ${file.m}  ${shown}`);
             }
         }
     } finally {
@@ -1582,6 +1588,13 @@ async function commandExtract(archivePath, outputDir, hexKey, patterns) {
             extracted++;
         }
 
+        // Symbolic links are collected on the way past and created at the very end. That
+        // order is a security property, not tidiness: path checks work on strings and never
+        // ask the filesystem, so an archive holding "foo -> /etc" followed by a file "foo/x"
+        // passes every check and still writes outside outputDir. With no link from this
+        // archive present while files are being written, there is nothing to write through.
+        const pendingSymlinks = [];
+
         for (const file of archive.index.files) {
             if (!matchesAny(file.p, patterns)) continue;
 
@@ -1590,6 +1603,13 @@ async function commandExtract(archivePath, outputDir, hexKey, patterns) {
             const root = path.resolve(outputDir);
             if (target !== root && !target.startsWith(root + path.sep)) {
                 console.error(`SKIPPED (unsafe path): ${file.p}`);
+                continue;
+            }
+
+            // A symbolic link has no entry to resolve - its whole content is the target
+            // string in the index.
+            if (file.lnk !== undefined) {
+                pendingSymlinks.push({ target, linkTarget: file.lnk });
                 continue;
             }
 
@@ -1615,6 +1635,16 @@ async function commandExtract(archivePath, outputDir, hexKey, patterns) {
                     continue;
                 }
             }
+            extracted++;
+            reportProgress(extracted, total);
+        }
+
+        for (const link of pendingSymlinks) {
+            fs.mkdirSync(path.dirname(link.target), { recursive: true });
+            // Removed first: symlink() fails on an existing path. unlink takes the link
+            // itself, never what it points at, so re-running cannot delete real data.
+            try { fs.unlinkSync(link.target); } catch { /* not there, which is the normal case */ }
+            fs.symlinkSync(link.linkTarget, link.target);
             extracted++;
             reportProgress(extracted, total);
         }

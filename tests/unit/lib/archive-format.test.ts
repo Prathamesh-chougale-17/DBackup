@@ -252,7 +252,7 @@ describe("encrypted archives leak nothing in cleartext", () => {
         const manifest = await readArchiveManifest(source);
         const index = await readArchiveIndex(source, manifest, { masterKey: MASTER_KEY });
         const file = index.files.find((f) => f.p === "big/payload.bin")!;
-        const entry = index.entries.get(entryKey(file.a, file.n))!;
+        const entry = index.entries.get(entryKey(file.a, file.n!))!;
 
         const raw = await fs.readFile(archivePath);
         raw[entry.off + 10] ^= 0xff;
@@ -323,7 +323,7 @@ describe("files already in a compressed format are stored as-is", () => {
 
         const entryFor = (relPath: string) => {
             const line = result.index.files.find((f) => f.p === relPath)!;
-            return result.index.entries.get(entryKey(line.a, line.n))!;
+            return result.index.entries.get(entryKey(line.a, line.n!))!;
         };
 
         expect(entryFor("media/holiday.jpg").comp).toBeUndefined();
@@ -373,7 +373,7 @@ describe("files already in a compressed format are stored as-is", () => {
 
         const thumb = result.index.files.find((f) => f.p === "thumbs/small.jpg")!;
         expect(thumb.o, "small files belong in a bundle regardless of their format").toBeDefined();
-        expect(result.index.entries.get(entryKey(thumb.a, thumb.n))!.comp).toBe("GZIP");
+        expect(result.index.entries.get(entryKey(thumb.a, thumb.n!))!.comp).toBe("GZIP");
     });
 
     it("reports what it skipped, and nothing when the job has no compression", async () => {

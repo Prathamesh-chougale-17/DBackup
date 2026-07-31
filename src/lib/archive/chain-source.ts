@@ -19,7 +19,7 @@ import { openStorageArchiveSource, ManagedArchiveSource } from "./storage-source
 import { openArchiveEntry, groupFilesByEntry, readArchiveManifest } from "./reader";
 import { readAll } from "./sources";
 import { createConcurrencyGate } from "@/lib/concurrency";
-import { ArchiveByteSource, ArchiveIndex, ArchiveManifest, IndexFileLine } from "./types";
+import { ArchiveByteSource, ArchiveIndex, ArchiveManifest, IndexFileLine, isSymlinkLine } from "./types";
 
 export interface OpenedChainArchive {
     source: ArchiveByteSource;
@@ -133,7 +133,13 @@ export async function forEachSnapshotFile(
     visit: (file: IndexFileLine, content: NodeJS.ReadableStream) => Promise<void>,
     concurrency = 1
 ): Promise<void> {
-    for (const [archiveName, group] of groupFilesByArchive(files as { file: IndexFileLine }[])) {
+    // Symbolic links have no entry to open - their content is the target in the index, and
+    // every caller handles them separately, after the files. Filtered here as well, because a
+    // single caller that forgot would ask for entry `undefined` and take the whole restore
+    // down with it rather than losing one link.
+    const withPayload = files.filter((f) => !isSymlinkLine(f.file));
+
+    for (const [archiveName, group] of groupFilesByArchive(withPayload as { file: IndexFileLine }[])) {
         // The snapshot's own archive is already open; siblings are opened and released
         // one at a time.
         const opened: Pick<OpenedChainArchive, "source" | "manifest" | "masterKey"> & { dispose?: () => Promise<void> } =

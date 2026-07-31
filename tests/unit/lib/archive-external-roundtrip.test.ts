@@ -169,7 +169,7 @@ describe.skipIf(!hasTar)("archive round-trip through external tools", () => {
 
         const entryFor = (rel: string) => {
             const line = index.files.find((f) => f.p === rel)!;
-            return index.entries.get(entryKey(line.a, line.n))!;
+            return index.entries.get(entryKey(line.a, line.n!))!;
         };
 
         // The manifest still names the job's setting. Per-entry `comp` is what a reader has

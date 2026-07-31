@@ -15,6 +15,7 @@ import {
     entryKey,
     IndexEntryLine,
     IndexFileLine,
+    isSymlinkLine,
 } from "./types";
 
 /** Identifies a file within a snapshot. Paths are only unique per directory source. */
@@ -43,11 +44,18 @@ export function carryForward(
     for (const line of previous.files) {
         if (!keep.has(fileKey(line.src, line.p))) continue;
 
+        // A symbolic link stores no bytes, so there is nothing to point back at and nothing
+        // saved by trying. Every snapshot restates its links in full, which costs a few dozen
+        // bytes each and keeps them out of the chain entirely. Guarded here as well as at the
+        // caller: without it `entryKey(archive, undefined)` would look up ordinal NaN and fail
+        // the whole incremental with a bogus "missing entry".
+        if (isSymlinkLine(line)) continue;
+
         // A line with no `a` lives in the predecessor itself. One that already has `a`
         // was carried before and keeps pointing further back, so chains never nest.
         const archive = line.a ?? previousArchive;
         files.push({ ...line, a: archive });
-        neededEntries.set(entryKey(archive, line.n), line.a);
+        neededEntries.set(entryKey(archive, line.n!), line.a);
     }
 
     const entries: IndexEntryLine[] = [];

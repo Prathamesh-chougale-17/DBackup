@@ -7,10 +7,29 @@ All notable changes to DBackup are documented here.
 
 ### 🐛 Bug Fixes
 
+- **file backups**: Symbolic links in a directory source were silently dropped. Nothing in the run log mentioned them, so the backup reported success and was incomplete - which only surfaced during a restore. Most visibly with Nginx Proxy Manager, where `letsencrypt/live/` holds only links into `letsencrypt/archive/`, leaving the restored instance unable to start. Links are now backed up as links, with their target preserved exactly, on Local, SFTP and Rsync sources. ([#135](https://github.com/Skyfay/DBackup/issues/135))
 - **MSSQL**: Restoring onto a database whose name contains a hyphen, dot or space failed immediately with `Invalid database name`, even though the same database was listed and backed up without complaint. ([#133](https://github.com/Skyfay/DBackup/issues/133))
+
+### 🎨 Improvements
+
+- **file backups**: The collection log now counts symbolic links separately from files, and names every link a source could not hand over instead of leaving it out in silence. FTP sources report their links this way, since the protocol offers no dependable way to read a link's target.
+- **restore**: Restoring to a destination without symbolic links (S3, Google Drive, OneDrive, Dropbox, WebDAV) names each link it cannot recreate and finishes as `Partial`, rather than reporting a complete restore. Restoring to a local path, over SFTP, or as a `.tar.gz` download recreates them.
+- **storage explorer**: Symbolic links are shown in the backup file tree with their target, instead of appearing as empty files.
+- **Local Filesystem**: Directory sources are now collected with a walker that reports progress while it scans, prunes excluded folders instead of listing and discarding them, and reacts to a cancelled run immediately.
+
+### 🔄 Changed
+
+- **archive format**: The index gained an `lnk` field for symbolic link targets, and the manifest a `counts.symlinks`. Both are additive - older backups stay readable, and a reader that does not know the field behaves exactly as before. Unencrypted archives additionally carry a real TAR symlink member, so `tar -xf` still produces a correct tree. Encrypted archives keep targets in the sealed index alone, because a target is a path and a TAR header is cleartext.
+
+### 📝 Documentation
+
+- **archive format**: Documented `lnk`, `counts.symlinks`, the TAR symlink member rule for unencrypted archives, and the requirement that any extractor create links only after every regular file - which is what closes the TAR symlink traversal hole.
+- **file backups**: New section on what symbolic links do and do not include, which adapters support them, and the fact that permissions are not yet preserved.
 
 ### 🧪 Tests
 
+- **archive**: Added symbolic link coverage - round trips through encrypted and unencrypted archives, the target staying out of the clear when encrypted, a foreign `tar` reading the link, path traversal through a restored link, and links being restated rather than carried forward in an incremental chain.
+- **Local Filesystem**: Added coverage for the collection walker: file links, folder links that are recorded but not descended into, and dangling links.
 - **MSSQL**: Added coverage for which database names are accepted for restore, for bracket quoting, and for the file name derived when a restore relocates its data files.
 
 ### 🐳 Docker

@@ -286,6 +286,11 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
             }
 
             for (const e of result.entries) {
+                // A symbolic link has no bytes anywhere to point back at, so it is never
+                // carried - every snapshot restates its links in full. Guarded even though the
+                // collection never marks one unchanged, because the cost of being wrong here
+                // is a link that silently disappears from an incremental.
+                if (e.linkTarget !== undefined) continue;
                 // Not transferred, so its bytes stay where they already are.
                 if (e.unchanged) carriedKeys.add(fileKey(source.jobSourceId, e.relativePath));
             }
@@ -297,7 +302,11 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
             // Hashing is a second full read of everything just collected. Done one file at a
             // time with nothing reported, it left the run looking finished-but-frozen for as
             // long as the source was large - the last silent stretch of the collect phase.
-            const toHash = result.entries.filter((e) => !e.unchanged);
+            //
+            // Symbolic links are left out: nothing was collected under their path, so hashing
+            // one means reading a file that is not there. Their content is the target string,
+            // which the index already carries in full.
+            const toHash = result.entries.filter((e) => !e.unchanged && e.linkTarget === undefined);
             let hashed = 0;
             ctx.updateDetail(`${label}: hashing ${toHash.length} file(s)...`);
             const checksums = await mapWithConcurrency(toHash, HASH_CONCURRENCY, async (e) => {
@@ -334,6 +343,19 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
                 });
             });
 
+            // Restated in every snapshot, full or incremental. A link is a path string of a few
+            // dozen bytes, so carrying it forward would save nothing and cost the entire chain
+            // a special case in exchange.
+            const symlinkEntries = result.entries.filter((e) => e.linkTarget !== undefined);
+            for (const e of symlinkEntries) {
+                fileIndex.push({
+                    path: e.relativePath,
+                    size: 0,
+                    mtime: e.lastModified.toISOString(),
+                    linkTarget: e.linkTarget,
+                });
+            }
+
             if (plan.type === "incremental") {
                 const carriedHere = result.entries.length - fileIndex.length;
                 ctx.log(
@@ -353,7 +375,16 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
 
             dirDone++;
             setPhaseProgress(dirDone, dirTotal);
-            ctx.log(`${logPrefix} Collected ${result.files} file(s), ${formatBytes(result.bytes)}`, 'success', 'storage');
+            // Links are counted apart from files rather than folded in. They restore to
+            // something entirely different, and a run that stored 18 of them should say so
+            // where anyone reading the history will see it.
+            const symlinkSuffix = symlinkEntries.length > 0
+                ? ` and ${symlinkEntries.length} symlink(s)`
+                : '';
+            ctx.log(
+                `${logPrefix} Collected ${result.files - symlinkEntries.length} file(s)${symlinkSuffix}, ${formatBytes(result.bytes)}`,
+                'success', 'storage'
+            );
         }
 
         // ── Combine everything into one archive ────────────────────────────────────

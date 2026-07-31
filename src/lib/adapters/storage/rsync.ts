@@ -1,4 +1,4 @@
-import { StorageAdapter, StorageSession, FileInfo, DirectoryDownloadResult, DirectoryFileEntry, DirectoryBrowseEntry } from "@/lib/core/interfaces";
+import { StorageAdapter, StorageSession, FileInfo, DirectoryDownloadResult, DirectoryFileEntry, DirectoryBrowseEntry, ListTreeResult } from "@/lib/core/interfaces";
 import { RsyncSchema, type SFTPConfig } from "@/lib/adapters/definitions";
 import { connectSFTP, endSftpClient } from "./sftp";
 import { Readable } from "stream";
@@ -286,6 +286,95 @@ function executeRsync(rsync: Rsync, onLog?: (msg: string, level?: LogLevel, type
 }
 
 /**
+ * Lists a remote tree over SSH with `find`, optionally including symbolic links.
+ *
+ * Two dialects, because the GNU `-printf` this relies on does not exist on BSD `find` (macOS,
+ * FreeBSD). The fallback shells out to `stat` per entry and has no way to report a link
+ * target, so it stays files-only and says so through `unsupportedSymlinks` rather than
+ * quietly returning a shorter list.
+ *
+ * `%y` is the entry type (`f` or `l`), `%l` the link target, empty for anything else. `find`
+ * without `-L` does not follow links, so a link to a directory is reported as a link and not
+ * descended into - which is the behaviour a backup wants and the same one `rsync -a` has.
+ */
+async function findRemoteEntries(
+    config: RsyncConfig,
+    dir: string,
+    includeSymlinks: boolean
+): Promise<{ files: FileInfo[]; unsupportedSymlinks: string[] }> {
+    let keyFile: string | undefined;
+    try {
+        if (config.authType === "privateKey" && config.privateKey) {
+            keyFile = await writeTempKey(config.privateKey);
+        }
+
+        const normalize = (p: string) => p.replace(/\\/g, "/");
+        const prefix = config.pathPrefix ? normalize(config.pathPrefix) : "";
+        const startDir = prefix
+            ? path.posix.join(prefix, dir)
+            : (dir || "/");
+
+        const safeStartDir = shellEscapeSingleQuote(startDir);
+        const selector = includeSymlinks ? `\\( -type f -o -type l \\)` : `-type f`;
+        const output = await execSSH(
+            config,
+            `find '${safeStartDir}' ${selector} -printf '%p\\t%s\\t%T@\\t%y\\t%l\\n' 2>/dev/null || find '${safeStartDir}' -type f -exec stat -f '%N\\t%z\\t%m' {} \\; 2>/dev/null`,
+            keyFile
+        );
+
+        if (!output) return { files: [], unsupportedSymlinks: [] };
+
+        const files: FileInfo[] = [];
+        // A GNU run always emits the type column. Its absence means the BSD fallback ran, so
+        // links were never selected in the first place and the caller has to be told.
+        let sawTypeColumn = false;
+
+        for (const line of output.split("\n")) {
+            if (!line.trim()) continue;
+
+            const parts = line.split("\t");
+            if (parts.length < 3) continue;
+
+            const [filePath, sizeStr, modifiedStr, type, linkTarget] = parts;
+            const size = parseInt(sizeStr, 10) || 0;
+            const modified = parseFloat(modifiedStr) || 0;
+            if (type) sawTypeColumn = true;
+
+            // Calculate relative path (strip prefix)
+            let relativePath = normalize(filePath);
+            if (prefix && relativePath.startsWith(prefix)) {
+                relativePath = relativePath.substring(prefix.length);
+            }
+            if (relativePath.startsWith("/")) relativePath = relativePath.substring(1);
+
+            const isLink = type === "l";
+            if (isLink && !linkTarget) continue;
+
+            files.push({
+                name: path.basename(filePath),
+                path: relativePath,
+                // A link's own size is the byte length of its target string, which says
+                // nothing about the backup and would inflate every total it lands in.
+                size: isLink ? 0 : size,
+                lastModified: new Date(modified * 1000),
+                ...(isLink ? { linkTarget } : {}),
+            });
+        }
+
+        const unsupportedSymlinks = includeSymlinks && !sawTypeColumn && files.length > 0
+            ? ["<remote find does not support -printf, symbolic links were not collected>"]
+            : [];
+
+        return { files, unsupportedSymlinks };
+    } catch (error: unknown) {
+        log.error("Rsync list failed", { host: config.host, dir }, wrapError(error));
+        throw error;
+    } finally {
+        if (keyFile) await fs.unlink(keyFile).catch(() => { });
+    }
+}
+
+/**
  * Creates a configured Rsync instance with shell and auth settings.
  * For password auth, uses SSHPASS env var via sshpass -e.
  * Must be called after checkSshpass() for password auth.
@@ -534,12 +623,24 @@ export const RsyncAdapter: StorageAdapter = {
 
             if (onLog) onLog(`Listing remote directory: ${config.host}:${remotePath}`, "info", "storage");
 
-            const allFiles = await RsyncAdapter.list(config, remotePath);
+            // listTree(), not list(): the collection needs symbolic links, and rsync's own
+            // `-a` already brings them across into localPath. Listing them here is what puts
+            // them into the archive index too, instead of leaving them on disk to be swept up
+            // with the work directory.
+            const { files: allFiles, unsupportedSymlinks } = await RsyncAdapter.listTree!(config, remotePath);
+            if (unsupportedSymlinks?.length && onLog) {
+                onLog(
+                    `Symbolic links under ${remotePath} could not be collected: the remote 'find' does not support -printf. They are missing from this backup.`,
+                    "warning", "storage"
+                );
+            }
+
             const entries: DirectoryFileEntry[] = allFiles
                 .map((f) => ({
                     relativePath: toRelativePath(f.path, remotePath),
                     size: f.size,
                     lastModified: f.lastModified,
+                    ...(f.linkTarget !== undefined ? { linkTarget: f.linkTarget } : {}),
                 }))
                 .filter((e) => !matchesAnyExcludePattern(e.relativePath, excludePatterns));
 
@@ -672,61 +773,19 @@ export const RsyncAdapter: StorageAdapter = {
     },
 
     async list(config: RsyncConfig, dir: string = ""): Promise<FileInfo[]> {
-        let keyFile: string | undefined;
-        try {
-            if (config.authType === "privateKey" && config.privateKey) {
-                keyFile = await writeTempKey(config.privateKey);
-            }
+        return (await findRemoteEntries(config, dir, false)).files;
+    },
 
-            const normalize = (p: string) => p.replace(/\\/g, "/");
-            const prefix = config.pathPrefix ? normalize(config.pathPrefix) : "";
-            const startDir = prefix
-                ? path.posix.join(prefix, dir)
-                : (dir || "/");
-
-            // Use SSH find command to recursively list files
-            const safeStartDir = shellEscapeSingleQuote(startDir);
-            const output = await execSSH(
-                config,
-                `find '${safeStartDir}' -type f -printf '%p\\t%s\\t%T@\\n' 2>/dev/null || find '${safeStartDir}' -type f -exec stat -f '%N\\t%z\\t%m' {} \\; 2>/dev/null`,
-                keyFile
-            );
-
-            if (!output) return [];
-
-            const files: FileInfo[] = [];
-            for (const line of output.split("\n")) {
-                if (!line.trim()) continue;
-
-                const parts = line.split("\t");
-                if (parts.length < 3) continue;
-
-                const [filePath, sizeStr, modifiedStr] = parts;
-                const size = parseInt(sizeStr, 10) || 0;
-                const modified = parseFloat(modifiedStr) || 0;
-
-                // Calculate relative path (strip prefix)
-                let relativePath = normalize(filePath);
-                if (prefix && relativePath.startsWith(prefix)) {
-                    relativePath = relativePath.substring(prefix.length);
-                }
-                if (relativePath.startsWith("/")) relativePath = relativePath.substring(1);
-
-                files.push({
-                    name: path.basename(filePath),
-                    path: relativePath,
-                    size,
-                    lastModified: new Date(modified * 1000),
-                });
-            }
-
-            return files;
-        } catch (error: unknown) {
-            log.error("Rsync list failed", { host: config.host, dir }, wrapError(error));
-            throw error;
-        } finally {
-            if (keyFile) await fs.unlink(keyFile).catch(() => {});
-        }
+    /**
+     * Collection walk, which is `list()` plus symbolic links.
+     *
+     * Kept apart deliberately. `list()` also serves retention, integrity checks and the
+     * destination browser over directories of backup files, where a link has no meaning and
+     * where changing what is returned would change what retention considers deletable.
+     */
+    async listTree(config: RsyncConfig, dir: string = ""): Promise<ListTreeResult> {
+        const { files, unsupportedSymlinks } = await findRemoteEntries(config, dir, true);
+        return { files, pruned: [], ...(unsupportedSymlinks.length > 0 ? { unsupportedSymlinks } : {}) };
     },
 
     async browseDirectories(config: RsyncConfig, subPath: string = ""): Promise<DirectoryBrowseEntry[]> {

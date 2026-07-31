@@ -414,6 +414,53 @@ async function performSftpUpload(
 }
 
 /**
+ * The raw ssh2 SFTP channel behind an ssh2-sftp-client instance.
+ *
+ * Reached through the wrapper because two operations exist on the protocol but not on the
+ * wrapper's API: `readlink` and `symlink`. The wrapper offers `realPath`, which is not a
+ * substitute - it resolves a link the whole way to its final destination, which is exactly the
+ * information a backup must not store. `../../archive/cert1.pem` resolved to an absolute path
+ * is wrong from any other machine, and wrong again after the target rotates.
+ */
+type RawSftp = {
+    readlink(path: string, cb: (err: Error | undefined, target: string) => void): void;
+    symlink(target: string, path: string, cb: (err: Error | undefined) => void): void;
+};
+
+function rawSftp(client: Client): RawSftp | undefined {
+    return (client as unknown as { sftp?: RawSftp }).sftp;
+}
+
+/**
+ * Reads a symbolic link's target, leaving it exactly as the server stores it.
+ *
+ * Falls back to the `ls -l` style `longname` most servers put in a directory listing, since
+ * that carries the target too. Returns undefined when neither works, which the caller reports
+ * as a link it could not describe rather than passing off as absent.
+ */
+async function readSftpLinkTarget(client: Client, fullPath: string, longname?: string): Promise<string | undefined> {
+    const raw = rawSftp(client);
+    if (raw?.readlink) {
+        const target = await new Promise<string | undefined>((resolve) => {
+            try {
+                raw.readlink(fullPath, (err, value) => resolve(err ? undefined : value));
+            } catch {
+                resolve(undefined);
+            }
+        });
+        if (target) return target;
+    }
+
+    // "lrwxrwxrwx 1 user group 24 Jan  1 00:00 cert.pem -> ../archive/cert1.pem"
+    const arrow = longname?.indexOf(" -> ");
+    if (longname && arrow !== undefined && arrow !== -1) {
+        const target = longname.slice(arrow + 4).trim();
+        if (target.length > 0) return target;
+    }
+    return undefined;
+}
+
+/**
  * Walks a source tree for collection: skipping what is excluded, reporting as it goes, and
  * stopping when asked.
  *
@@ -440,6 +487,7 @@ async function walkSftpTree(
 
     const files: FileInfo[] = [];
     const pruned: PrunedDirectory[] = [];
+    const unsupportedSymlinks: string[] = [];
     let directoriesRead = 0;
 
     const pool = createConnectionPool<PooledClient>({
@@ -459,6 +507,13 @@ async function walkSftpTree(
         const exists = await pool.withConnection(({ client }) => client.exists(startDir));
         if (exists !== 'd') return { files, pruned };
 
+        /** Path relative to the adapter's configured root, the convention `list()` also uses. */
+        const toAdapterPath = (fullPath: string): string => {
+            let relativePath = fullPath;
+            if (prefix && fullPath.startsWith(prefix)) relativePath = fullPath.substring(prefix.length);
+            return relativePath.startsWith('/') ? relativePath.substring(1) : relativePath;
+        };
+
         // One level at a time. Every directory of a level is read concurrently, and the
         // directories they reveal become the next level.
         let frontier: string[] = [""];
@@ -473,6 +528,9 @@ async function walkSftpTree(
 
                 for (const item of items) {
                     const childRel = relDir ? `${relDir}/${item.name}` : item.name;
+                    // Same convention as list(): relative to the adapter's configured root,
+                    // not to the queried directory - the caller strips the rest.
+                    const fullPath = path.posix.join(currentDir, item.name);
 
                     if (item.type === 'd') {
                         const pattern = canPruneDirectory(childRel, options?.excludePatterns);
@@ -481,19 +539,28 @@ async function walkSftpTree(
                             continue;
                         }
                         children.push(childRel);
-                    } else if (item.type === '-') {
-                        // Same convention as list(): relative to the adapter's configured
-                        // root, not to the queried directory - the caller strips the rest.
-                        const fullPath = path.posix.join(currentDir, item.name);
-                        let relativePath = fullPath;
-                        if (prefix && fullPath.startsWith(prefix)) {
-                            relativePath = fullPath.substring(prefix.length);
+                    } else if (item.type === 'l') {
+                        // Stored as a link and not followed, whether it points at a file or a
+                        // directory. Descending would copy the target's bytes under the link's
+                        // path, which is a different tree than the one being backed up.
+                        const target = await pool.withConnection(({ client }) =>
+                            readSftpLinkTarget(client, fullPath, (item as { longname?: string }).longname)
+                        );
+                        if (target === undefined) {
+                            unsupportedSymlinks.push(childRel);
+                            continue;
                         }
-                        if (relativePath.startsWith('/')) relativePath = relativePath.substring(1);
-
                         files.push({
                             name: item.name,
-                            path: relativePath,
+                            path: toAdapterPath(fullPath),
+                            size: 0,
+                            lastModified: new Date(item.modifyTime),
+                            linkTarget: target,
+                        });
+                    } else if (item.type === '-') {
+                        files.push({
+                            name: item.name,
+                            path: toAdapterPath(fullPath),
                             size: item.size,
                             lastModified: new Date(item.modifyTime),
                         });
@@ -515,7 +582,7 @@ async function walkSftpTree(
             frontier = next.flat();
         }
 
-        return { files, pruned };
+        return { files, pruned, ...(unsupportedSymlinks.length > 0 ? { unsupportedSymlinks } : {}) };
     } catch (error) {
         log.error("SFTP tree walk failed", { host: config.host, dir }, wrapError(error));
         throw error;
@@ -626,6 +693,38 @@ export const SFTPAdapter: StorageAdapter = {
 
     async listTree(config: SFTPConfig, dir: string = "", options?: ListTreeOptions): Promise<ListTreeResult> {
         return walkSftpTree(config, dir, options);
+    },
+
+    async createSymlink(config: SFTPConfig, remotePath: string, target: string): Promise<void> {
+        let sftp: Client | null = null;
+        try {
+            sftp = await connectSFTP(config);
+            const normalize = (p: string) => p.replace(/\\/g, '/');
+            const prefix = config.pathPrefix ? normalize(config.pathPrefix) : "";
+            const linkPath = prefix ? path.posix.join(prefix, remotePath) : remotePath;
+
+            const parent = path.posix.dirname(linkPath);
+            if (parent && parent !== '.' && parent !== '/') await sftp.mkdir(parent, true);
+
+            const raw = rawSftp(sftp);
+            if (!raw?.symlink) {
+                throw new Error("this SFTP connection does not expose symlink support");
+            }
+
+            // Removed first, because SSH_FXP_SYMLINK fails on an existing path and a restore
+            // that stops at the first already-present link is not a restore. `delete` removes
+            // the link itself, never what it points at.
+            await sftp.delete(linkPath, true).catch(() => { });
+
+            await new Promise<void>((resolve, reject) => {
+                // Argument order is (target, linkPath), the same way round as symlink(2) and
+                // the opposite of what the name reads like. Swapping them creates a link named
+                // after the target, which silently produces the wrong tree.
+                raw.symlink(target, linkPath, (err) => (err ? reject(err) : resolve()));
+            });
+        } finally {
+            if (sftp) await endSftpClient(sftp);
+        }
     },
 
     async list(config: SFTPConfig, dir: string = ""): Promise<FileInfo[]> {

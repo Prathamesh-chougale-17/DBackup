@@ -320,6 +320,19 @@ export type FileInfo = {
     path: string;
     size: number;
     lastModified: Date;
+    /**
+     * Set when this entry is a symbolic link, holding its raw target exactly as stored on the
+     * source - relative stays relative, and nothing is resolved.
+     *
+     * Resolving here would be wrong twice over: a relative target only means something from
+     * the link's own directory, and following it would pull in bytes from outside the source
+     * the user asked to back up. The link is the content, not what it happens to point at.
+     *
+     * Only ever set by the collection walkers (`listTree`). `list()` keeps describing plain
+     * files, because it also serves retention, integrity checks and the destination browser,
+     * where a link has no meaning.
+     */
+    linkTarget?: string;
     locked?: boolean;
     storageClass?: string;
     /**
@@ -379,6 +392,11 @@ export interface DirectoryFileEntry {
      * an earlier archive of the chain - so it is reported here rather than omitted.
      */
     unchanged?: boolean;
+    /**
+     * Raw target when this entry is a symbolic link. Nothing was transferred and no local
+     * file exists, so `size` is 0 and callers must not try to read it off disk.
+     */
+    linkTarget?: string;
 }
 
 /** Options for a directory download, used by incremental backups to skip unchanged files. */
@@ -466,6 +484,16 @@ export interface ListTreeResult {
      * into silence. A backup may not quietly leave things out.
      */
     pruned: PrunedDirectory[];
+    /**
+     * Symbolic links the walker saw but could not describe, because the protocol does not
+     * hand out a target it could store.
+     *
+     * Reported for the same reason `pruned` is: they are missing from the backup, and a
+     * missing thing nobody was told about is the failure mode that only surfaces during a
+     * restore. An adapter that can read targets puts them in `files` with `linkTarget` set
+     * and leaves this empty.
+     */
+    unsupportedSymlinks?: string[];
 }
 
 /** Result of downloading an entire remote directory tree to a local directory. */
@@ -629,6 +657,19 @@ export interface StorageAdapter extends BaseAdapter {
         onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
         options?: DirectoryDownloadOptions
     ): Promise<DirectoryDownloadResult>;
+
+    /**
+     * Optional: recreates a symbolic link at `remotePath` pointing at `target`.
+     *
+     * Present only on adapters whose protocol has symbolic links at all, which is what makes
+     * the method itself the capability check - no separate flag to keep in sync. A restore
+     * calls it where it exists, and names every link it had to skip where it does not, rather
+     * than reporting a complete restore that quietly is not one.
+     *
+     * `target` is stored verbatim, exactly as it was collected. Resolving it would turn a
+     * relative link into one that is wrong from any other directory.
+     */
+    createSymlink?(config: AdapterConfig, remotePath: string, target: string): Promise<void>;
 
     /**
      * Optional: lists the immediate child directories of subPath (non-recursive), scoped to this

@@ -139,6 +139,12 @@ function planEntries(entries: ArchiveSourceEntry[], encrypted: boolean, compress
         };
 
         for (const file of entry.files) {
+            // A symbolic link has no bytes and therefore no physical member: its whole content
+            // is the target string, which goes straight into the index. Skipping it here is
+            // what keeps it out of the bundler and away from any attempt to read a local file
+            // that was never collected.
+            if (file.linkTarget !== undefined) continue;
+
             const localPath = path.join(entry.localPath, file.path);
 
             if (encrypted && file.size <= BUNDLE_FILE_MAX_SIZE) {
@@ -169,6 +175,30 @@ function planEntries(entries: ArchiveSourceEntry[], encrypted: boolean, compress
     }
 
     return planned;
+}
+
+/** A symbolic link from a directory source. Carries a target instead of bytes. */
+interface PlannedSymlink {
+    src: string;
+    /** Path relative to the directory source root, POSIX separators. */
+    path: string;
+    /** ISO 8601 mtime of the link itself. */
+    mtime: string;
+    /** Raw, unresolved target. */
+    target: string;
+}
+
+/** Collects every symbolic link across the directory sources, in source order. */
+function planSymlinks(entries: ArchiveSourceEntry[]): PlannedSymlink[] {
+    const links: PlannedSymlink[] = [];
+    for (const entry of entries) {
+        if (entry.kind !== "directory") continue;
+        for (const file of entry.files) {
+            if (file.linkTarget === undefined) continue;
+            links.push({ src: entry.jobSourceId, path: file.path, mtime: file.mtime, target: file.linkTarget });
+        }
+    }
+    return links;
 }
 
 /**
@@ -254,6 +284,22 @@ async function writeMember(tarPack: Pack, name: string, size: number, open: () =
 }
 
 /**
+ * Writes a real TAR symlink member: typeflag 2, a linkname, and no payload.
+ *
+ * Only ever called for unencrypted archives, and that restriction is the point. It is what
+ * keeps the promise that such an archive extracts correctly with plain `tar -xf` and no
+ * DBackup anywhere. An encrypted archive must not carry one: a link target is a path, and a
+ * tar header is cleartext, so writing it there would publish user data right next to the
+ * sealed entries that exist to hide exactly that. Encrypted archives keep their targets in
+ * the sealed index alone.
+ */
+function writeSymlinkMember(tarPack: Pack, name: string, target: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+        tarPack.entry({ name, type: "symlink", linkname: target, size: 0 }, (err) => (err ? reject(err) : resolve()));
+    });
+}
+
+/**
  * Creates a seekable archive containing database dumps and/or directory source trees.
  *
  * @param entries - Database dumps and directory roots, already on local disk
@@ -274,6 +320,7 @@ export async function createArchive(
     const keys = options.encryption && kdfSalt ? deriveArchiveKeys(options.encryption.masterKey, kdfSalt) : null;
 
     const planned = planEntries(entries, encrypted, compression);
+    const symlinks = planSymlinks(entries);
 
     // Files the format rule stored as-is. Counted so a run can report it: a job configured
     // for compression that produces an archive the size of its input otherwise looks like a
@@ -339,6 +386,7 @@ export async function createArchive(
             directorySources: directoryLines.length,
             files: directoryLines.reduce((sum, d) => sum + d.fileCount, 0),
             entries: planned.length,
+            ...(symlinks.length > 0 ? { symlinks: symlinks.length } : {}),
         },
         totalSize,
         indexMember: INDEX_MEMBER,
@@ -392,6 +440,16 @@ export async function createArchive(
             }
 
             options.onProgress?.(i + 1, planned.length, entryLabel(entry));
+        }
+
+        // Written after the data members and before the index, so the offsets recorded by the
+        // header walk are untouched by them - a symlink member carries no payload, and nothing
+        // ever looks its offset up.
+        if (!encrypted) {
+            for (const link of symlinks) {
+                options.signal?.throwIfAborted();
+                await writeSymlinkMember(tarPack, `${SOURCE_MEMBER_PREFIX}${link.src}/${link.path}`, link.target);
+            }
         }
     } finally {
         // Entries compressed ahead but never written - an error cut the loop short - still
@@ -447,6 +505,14 @@ export async function createArchive(
                 });
             });
         }
+    }
+
+    // Symbolic links, which have no entry to resolve offsets against. Emitted here so they sit
+    // in the index alongside real files and every reader that lists a source sees them without
+    // knowing anything special - only the paths that fetch bytes have to branch, and they do
+    // that on the absence of `n`.
+    for (const link of symlinks) {
+        fileLines.push({ k: "f", src: link.src, p: link.path, s: 0, m: link.mtime, lnk: link.target });
     }
 
     // ── Carried-over content from earlier archives in the chain ───────────
