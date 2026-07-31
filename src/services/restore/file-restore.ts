@@ -494,9 +494,13 @@ export async function restoreFilesToStorage(
                 // Named individually and counted as a failure, which downgrades the restore.
                 // Object storage has no symbolic links, and reporting a complete restore that
                 // is missing them is exactly the silence this whole change exists to end.
+                //
+                // Phrased as the capability limit it is, with the destinations that do work:
+                // there is nothing here for the user to retry or fix at this one.
                 failed.push({
                     path: file.p,
-                    error: `'${target.adapter.id}' has no symbolic links, so '${file.p}' -> '${file.lnk}' was not restored`,
+                    error: `${target.label} cannot store symbolic links, so '${file.p}' -> '${file.lnk}' was not restored. `
+                        + `Restore to a local path, over SFTP, or as a .tar.gz download to keep symbolic links.`,
                 });
                 continue;
             }

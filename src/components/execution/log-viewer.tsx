@@ -129,12 +129,20 @@ export function LogViewer({ logs, className, autoScroll = true, status, executio
 
               const isPartialStage = stage === "Uploading" || stage === "Verifying Checksums";
               const isOverallPartial = status === "Partial";
+              // A stage that only warned still gets a green tick, which is right for the
+              // routine ones - but not when the run as a whole came out Partial, because then
+              // this stage is where the incompleteness happened and a tick actively misleads.
+              // Gated on the run's own status, so a successful run with ordinary warnings is
+              // untouched.
+              const hasWarning = stageLogs.some(l => l.level === "warning");
               groups.push({
                   stage,
                   logs: stageLogs,
                   status: hasError
                       ? (isPartialStage && isOverallPartial ? "partial" : "failed")
-                      : (isLast && isRunning) ? "running" : "success",
+                      : (isLast && isRunning) ? "running"
+                      : (hasWarning && isOverallPartial) ? "partial"
+                      : "success",
                   startTime: firstTs,
                   endTime: lastTs,
                   durationMs: duration >= 0 ? duration : undefined,
@@ -339,7 +347,19 @@ function LogItem({ entry, systemTimezone = "UTC" }: { entry: LogEntry; systemTim
 
             <div className="flex-1">
                 <div className="flex items-center gap-2">
-                    <span className={cn("text-sm break-all", entry.level === 'error' ? "text-destructive" : "text-foreground")}>
+                    {/*
+                      * Warnings are coloured as well as errors. Only the level icon carried
+                      * the distinction before, and a `type` of "command" or "storage" replaces
+                      * that icon - so a storage warning rendered identically to routine info
+                      * chatter, which is precisely where "this is missing from your backup"
+                      * lines live.
+                      */}
+                    <span className={cn(
+                        "text-sm break-all",
+                        entry.level === 'error' ? "text-destructive"
+                            : entry.level === 'warning' ? "text-amber-600 dark:text-amber-400"
+                            : "text-foreground"
+                    )}>
                          {entry.message}
                     </span>
                     {entry.durationMs != null && (

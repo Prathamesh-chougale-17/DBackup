@@ -37,6 +37,17 @@ import { getTempDir } from "@/lib/temp-dir";
 import { openArchiveForRestore } from "./file-restore";
 import type { RestoreInput } from "./types";
 
+/**
+ * Names one entry for the error list, as "<source label>/<path>".
+ *
+ * A directory source's label already ends in its remote path, which for a source rooted at
+ * the top is just "/" - so a plain join produced "Scripts: //link" and read like a bug in
+ * the path rather than a label followed by a file.
+ */
+function entryLabel(sourceLabel: string, filePath: string): string {
+    return `${sourceLabel.replace(/\/+$/, "")}/${filePath}`;
+}
+
 export interface ArchiveRestoreCallbacks {
     log: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void;
     updateDetail: (detail: string) => void;
@@ -220,6 +231,14 @@ export async function restoreArchiveSnapshot(
 
             const perSourceDone = new Map<string, number>();
             const perSourceFailed = new Map<string, number>();
+            /**
+             * Symbolic links the destination cannot hold, counted apart from failures.
+             *
+             * They still make the run Partial - something in the snapshot is not there - but
+             * calling them failures in the summary would read as "the upload broke", when the
+             * truth is that this destination has no such thing as a symbolic link.
+             */
+            const perSourceSkippedLinks = new Map<string, number>();
             let done = 0;
 
             // Files stream and stage independently, so several transfer at once - this is the
@@ -270,7 +289,7 @@ export async function restoreArchiveSnapshot(
                     } catch (e: unknown) {
                         const message = e instanceof Error ? e.message : String(e);
                         perSourceFailed.set(file.src, (perSourceFailed.get(file.src) ?? 0) + 1);
-                        errors.push({ entry: `${labels.get(file.src) ?? file.src}/${file.p}`, error: message });
+                        errors.push({ entry: entryLabel(labels.get(file.src) ?? file.src, file.p), error: message });
                         log(`Failed to restore '${file.p}' to ${target.label}: ${message}`, 'error', 'storage');
                     } finally {
                         await fs.unlink(stagePath).catch(() => { });
@@ -284,15 +303,27 @@ export async function restoreArchiveSnapshot(
                 for (const { src, file } of symlinks) {
                     const target = targets.get(src)!;
                     const label = labels.get(src) ?? src;
+                    const link = `'${file.p}' -> '${file.lnk}'`;
+
+                    // A destination without symbolic links is a capability limit, not a
+                    // transfer that went wrong: retrying it will never behave differently.
+                    // Said once, at warning level, and with the destinations that do work -
+                    // the run still reports Partial, which is what carries the weight.
+                    if (!target.adapter.createSymlink) {
+                        const reason = `${target.label} cannot store symbolic links`;
+                        perSourceSkippedLinks.set(src, (perSourceSkippedLinks.get(src) ?? 0) + 1);
+                        errors.push({ entry: entryLabel(label, file.p), error: reason });
+                        log(
+                            `Symbolic link ${link} was not restored: ${reason}. Restore to a local path, `
+                            + `over SFTP, or as a .tar.gz download to keep symbolic links.`,
+                            'warning', 'storage'
+                        );
+                        done++;
+                        updateDetail(`Files: ${done}/${workItems.length} restored`);
+                        continue;
+                    }
+
                     try {
-                        if (!target.adapter.createSymlink) {
-                            // Object storage has no symbolic links. Counted as a failure so the
-                            // run reports Partial rather than claiming a complete restore that
-                            // is quietly missing them.
-                            throw new Error(
-                                `'${target.adapter.id}' has no symbolic links, so this link to '${file.lnk}' was not restored`
-                            );
-                        }
                         await target.adapter.createSymlink(
                             target.config,
                             safeRemoteJoin(target.basePath, file.p),
@@ -302,8 +333,8 @@ export async function restoreArchiveSnapshot(
                     } catch (e: unknown) {
                         const message = e instanceof Error ? e.message : String(e);
                         perSourceFailed.set(src, (perSourceFailed.get(src) ?? 0) + 1);
-                        errors.push({ entry: `${label}/${file.p}`, error: message });
-                        log(`Failed to restore symlink '${file.p}' to ${target.label}: ${message}`, 'error', 'storage');
+                        errors.push({ entry: entryLabel(label, file.p), error: message });
+                        log(`Failed to restore symbolic link ${link} to ${target.label}: ${message}`, 'error', 'storage');
                     }
 
                     done++;
@@ -316,18 +347,25 @@ export async function restoreArchiveSnapshot(
             for (const dir of selectedDirs) {
                 if (!targets.has(dir.src)) continue; // target resolution already failed above
                 const failed = perSourceFailed.get(dir.src) ?? 0;
+                const skippedLinks = perSourceSkippedLinks.get(dir.src) ?? 0;
                 const restored = perSourceDone.get(dir.src) ?? 0;
-                if (failed === 0) {
+                if (failed === 0 && skippedLinks === 0) {
                     restoredDirectories.push(dir.src);
                     log(`Directory restored: ${dir.label} (${restored} file(s))`, 'success', 'storage');
                 } else {
                     // A source counts as partly restored when some of its files did land, so a
                     // single rejected file cannot make the whole run look like nothing arrived.
                     if (restored > 0) partiallyRestoredDirectories.add(dir.src);
-                    log(
-                        `Directory '${dir.label}': ${restored} of ${perSourceTotals.get(dir.src)} file(s) restored, ${failed} failed`,
-                        'error', 'storage'
-                    );
+
+                    // Split apart, because they mean different things to whoever reads this. A
+                    // failure is worth investigating; a skipped link is this destination being
+                    // what it is, and no amount of retrying changes it.
+                    const parts = [`${restored} of ${perSourceTotals.get(dir.src)} entr(ies) restored`];
+                    if (failed > 0) parts.push(`${failed} failed`);
+                    if (skippedLinks > 0) {
+                        parts.push(`${skippedLinks} symbolic link(s) skipped - ${targets.get(dir.src)!.label} cannot store them`);
+                    }
+                    log(`Directory '${dir.label}': ${parts.join(', ')}`, failed > 0 ? 'error' : 'warning', 'storage');
                 }
             }
         }

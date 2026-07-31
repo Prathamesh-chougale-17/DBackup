@@ -265,7 +265,15 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
                 });
             } else {
                 if (result.status === "Partial") {
-                    log(`Restore completed with some failures: ${result.errors.map(e => e.entry).join(', ')}`, 'warning');
+                    // "not restored" rather than "failed": the list holds anything missing from
+                    // the target, and not all of it went wrong - a symbolic link on a
+                    // destination that has no symbolic links is simply not storable there. Why
+                    // each entry is missing was said line by line above.
+                    log(
+                        `Restore completed, but ${result.errors.length} entr(ies) were not restored: `
+                        + result.errors.map(e => e.entry).join(', '),
+                        'warning'
+                    );
                 } else {
                     log(`Restore completed successfully.`, 'success');
                 }

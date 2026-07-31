@@ -13,7 +13,9 @@ All notable changes to DBackup are documented here.
 ### 🎨 Improvements
 
 - **file backups**: The collection log now counts symbolic links separately from files, and names every link a source could not hand over instead of leaving it out in silence. FTP sources report their links this way, since the protocol offers no dependable way to read a link's target.
-- **restore**: Restoring to a destination without symbolic links (S3, Google Drive, OneDrive, Dropbox, WebDAV) names each link it cannot recreate and finishes as `Partial`, rather than reporting a complete restore. Restoring to a local path, over SFTP, or as a `.tar.gz` download recreates them.
+- **restore**: Restoring to a destination without symbolic links (S3, Google Drive, OneDrive, Dropbox, WebDAV) names each link it cannot recreate and finishes as `Partial`, rather than reporting a complete restore. The message names the destination and the working alternatives instead of reading like a transfer that broke, and the per-source summary counts skipped links apart from real failures. Restoring to a local path, over SFTP, or as a `.tar.gz` download recreates them.
+- **execution log**: Warnings are now coloured in the log viewer. Only the small level icon carried the distinction before, and a `command` or `storage` type replaces that icon - so a storage warning was indistinguishable from routine output, which is exactly where lines about missing files sit.
+- **execution log**: A stage whose only problems were warnings now shows the orange partial marker instead of a green tick, but only when the run itself came out `Partial`. A successful run with ordinary warnings is unchanged.
 - **storage explorer**: Symbolic links are shown in the backup file tree with their target, instead of appearing as empty files.
 - **Local Filesystem**: Directory sources are now collected with a walker that reports progress while it scans, prunes excluded folders instead of listing and discarding them, and reacts to a cancelled run immediately.
 
