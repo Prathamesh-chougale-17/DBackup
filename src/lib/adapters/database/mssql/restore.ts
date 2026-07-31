@@ -2,6 +2,7 @@ import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { executeQuery, executeParameterizedQuery, executeQueryWithMessages } from "./connection";
 import { getDialect } from "./dialects";
+import { assertValidDatabaseName, toPhysicalFileName } from "./identifiers";
 import { MssqlSshTransfer, isSSHTransferEnabled } from "./ssh-transfer";
 import fs from "fs/promises";
 import { createReadStream, createWriteStream } from "fs";
@@ -33,10 +34,10 @@ type MSSQLRestoreConfig = MSSQLConfig & {
 export async function prepareRestore(config: MSSQLRestoreConfig, databases: string[]): Promise<void> {
     // Check if target databases can be created/overwritten
     for (const dbName of databases) {
-        // Validate database name (only allow safe characters)
-        if (!/^[a-zA-Z0-9_]+$/.test(dbName)) {
-            throw new Error(`Invalid database name: ${dbName}`);
-        }
+        // Accept every name SQL Server accepts as a delimited identifier.
+        // The lookup below is parameterized and the RESTORE statement is
+        // bracket-quoted, so hyphens, dots and spaces are safe here.
+        assertValidDatabaseName(dbName);
 
         try {
             // Check if database exists and if we can access it
@@ -209,9 +210,13 @@ export async function restore(
                 // Build MOVE clauses for file relocation
                 const moveOptions: { logicalName: string; physicalPath: string }[] = [];
 
+                // The target name becomes a filename here, so path separators have
+                // to go - same substitution SQL Server applies to its own files.
+                const fileBaseName = toPhysicalFileName(targetDb.target);
+
                 for (const file of logicalFiles) {
                     const ext = file.type === "D" ? ".mdf" : ".ldf";
-                    const newPhysicalPath = `/var/opt/mssql/data/${targetDb.target}${ext}`;
+                    const newPhysicalPath = `/var/opt/mssql/data/${fileBaseName}${ext}`;
                     moveOptions.push({
                         logicalName: file.logicalName,
                         physicalPath: newPhysicalPath,

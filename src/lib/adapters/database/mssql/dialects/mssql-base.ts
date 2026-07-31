@@ -1,26 +1,5 @@
 import { MSSQLDatabaseDialect } from "./index";
-
-/**
- * Escapes a string for safe inclusion in a T-SQL N'...' literal.
- * Replaces single quotes with doubled single quotes (SQL standard escaping).
- */
-function escapeTSqlString(value: string): string {
-    return value.replace(/'/g, "''");
-}
-
-/**
- * Validates and sanitizes a database name for use in T-SQL [brackets].
- * Rejects names with characters that could break out of bracket quoting.
- */
-function validateDatabaseName(name: string): string {
-    // MSSQL identifiers inside brackets: only ] needs to be escaped as ]]
-    // But we also reject obviously dangerous patterns as defense-in-depth
-    if (!name || name.length > 128) {
-        throw new Error(`Invalid database name: name must be 1-128 characters`);
-    }
-    // Escape closing brackets for safe bracket-quoting
-    return name.replace(/\]/g, "]]");
-}
+import { escapeTSqlString, validateDatabaseName } from "../identifiers";
 
 /**
  * Base MSSQL Dialect for SQL Server 2019+

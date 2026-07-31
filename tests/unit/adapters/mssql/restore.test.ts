@@ -205,9 +205,26 @@ describe("MSSQL Restore", () => {
             await expect(prepareRestore(config, ["testdb"])).resolves.toBeUndefined();
         });
 
-        it("should reject invalid database names", async () => {
+        it("should accept names SQL Server accepts as delimited identifiers", async () => {
+            mockExecuteParameterizedQuery.mockResolvedValue({
+                recordset: [{ state_desc: "ONLINE" }],
+            });
+
             const config = buildConfig();
-            await expect(prepareRestore(config, ["db;DROP TABLE"])).rejects.toThrow("Invalid database name");
+            await expect(
+                prepareRestore(config, ["nax-init", "test-test", "with.dot", "with space"])
+            ).resolves.toBeUndefined();
+        });
+
+        it("should reject empty and over-long database names", async () => {
+            const config = buildConfig();
+            await expect(prepareRestore(config, [""])).rejects.toThrow("Invalid database name");
+            await expect(prepareRestore(config, ["a".repeat(129)])).rejects.toThrow("Invalid database name");
+        });
+
+        it("should reject database names containing control characters", async () => {
+            const config = buildConfig();
+            await expect(prepareRestore(config, ["db\u0000name"])).rejects.toThrow("Invalid database name");
         });
 
         it("should throw when database is not online", async () => {

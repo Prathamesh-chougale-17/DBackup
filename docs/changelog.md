@@ -2,6 +2,25 @@
 
 All notable changes to DBackup are documented here.
 
+## vNEXT
+*Release: In Progress*
+
+### 🐛 Bug Fixes
+
+- **MSSQL**: Restoring onto a database whose name contains a hyphen, dot or space failed immediately with `Invalid database name`, even though the same database was listed and backed up without complaint. ([#133](https://github.com/Skyfay/DBackup/issues/133))
+
+### 🧪 Tests
+
+- **MSSQL**: Added coverage for which database names are accepted for restore, for bracket quoting, and for the file name derived when a restore relocates its data files.
+
+### 🐳 Docker
+
+- **Image**: `skyfay/dbackup:vNEXT`
+- **Also tagged as**: `latest`, `vNEXT`
+- **CI Image**: `skyfay/dbackup:ci`
+- **Platforms**: linux/amd64, linux/arm64
+
+
 ## v3.0.1 - File Backup Reliability Fixes and SFTP Improvements
 *Released: July 28, 2026*
 
