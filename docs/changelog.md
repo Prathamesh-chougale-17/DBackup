@@ -2,6 +2,29 @@
 
 All notable changes to DBackup are documented here.
 
+## vNEXT
+*Release: In Progress*
+
+### 🔒 Security
+
+- **restore**: Trimming trailing slashes off a restore target path used a regular expression that runs in quadratic time on a long run of slashes, letting a crafted target path occupy the server. Reported by CodeQL as `js/polynomial-redos`.
+
+### 🎨 Improvements
+
+- **paths**: Slash trimming moved into one shared helper that cannot backtrack, replacing the three hand-rolled copies that had drifted apart.
+
+### 🧪 Tests
+
+- **paths**: Added coverage that slash trimming matches what the regular expressions produced and stays linear on a pathological run of slashes.
+
+### 🐳 Docker
+
+- **Image**: `skyfay/dbackup:vNEXT`
+- **Also tagged as**: `latest`, `vNEXT`
+- **CI Image**: `skyfay/dbackup:ci`
+- **Platforms**: linux/amd64, linux/arm64
+
+
 ## v3.0.2 - Bug Fixes and Improvements for File Backups and MSSQL Restores
 *Released: Aug 1, 2026*
 

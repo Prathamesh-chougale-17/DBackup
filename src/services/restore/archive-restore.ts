@@ -34,6 +34,7 @@ import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
 import { summariseExcluded, formatExcludeSummary } from "@/lib/exclude-summary";
 import { entryKey, IndexFileLine, partitionSymlinks } from "@/lib/archive/types";
 import { getTempDir } from "@/lib/temp-dir";
+import { stripTrailingSlashes } from "@/lib/paths";
 import { openArchiveForRestore } from "./file-restore";
 import type { RestoreInput } from "./types";
 
@@ -45,7 +46,7 @@ import type { RestoreInput } from "./types";
  * the path rather than a label followed by a file.
  */
 function entryLabel(sourceLabel: string, filePath: string): string {
-    return `${sourceLabel.replace(/\/+$/, "")}/${filePath}`;
+    return `${stripTrailingSlashes(sourceLabel)}/${filePath}`;
 }
 
 export interface ArchiveRestoreCallbacks {

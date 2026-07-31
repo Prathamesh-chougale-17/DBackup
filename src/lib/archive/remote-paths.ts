@@ -1,4 +1,5 @@
 import path from "path";
+import { stripTrailingSlashes } from "@/lib/paths";
 
 /**
  * Builds the remote path a restored file is written to, refusing anything that escapes
@@ -15,7 +16,9 @@ import path from "path";
  * this is the same rule for destinations addressed by POSIX-style remote paths.
  */
 export function safeRemoteJoin(basePath: string, relativePath: string): string {
-    const base = basePath.replace(/\\/g, "/").replace(/\/+$/, "");
+    // Trailing slashes are stripped by a loop, not by `/\/+$/`. That regex is quadratic on a
+    // run of slashes, and this base path comes from a restore target someone chose.
+    const base = stripTrailingSlashes(basePath.replace(/\\/g, "/"));
     const relative = relativePath.replace(/\\/g, "/");
 
     if (relative.startsWith("/")) {
