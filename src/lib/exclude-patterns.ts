@@ -1,4 +1,5 @@
 import { Minimatch } from "minimatch";
+import { stripTrailingSlashes } from "@/lib/paths";
 
 /**
  * Compiled patterns keyed by their source string, since a source's exclude list is matched
@@ -70,7 +71,7 @@ const PROBE_DEPTH = 3;
 export function canPruneDirectory(relativeDirPath: string, patterns?: string[]): string | undefined {
     if (!patterns || patterns.length === 0) return undefined;
 
-    const base = relativeDirPath.replace(/\/+$/, "");
+    const base = stripTrailingSlashes(relativeDirPath);
     if (!base) return undefined;
 
     return patterns.find((pattern) => {

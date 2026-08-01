@@ -1,10 +1,11 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
-import { executeQueryWithMessages, getDatabases, supportsCompression } from "./connection";
+import { executeQueryWithMessages, getDatabases, supportsCompression, type SqlServerMessage } from "./connection";
 import { getDialect } from "./dialects";
-import { MssqlSshTransfer, isSSHTransferEnabled } from "./ssh-transfer";
+import { isCompositeHost } from "@/lib/transport";
 import fs from "fs/promises";
-import { createReadStream, createWriteStream, existsSync } from "fs";
+import { createReadStream, createWriteStream } from "fs";
 import path from "path";
 import { pack } from "tar-stream";
 import { pipeline } from "stream/promises";
@@ -35,6 +36,7 @@ type MSSQLDumpConfig = MSSQLConfig & {
 export async function dump(
     config: MSSQLDumpConfig,
     destinationPath: string,
+    host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     _onProgress?: (percentage: number) => void
 ): Promise<BackupResult> {
@@ -59,7 +61,7 @@ export async function dump(
         // No databases selected: discover all user databases on the server
         if (databases.length === 0) {
             log("No databases selected - discovering all user databases");
-            databases = await getDatabases(config);
+            databases = await getDatabases(config, host);
             if (databases.length === 0) {
                 throw new Error("No user databases found on server (system DBs are excluded)");
             }
@@ -68,9 +70,10 @@ export async function dump(
 
         const dialect = getDialect(config.detectedVersion);
         const serverBackupPath = config.backupPath || "/var/opt/mssql/backup";
-        const useSSH = isSSHTransferEnabled(config);
-        // localBackupPath is only used in local mode (Docker volume mount / shared filesystem)
-        const localBackupPath = config.localBackupPath || "/tmp";
+        // The transport decides how the .bak file travels: a shared mount makes
+        // it visible locally, otherwise it is fetched over SSH.
+        const useSSH = host.kind !== "direct" || isCompositeHost(host);
+        const localBackupPath = useSSH ? "/tmp" : (config.localBackupPath || "/tmp");
 
         if (useSSH) {
             log(`File transfer mode: SSH (remote server)`);
@@ -80,7 +83,7 @@ export async function dump(
         }
 
         // Check if compression is supported by this SQL Server edition
-        const useCompression = await supportsCompression(config);
+        const useCompression = await supportsCompression(config, host);
         if (useCompression) {
             log(`Compression enabled (supported by this SQL Server edition)`);
         } else {
@@ -89,19 +92,18 @@ export async function dump(
 
         // For multi-database backups, we'll create individual .bak files and combine them
         const tempFiles: { server: string; local: string }[] = [];
-        let sshTransfer: MssqlSshTransfer | null = null;
 
         // Helper function to clean up temp files
         const cleanupTempFiles = async () => {
             for (const f of tempFiles) {
                 await fs.unlink(f.local).catch(() => {});
             }
-            // Also clean up remote .bak files when using SSH
-            if (sshTransfer) {
+            // Remove the server-side .bak files too. With a shared mount the
+            // unlink above already did that, since both paths are one file.
+            if (useSSH) {
                 for (const f of tempFiles) {
-                    await sshTransfer.deleteRemote(f.server).catch(() => {});
+                    await host.removeFile(f.server).catch(() => {});
                 }
-                sshTransfer.end();
             }
         };
 
@@ -127,7 +129,7 @@ export async function dump(
                 // Execute backup command on the server, capturing all SQL Server messages.
                 // Use requestTimeout=0 (no timeout) - large DB backups can run for hours.
                 // Stream progress messages in real-time so the UI shows live updates.
-                await executeQueryWithMessages(config, backupQuery, undefined, 0, (msg) => {
+                await executeQueryWithMessages(config, host, backupQuery, undefined, 0, (msg: SqlServerMessage) => {
                     if (msg.message) {
                         log(`SQL Server: ${msg.message}`, "info", "general");
                     }
@@ -137,28 +139,39 @@ export async function dump(
                 tempFiles.push({ server: serverBakPath, local: localBakPath });
             }
 
-            // Retrieve .bak files - either via SSH or from local filesystem
-            if (useSSH) {
-                log(`Connecting via SSH to download backup file(s)...`);
-                sshTransfer = new MssqlSshTransfer();
-                await sshTransfer.connect(config);
+            // Retrieve the .bak files. With a shared mount they are already
+            // visible locally, which is why this never copies in that case:
+            // the two paths are the same file seen from two sides.
+            for (const f of tempFiles) {
+                const alreadyLocal = await fs.stat(f.local).then(() => true, () => false);
+                if (alreadyLocal) continue;
 
-                for (const f of tempFiles) {
-                    log(`Downloading: ${f.server} → ${f.local}`);
-                    await sshTransfer.download(f.server, f.local);
-                    log(`Downloaded: ${path.basename(f.server)}`);
+                if (!useSSH) {
+                    throw new Error(
+                        `Backup file not found at ${f.local}. ` +
+                        `Check that localBackupPath is configured correctly and matches your Docker volume mount or shared filesystem. ` +
+                        `Alternatively, switch to SSH mode for remote SQL Servers.`
+                    );
                 }
-            } else {
-                // Local mode: verify files exist on the shared filesystem
-                for (const f of tempFiles) {
-                    if (!existsSync(f.local)) {
-                        throw new Error(
-                            `Backup file not found at ${f.local}. ` +
-                            `Check that localBackupPath is configured correctly and matches your Docker volume mount or shared filesystem. ` +
-                            `Alternatively, switch to SSH mode for remote SQL Servers.`
-                        );
-                    }
+
+                log(`Downloading: ${f.server} → ${f.local}`);
+                try {
+                    await host.getFile(f.server, f.local);
+                } catch (error: unknown) {
+                    // SQL Server reported this backup as written, so the file is
+                    // missing only in the sense that this connection looks at a
+                    // different filesystem than SQL Server does. The raw "No such
+                    // file" gives no hint of that, and it is the single most
+                    // common way this mode is misconfigured.
+                    const detail = error instanceof Error ? error.message : String(error);
+                    throw new Error(
+                        `${detail}. SQL Server reported the backup as written to ${f.server}, so that path ` +
+                        `is not the same directory on the machine this connection reaches. Usual causes: ` +
+                        `SQL Server runs in a container and the path is not bind-mounted to the identical ` +
+                        `path on the host, or the SSH connection goes to a different machine than SQL Server.`
+                    );
                 }
+                log(`Downloaded: ${path.basename(f.server)}`);
             }
 
             // Copy backup file(s) to final destination
@@ -233,7 +246,10 @@ export async function dump(
         }
     } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
-        log(`Dump failed: ${message}`, "error");
+        // Not logged here: the caller turns this into a thrown
+        // `Dump failed: <message>` that the runner reports. Logging it
+        // too put the same failure in the run log twice, which the
+        // other database adapters never did.
         return {
             success: false,
             logs,

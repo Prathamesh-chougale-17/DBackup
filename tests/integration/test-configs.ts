@@ -1,4 +1,6 @@
 import { execSync } from 'child_process';
+import { readFileSync } from 'fs';
+import path from 'path';
 
 // Shared configuration for Integration Tests and Seeding
 const TEST_HOST = process.env.TEST_DB_HOST || 'localhost';
@@ -256,3 +258,137 @@ export function shouldSkipDatabase(name: string, type: string): boolean {
 
     return false;
 }
+
+// ---------------------------------------------------------------------------
+// SSH mode
+//
+// These sources reach their database through the `ssh-host` container from
+// docker-compose.test.yml. The `host` field names a compose service, which
+// only resolves from inside that container - so a test that passes proves the
+// command really ran on the remote host and not in the test process.
+//
+// Note the CLI requirements above do NOT apply here. In SSH mode the dump and
+// restore tools live on the target, so these tests run on a machine with no
+// database client installed at all.
+// ---------------------------------------------------------------------------
+
+const SSH_KEY_PATH = path.resolve(__dirname, '../../.ssh-test/id_ed25519');
+const SSH_PORT = 22022;
+
+function readSshTestKey(): string | null {
+    try {
+        return readFileSync(SSH_KEY_PATH, 'utf8');
+    } catch {
+        return null;
+    }
+}
+
+const sshPrivateKey = readSshTestKey();
+
+/**
+ * Probe the sshd port in a child process, since a collection-time check cannot
+ * await anything. The key existing only proves someone ran the generator once,
+ * not that the container is up, so both have to hold.
+ */
+function isPortOpen(host: string, port: number): boolean {
+    const probe = [
+        'const net=require("net");',
+        `const s=net.connect(${port},process.argv[1]);`,
+        's.on("connect",()=>{s.destroy();process.exit(0)});',
+        's.on("error",()=>process.exit(1));',
+        's.setTimeout(1500,()=>{s.destroy();process.exit(1)});',
+    ].join('');
+    try {
+        execSync(`node -e '${probe}' ${host}`, { stdio: 'ignore' });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+export const sshHostAvailable = sshPrivateKey !== null && isPortOpen(TEST_HOST, SSH_PORT);
+
+if (!sshHostAvailable) {
+    console.log('⚠️  ssh-host container not reachable - SSH mode tests will be skipped');
+}
+
+/** The prefixed convention every adapter but SQLite uses. */
+const sshFields = {
+    connectionMode: 'ssh',
+    sshHost: TEST_HOST,
+    sshPort: SSH_PORT,
+    sshUsername: 'root',
+    sshAuthType: 'privateKey',
+    sshPrivateKey: sshPrivateKey ?? '',
+};
+
+export const sshTestDatabases = [
+    // MariaDB is the native match for Debian's mariadb-client.
+    //
+    // mysql-9 is deliberately absent: MySQL 9 removed mysql_native_password,
+    // and Debian 12's MariaDB client cannot authenticate with what replaced it.
+    // mysql-57 covers the `mysql` adapter type instead.
+    {
+        name: 'MariaDB 11 over SSH',
+        config: {
+            type: 'mariadb', host: 'mariadb-11', port: 3306,
+            user: 'root', password: 'rootpassword', database: 'testdb',
+            ...sshFields,
+        },
+    },
+    {
+        name: 'MySQL 5.7 over SSH',
+        config: {
+            type: 'mysql', host: 'mysql-57', port: 3306,
+            user: 'root', password: 'rootpassword', database: 'testdb',
+            ...sshFields,
+        },
+    },
+    // postgres-17 is absent for the mirror-image reason: pg_dump refuses to
+    // read a server newer than itself, and Debian 12 ships client 15.
+    {
+        name: 'PostgreSQL 12 over SSH',
+        config: {
+            type: 'postgres', host: 'postgres-12', port: 5432,
+            user: 'testuser', password: 'testpassword', database: 'testdb',
+            ...sshFields,
+        },
+    },
+    {
+        name: 'Redis 8 over SSH',
+        config: {
+            type: 'redis', host: 'redis-8', port: 6379,
+            password: 'testpassword', database: 0,
+            ...sshFields,
+        },
+    },
+    {
+        name: 'Valkey 8 over SSH',
+        config: {
+            type: 'valkey', host: 'valkey-8', port: 6379,
+            password: 'testpassword', database: 0,
+            ...sshFields,
+        },
+    },
+    // SQLite stores `mode` plus unprefixed SSH keys, see sqlite/transport.ts.
+    // The file is seeded by the container's entrypoint.
+    {
+        name: 'SQLite over SSH',
+        config: {
+            type: 'sqlite',
+            mode: 'ssh',
+            path: '/data/testdb.sqlite',
+            host: TEST_HOST,
+            port: SSH_PORT,
+            username: 'root',
+            authType: 'privateKey',
+            privateKey: sshPrivateKey ?? '',
+        },
+    },
+];
+
+/**
+ * Engines whose dump is a point-in-time snapshot the server writes itself,
+ * with no restore counterpart to feed it back through.
+ */
+export const sshRestoreUnsupported = ['redis', 'valkey'];

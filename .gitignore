@@ -72,3 +72,5 @@ storage/avatars/*
 
 # Security Audits
 security/*
+# SSH key pair generated for the integration tests
+.ssh-test/

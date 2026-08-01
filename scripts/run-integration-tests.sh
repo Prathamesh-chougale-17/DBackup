@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# The ssh-host container needs its authorized_keys before compose starts it.
+"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ensure-ssh-test-key.sh"
+
 # Check if containers are already running appropriately
 if [ "$(docker compose -f docker-compose.test.yml ps -q)" ]; then
     echo "ℹ️  Containers are already running. Will keep them running after tests."

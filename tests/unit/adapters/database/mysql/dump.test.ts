@@ -1,442 +1,239 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { MySQLConfig } from "@/lib/adapters/definitions";
 
-// --- Hoisted mocks ---
+// --- Hoisted mocks: only the filesystem and TAR packing, never the transport ---
 
-const {
-    mockGetDatabases,
-    mockIsMultiDbTar,
-    mockCreateMultiDbTar,
-    mockCreateTempDir,
-    mockCleanupTempDir,
-    mockFsStat,
-    mockSpawnProcess,
-    mockIsSSHMode,
-    mockSshConnect,
-    mockSshExecStream,
-    mockSshEnd,
-    mockExtractSshConfig,
-    mockRemoteBinaryCheck,
-    mockBuildMysqlArgs,
-    PassThrough,
-} = vi.hoisted(() => {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { PassThrough } = require("stream") as { PassThrough: typeof import("stream").PassThrough };
-    return {
+const { mockGetDatabases, mockCreateMultiDbTar, mockCreateTempDir, mockCleanupTempDir, mockFsStat } =
+    vi.hoisted(() => ({
         mockGetDatabases: vi.fn(),
-        mockIsMultiDbTar: vi.fn(),
         mockCreateMultiDbTar: vi.fn(),
         mockCreateTempDir: vi.fn(),
         mockCleanupTempDir: vi.fn(),
         mockFsStat: vi.fn(),
-        mockSpawnProcess: vi.fn(),
-        mockIsSSHMode: vi.fn(),
-        mockSshConnect: vi.fn(),
-        mockSshExecStream: vi.fn(),
-        mockSshEnd: vi.fn(),
-        mockExtractSshConfig: vi.fn(() => ({ host: "jump.example.com", port: 22 })),
-        mockRemoteBinaryCheck: vi.fn(() => Promise.resolve("mysqldump")),
-        mockBuildMysqlArgs: vi.fn(() => ["-h", "db.internal", "-u", "root"]),
-        PassThrough,
-    };
-});
+    }));
 
 vi.mock("@/lib/adapters/database/mysql/connection", () => ({
-    getDatabases: (...args: any[]) => mockGetDatabases(...args),
-    execFileAsync: vi.fn(),
-}));
-
-vi.mock("@/lib/adapters/database/mysql/tools", () => ({
-    getMysqldumpCommand: vi.fn(() => "mysqldump"),
-    getMysqlCommand: vi.fn(() => "mysql"),
-    getMysqladminCommand: vi.fn(() => "mysqladmin"),
-    initMysqlTools: vi.fn(),
-}));
-
-vi.mock("@/lib/adapters/database/mysql/dialects", () => ({
-    getDialect: vi.fn(() => ({
-        getDumpArgs: vi.fn((_cfg: any, dbs: string[]) => [
-            "--host=localhost",
-            "--user=root",
-            "--databases",
-            ...dbs,
-        ]),
-        getRestoreArgs: vi.fn(),
-    })),
+    getDatabases: (...args: unknown[]) => mockGetDatabases(...args),
 }));
 
 vi.mock("@/lib/adapters/database/common/tar-utils", () => ({
-    isMultiDbTar: (...args: any[]) => mockIsMultiDbTar(...args),
-    createMultiDbTar: (...args: any[]) => mockCreateMultiDbTar(...args),
-    createTempDir: (...args: any[]) => mockCreateTempDir(...args),
-    cleanupTempDir: (...args: any[]) => mockCleanupTempDir(...args),
-}));
-
-vi.mock("child_process", () => ({
-    spawn: (...args: any[]) => mockSpawnProcess(...args),
-    default: { spawn: (...args: any[]) => mockSpawnProcess(...args) },
-}));
-
-vi.mock("@/lib/ssh", () => ({
-    SshClient: class {
-        connect = (...args: any[]) => mockSshConnect(...args);
-        execStream = (...args: any[]) => mockSshExecStream(...args);
-        end = (...args: any[]) => mockSshEnd(...args);
-        uploadFile = vi.fn().mockResolvedValue(undefined);
-    },
-    isSSHMode: (...args: any[]) => mockIsSSHMode(...args),
-    extractSshConfig: (...args: any[]) => (mockExtractSshConfig as any)(...args),
-    buildMysqlArgs: (...args: any[]) => (mockBuildMysqlArgs as any)(...args),
-    withLocalMyCnf: vi.fn(async (password: any, callback: any) =>
-        password ? callback('/tmp/mock-local.cnf') : callback(undefined)
-    ),
-    withRemoteMyCnf: vi.fn(async (_ssh: any, password: any, callback: any) =>
-        password ? callback('/tmp/mock.cnf') : callback(undefined)
-    ),
-    remoteEnv: vi.fn((_env: any, cmd: string) => cmd),
-    remoteBinaryCheck: (...args: any[]) => (mockRemoteBinaryCheck as any)(...args),
-    shellEscape: vi.fn((s: string) => s),
+    isMultiDbTar: vi.fn(),
+    createMultiDbTar: (...args: unknown[]) => mockCreateMultiDbTar(...args),
+    createTempDir: (...args: unknown[]) => mockCreateTempDir(...args),
+    cleanupTempDir: (...args: unknown[]) => mockCleanupTempDir(...args),
 }));
 
 vi.mock("fs/promises", () => ({
-    default: { stat: (...args: any[]) => mockFsStat(...args) },
-    stat: (...args: any[]) => mockFsStat(...args),
+    default: { stat: (...args: unknown[]) => mockFsStat(...args) },
+    stat: (...args: unknown[]) => mockFsStat(...args),
 }));
 
-vi.mock("fs", () => {
+vi.mock("fs", async (importOriginal) => {
+    const { PassThrough } = await import("stream");
     const createWriteStream = vi.fn(() => {
-        const stream = new PassThrough() as any;
+        // The dump pipes into this stream, so finish has to fire for the write
+        // to be considered complete.
+        const stream = new PassThrough();
         stream.on("pipe", () => { process.nextTick(() => stream.emit("finish")); });
         return stream;
     });
-    return {
-        default: { createWriteStream },
-        createWriteStream,
-    };
+    return { ...(await importOriginal<typeof import("fs")>()), default: { createWriteStream }, createWriteStream };
 });
 
+import { createFakeHost, type FakeHost } from "@/lib/testing/fake-host";
 import { dump, dumpOne } from "@/lib/adapters/database/mysql/dump";
+import type { HostKind } from "@/lib/transport/types";
+import type { MySQLConfig } from "@/lib/adapters/definitions";
 
-// -------------------------------------------------------------------------
-// Helpers
-// -------------------------------------------------------------------------
+const baseConfig = {
+    host: "db.internal",
+    port: 3306,
+    user: "root",
+    password: "secret",
+    database: "shop",
+} as unknown as MySQLConfig;
 
-function buildConfig(overrides: Partial<MySQLConfig & { type?: string; detectedVersion?: string }> = {}): MySQLConfig & { type?: string; detectedVersion?: string } {
-    return {
-        host: "localhost",
-        port: 3306,
-        user: "root",
-        password: "secret",
-        database: "testdb",
-        disableSsl: false,
-        ...overrides,
-    } as any;
+/** A host whose mysqldump writes `stdout` and exits with `code`. */
+function dumpHost(kind: HostKind, opts: { stdout?: string; stderr?: string; code?: number } = {}): FakeHost {
+    return createFakeHost({ kind, onSpawn: () => opts });
 }
 
-/** Creates a mock spawn process that emits 'close' with the given exit code. */
-function makeSpawnProcess(exitCode = 0, stderrData?: string) {
-    const proc = new PassThrough() as any;
-    proc.stderr = new PassThrough();
-    proc.stdin = new PassThrough();
-    proc.stdout = new PassThrough();
-    proc.kill = vi.fn();
-    process.nextTick(() => {
-        if (stderrData) proc.stderr.emit("data", Buffer.from(stderrData));
-        proc.emit("close", exitCode);
-    });
-    return proc;
-}
-
-describe("MySQL Dump - dump()", () => {
+describe.each<HostKind>(["direct", "ssh"])("MySQL dump over a %s host", (kind) => {
     beforeEach(() => {
         vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
-        mockFsStat.mockResolvedValue({ size: 1024 * 100 });
+        mockFsStat.mockResolvedValue({ size: 2048 });
+        mockCreateTempDir.mockResolvedValue("/tmp/mysql-multidb-x");
         mockCleanupTempDir.mockResolvedValue(undefined);
-        mockSpawnProcess.mockImplementation(() => makeSpawnProcess(0));
     });
 
-    // -------------------------------------------------------------------------
-    // Single-database dumps
-    // -------------------------------------------------------------------------
-
-    it("dumps a single database and returns success", async () => {
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
+    it("dumps a single database and reports the size", async () => {
+        const host = dumpHost(kind);
+        const result = await dump(baseConfig, "/tmp/out.sql", host);
 
         expect(result.success).toBe(true);
-        expect(result.size).toBe(1024 * 100);
-        expect(mockSpawnProcess).toHaveBeenCalledWith(
-            "mysqldump",
-            expect.arrayContaining(["mydb"])
-        );
+        expect(result.size).toBe(2048);
+        expect(result.path).toBe("/tmp/out.sql");
     });
 
-    it("uses mysqldump command from tools module", async () => {
-        await dump(buildConfig({ database: "mydb" }), "/tmp/output.sql");
+    it("runs the dump binary with the database as a separate argument", async () => {
+        const host = dumpHost(kind);
+        await dump(baseConfig, "/tmp/out.sql", host);
 
-        expect(mockSpawnProcess).toHaveBeenCalledWith("mysqldump", expect.any(Array));
+        const argv = host.calls.spawn[0];
+        expect(argv[0]).toBe("mariadb-dump");
+        expect(argv).toContain("--databases");
+        expect(argv[argv.indexOf("--databases") + 1]).toBe("shop");
     });
 
-    // -------------------------------------------------------------------------
-    // dumpOne() - capability export for combined DB+directory backups (JobSource)
-    // -------------------------------------------------------------------------
+    it("applies the version specific dialect flags", async () => {
+        // The SSH path used to hand-roll a smaller argument set and never saw these.
+        const host = dumpHost(kind);
+        await dump({ ...baseConfig, detectedVersion: "8.0.44" } as never, "/tmp/out.sql", host);
 
-    it("dumpOne() dumps the given database directly, without TAR wrapping", async () => {
-        const result = await dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.sql");
-
-        expect(result).toEqual({ size: 1024 * 100 });
-        expect(mockSpawnProcess).toHaveBeenCalledWith(
-            "mysqldump",
-            expect.arrayContaining(["otherdb"])
-        );
-        expect(mockCreateMultiDbTar).not.toHaveBeenCalled();
+        expect(host.calls.spawn[0]).toContain("--default-character-set=utf8mb4");
+        expect(host.calls.spawn[0]).toContain("--net-buffer-length=16384");
     });
 
-    it("dumpOne() works without an onLog callback", async () => {
-        await expect(dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.sql")).resolves.toEqual({ size: 1024 * 100 });
+    it("appends extra options from the config", async () => {
+        const host = dumpHost(kind);
+        await dump({ ...baseConfig, options: "--single-transaction --quick" } as never, "/tmp/out.sql", host);
+
+        expect(host.calls.spawn[0]).toContain("--single-transaction");
+        expect(host.calls.spawn[0]).toContain("--quick");
     });
 
-    it("dumpOne() forwards log messages when onLog is provided", async () => {
-        const logs: string[] = [];
-        await dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.sql", (msg) => logs.push(msg));
-
-        expect(logs.some((l) => l.includes("otherdb"))).toBe(true);
-    });
-
-    it("returns failure when dump file is empty after process exit", async () => {
+    it("fails when the dump file ends up empty", async () => {
         mockFsStat.mockResolvedValue({ size: 0 });
-        mockSpawnProcess.mockImplementation(() => makeSpawnProcess(0));
-
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
+        const result = await dump(baseConfig, "/tmp/out.sql", dumpHost(kind));
 
         expect(result.success).toBe(false);
-        expect(result.error).toMatch(/empty/i);
+        expect(result.error).toContain("is empty");
     });
 
-    it("returns failure when mysqldump exits with non-zero code", async () => {
-        mockSpawnProcess.mockImplementation(() => makeSpawnProcess(1));
-
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
+    it("fails when the dump binary exits non-zero", async () => {
+        const result = await dump(baseConfig, "/tmp/out.sql", dumpHost(kind, { code: 1 }));
 
         expect(result.success).toBe(false);
+        expect(result.error).toContain("exited with code 1");
     });
 
-    it("forwards non-filtered stderr messages to the log", async () => {
-        mockSpawnProcess.mockImplementation(() => makeSpawnProcess(0, "Table does not support optimize.\n"));
+    it("forwards real stderr output to the log", async () => {
         const logs: string[] = [];
+        await dump(baseConfig, "/tmp/out.sql", dumpHost(kind, { stderr: "table is corrupt" }), (m) => logs.push(m));
 
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", (msg) => {
-            logs.push(msg);
-        });
-
-        expect(result.success).toBe(true);
-        expect(logs.some((l) => l.includes("Table does not support"))).toBe(true);
+        await vi.waitFor(() => expect(logs.some(l => l.includes("table is corrupt"))).toBe(true));
     });
 
-    it("filters 'Using a password' warnings from stderr output", async () => {
-        mockSpawnProcess.mockImplementation(() =>
-            makeSpawnProcess(0, "Using a password on the command line interface can be insecure.\n")
-        );
-        const logs: string[] = [];
+    it.each(["mysqldump: [Warning] Using a password on the command line", "Deprecated program name"])(
+        "filters the benign warning %s",
+        async (warning) => {
+            const logs: string[] = [];
+            await dump(baseConfig, "/tmp/out.sql", dumpHost(kind, { stderr: warning }), (m) => logs.push(m));
 
-        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", (msg) => {
-            logs.push(msg);
-        });
+            expect(logs.some(l => l.includes(warning))).toBe(false);
+        },
+    );
 
-        expect(logs.some((l) => l.toLowerCase().includes("using a password"))).toBe(false);
-    });
+    it("discovers the databases when the config names none", async () => {
+        mockGetDatabases.mockResolvedValue(["shop"]);
+        const host = dumpHost(kind);
 
-    // -------------------------------------------------------------------------
-    // Database discovery when no database specified
-    // -------------------------------------------------------------------------
+        const result = await dump({ ...baseConfig, database: "" } as never, "/tmp/out.sql", host);
 
-    it("discovers databases via getDatabases when none specified in config", async () => {
-        mockGetDatabases.mockResolvedValue(["discovered_db"]);
-
-        const result = await dump(buildConfig({ database: undefined as any }), "/tmp/out.sql");
-
-        expect(mockGetDatabases).toHaveBeenCalled();
+        expect(mockGetDatabases).toHaveBeenCalledWith(expect.anything(), host);
         expect(result.success).toBe(true);
     });
 
-    it("returns failure when no databases exist on the server", async () => {
+    it("fails when the server has no databases at all", async () => {
         mockGetDatabases.mockResolvedValue([]);
-
-        const result = await dump(buildConfig({ database: undefined as any }), "/tmp/out.sql");
+        const result = await dump({ ...baseConfig, database: "" } as never, "/tmp/out.sql", dumpHost(kind));
 
         expect(result.success).toBe(false);
-        expect(result.error).toMatch(/No databases found/i);
+        expect(result.error).toContain("No databases found");
     });
 
-    it("parses comma-separated database list from config", async () => {
-        // Create processes inside mockImplementation so nextTick fires AFTER spawn returns
-        // and the 'close' listener is already registered.
-        mockSpawnProcess.mockImplementation(() => makeSpawnProcess(0));
-        mockCreateTempDir.mockResolvedValue("/tmp/mysql-multidb-test");
-        mockCreateMultiDbTar.mockResolvedValue({
-            databases: [{ name: "db1" }, { name: "db2" }],
-        });
+    it("splits a comma separated database list", async () => {
+        mockCreateMultiDbTar.mockResolvedValue({ databases: [{ name: "a" }, { name: "b" }] });
+        const host = dumpHost(kind);
 
-        const result = await dump(buildConfig({ database: "db1,db2" }), "/tmp/multi.tar");
+        const result = await dump({ ...baseConfig, database: "a,b" } as never, "/tmp/out.tar", host);
 
-        expect(result.success).toBe(true);
-        expect(mockCreateMultiDbTar).toHaveBeenCalled();
-        expect(mockCleanupTempDir).toHaveBeenCalledWith("/tmp/mysql-multidb-test");
+        expect(host.calls.spawn).toHaveLength(2);
+        expect(result.metadata?.multiDb?.databases).toEqual(["a", "b"]);
     });
 
-    // -------------------------------------------------------------------------
-    // Multi-database TAR archive
-    // -------------------------------------------------------------------------
+    it("packs several databases into a TAR with a manifest", async () => {
+        mockCreateMultiDbTar.mockResolvedValue({ databases: [{ name: "shop" }, { name: "analytics" }] });
+        const host = dumpHost(kind);
 
-    it("creates a TAR archive for an array of databases", async () => {
-        // Create processes inside mockImplementation so nextTick fires AFTER spawn returns.
-        mockSpawnProcess.mockImplementation(() => makeSpawnProcess(0));
-        mockCreateTempDir.mockResolvedValue("/tmp/mysql-multidb-xyz");
-        mockCreateMultiDbTar.mockResolvedValue({
-            databases: [{ name: "shop" }, { name: "analytics" }],
-        });
-
-        const result = await dump(
-            buildConfig({ database: ["shop", "analytics"] as any }),
-            "/tmp/multi.tar"
-        );
+        const result = await dump({ ...baseConfig, database: ["shop", "analytics"] } as never, "/tmp/out.tar", host);
 
         expect(result.success).toBe(true);
         expect(result.metadata?.multiDb?.format).toBe("tar");
-        expect(result.metadata?.multiDb?.databases).toEqual(["shop", "analytics"]);
+        expect(mockCreateMultiDbTar).toHaveBeenCalled();
     });
 
-    it("cleans up the temp directory even when a multi-db dump fails", async () => {
-        mockCreateTempDir.mockResolvedValue("/tmp/mysql-multidb-fail");
-        mockSpawnProcess.mockImplementation(() => makeSpawnProcess(1)); // dump fails
+    it("cleans up the temp directory when a multi database dump fails", async () => {
+        mockCreateMultiDbTar.mockRejectedValue(new Error("tar failed"));
 
-        const result = await dump(
-            buildConfig({ database: "db1,db2" }),
-            "/tmp/multi.tar"
-        );
+        const result = await dump({ ...baseConfig, database: ["a", "b"] } as never, "/tmp/out.tar", dumpHost(kind));
 
         expect(result.success).toBe(false);
-        expect(mockCleanupTempDir).toHaveBeenCalledWith("/tmp/mysql-multidb-fail");
+        expect(mockCleanupTempDir).toHaveBeenCalledWith("/tmp/mysql-multidb-x");
+    });
+
+    describe("dumpOne()", () => {
+        it("writes a plain file with no TAR wrapping", async () => {
+            const host = dumpHost(kind);
+            const result = await dumpOne(baseConfig, "shop", "/tmp/shop.sql", host);
+
+            expect(result.size).toBe(2048);
+            expect(mockCreateMultiDbTar).not.toHaveBeenCalled();
+        });
+
+        it("works without a log callback", async () => {
+            await expect(dumpOne(baseConfig, "shop", "/tmp/shop.sql", dumpHost(kind))).resolves.toBeDefined();
+        });
+
+        it("forwards log messages when one is given", async () => {
+            const logs: string[] = [];
+            await dumpOne(baseConfig, "shop", "/tmp/shop.sql", dumpHost(kind), (m) => logs.push(m));
+
+            expect(logs.some(l => l.includes("Dumping database: shop"))).toBe(true);
+        });
     });
 });
 
-// -------------------------------------------------------------------------
-// SSH dump path
-// -------------------------------------------------------------------------
-
-/** Creates a mock SSH stream that emits exit and optional stderr data. */
-function makeSshDumpStream(exitCode = 0, stderrData?: string) {
-    const stream = new PassThrough() as any;
-    stream.stderr = new PassThrough();
-    process.nextTick(() => {
-        if (stderrData) stream.stderr.emit("data", Buffer.from(stderrData));
-        stream.emit("exit", exitCode, null);
-    });
-    return stream;
-}
-
-describe("MySQL Dump - SSH path", () => {
+describe("MySQL dump transport differences", () => {
     beforeEach(() => {
         vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(true);
-        mockFsStat.mockResolvedValue({ size: 1024 * 100 });
-        mockCleanupTempDir.mockResolvedValue(undefined);
-        mockSshConnect.mockResolvedValue(undefined);
-        mockSshEnd.mockReturnValue(undefined);
-        mockRemoteBinaryCheck.mockResolvedValue("mysqldump");
-        mockBuildMysqlArgs.mockReturnValue(["-h", "db.internal", "-u", "root"]);
-        mockExtractSshConfig.mockReturnValue({ host: "jump.example.com", port: 22 });
-        mockSshExecStream.mockImplementation((_cmd: any, callback: any) => {
-            callback(null, makeSshDumpStream(0));
-        });
+        mockFsStat.mockResolvedValue({ size: 2048 });
     });
 
-    it("dumps a single database via SSH successfully", async () => {
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
+    it("forces TCP only when the client runs beside DBackup", async () => {
+        const direct = dumpHost("direct");
+        const ssh = dumpHost("ssh");
 
-        expect(result.success).toBe(true);
-        expect(result.size).toBe(1024 * 100);
-        expect(mockSshExecStream).toHaveBeenCalled();
+        await dump(baseConfig, "/tmp/out.sql", direct);
+        await dump(baseConfig, "/tmp/out.sql", ssh);
+
+        expect(direct.calls.spawn[0]).toContain("--protocol=tcp");
+        expect(ssh.calls.spawn[0]).not.toContain("--protocol=tcp");
     });
 
-    it("includes extra options from config.options in SSH args", async () => {
-        const result = await dump(
-            buildConfig({ database: "mydb", options: "--no-create-info --single-transaction" } as any),
-            "/tmp/mydb.sql"
-        );
+    it("keeps the password out of argv on both transports", async () => {
+        for (const kind of ["direct", "ssh"] as HostKind[]) {
+            const host = dumpHost(kind);
+            await dump(baseConfig, "/tmp/out.sql", host);
 
-        expect(result.success).toBe(true);
+            expect(host.calls.spawn[0].join(" ")).not.toContain("secret");
+            expect(host.calls.tempFiles[0]).toMatchObject({ mode: 0o600 });
+        }
     });
 
-    it("forwards non-filtered SSH stderr to the log", async () => {
-        mockSshExecStream.mockImplementation((_cmd: any, callback: any) => {
-            callback(null, makeSshDumpStream(0, "Table storage engine not found.\n"));
-        });
-        const logs: string[] = [];
+    it("masks the password in the logged command", async () => {
+        const logs: Array<string | undefined> = [];
+        await dump(baseConfig, "/tmp/out.sql", dumpHost("ssh"), (_m, _l, _t, details) => logs.push(details));
 
-        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", (msg) => logs.push(msg));
-
-        expect(logs.some((l) => l.includes("Table storage engine not found"))).toBe(true);
-    });
-
-    it("filters 'Using a password' warnings from SSH stderr", async () => {
-        mockSshExecStream.mockImplementation((_cmd: any, callback: any) => {
-            callback(null, makeSshDumpStream(0, "Using a password on the command line interface can be insecure.\n"));
-        });
-        const logs: string[] = [];
-
-        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", (msg) => logs.push(msg));
-
-        expect(logs.some((l) => l.toLowerCase().includes("using a password"))).toBe(false);
-    });
-
-    it("filters 'Deprecated program name' warnings from SSH stderr", async () => {
-        mockSshExecStream.mockImplementation((_cmd: any, callback: any) => {
-            callback(null, makeSshDumpStream(0, "Deprecated program name. It will be removed in a future release.\n"));
-        });
-        const logs: string[] = [];
-
-        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", (msg) => logs.push(msg));
-
-        expect(logs.some((l) => l.toLowerCase().includes("deprecated program name"))).toBe(false);
-    });
-
-    it("returns failure when remote mysqldump exits with non-zero code", async () => {
-        mockSshExecStream.mockImplementation((_cmd: any, callback: any) => {
-            callback(null, makeSshDumpStream(1));
-        });
-
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
-
-        expect(result.success).toBe(false);
-    });
-
-    it("returns failure when the dump file is empty after SSH dump", async () => {
-        mockFsStat.mockResolvedValue({ size: 0 });
-
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
-
-        expect(result.success).toBe(false);
-        expect(result.error).toMatch(/empty/i);
-    });
-
-    it("returns failure when execStream yields an error", async () => {
-        mockSshExecStream.mockImplementation((_cmd: any, callback: any) => {
-            callback(new Error("execStream failed"), null);
-        });
-
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
-
-        expect(result.success).toBe(false);
-    });
-
-    it("calls ssh.end in finally block even on failure", async () => {
-        mockSshExecStream.mockImplementation((_cmd: any, callback: any) => {
-            callback(null, makeSshDumpStream(1));
-        });
-
-        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
-
-        expect(mockSshEnd).toHaveBeenCalled();
+        expect(logs.join(" ")).not.toContain("secret");
     });
 });

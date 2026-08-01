@@ -1,146 +1,111 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 
-// ---------------------------------------------------------------------------
-// Hoisted mock state
-// ---------------------------------------------------------------------------
-const { mockExecFile, mockIsSSHMode } = vi.hoisted(() => ({
-    mockExecFile: vi.fn(),
-    mockIsSSHMode: vi.fn().mockReturnValue(false),
-}));
-
-// Include `default` export so CJS interop works correctly.
-vi.mock("child_process", () => ({
-    execFile: mockExecFile,
-    default: { execFile: mockExecFile },
-}));
-
-vi.mock("@/lib/ssh", () => ({
-    SshClient: class {
-        connect = vi.fn();
-        exec = vi.fn();
-        end = vi.fn();
-    },
-    isSSHMode: (...args: unknown[]) => mockIsSSHMode(...args),
-    extractSqliteSshConfig: vi.fn(),
-    remoteBinaryCheck: vi.fn(),
-    shellEscape: vi.fn((s: string) => s),
-}));
-
+import { createFakeHost, type FakeHost } from "@/lib/testing/fake-host";
 import { getTables, getTableData } from "@/lib/adapters/database/sqlite/browser";
+import type { HostKind } from "@/lib/transport/types";
 
-/**
- * Helper: queue callback-style results for execFile calls.
- * util.promisify(execFile) resolves with { stdout, stderr } so the callback
- * must receive the result as a single object (matching Node's custom promisify).
- */
-function queueExecResponses(...responses: Array<{ stdout: string; stderr?: string }>) {
-    for (const r of responses) {
-        mockExecFile.mockImplementationOnce((...args: unknown[]) => {
-            const cb = args[args.length - 1] as (
-                err: null,
-                result: { stdout: string; stderr: string }
-            ) => void;
-            cb(null, { stdout: r.stdout, stderr: r.stderr ?? "" });
-        });
-    }
+const baseConfig = { mode: "local", path: "/data/app.sqlite" };
+
+/** The SQL or dot command a recorded call issued. */
+function queryOf(argv: string[]): string {
+    return argv[argv.length - 1] ?? "";
 }
 
-const baseConfig = {
-    path: "/data/app.db",
-    mode: "local",
-    sqliteBinaryPath: "sqlite3",
-};
+function browserHost(kind: HostKind, responses: { tables?: string; counts?: string; pragma?: string; count?: string; data?: string }): FakeHost {
+    return createFakeHost({
+        kind,
+        onExec: (argv) => {
+            const query = queryOf(argv);
+            if (query.includes("sqlite_master")) return { stdout: responses.tables ?? "" };
+            if (query.includes("UNION ALL") || query.startsWith("SELECT count(*)")) return { stdout: responses.counts ?? "" };
+            if (query.startsWith("PRAGMA")) return { stdout: responses.pragma ?? "" };
+            if (query.startsWith("SELECT COUNT(*)")) return { stdout: responses.count ?? "" };
+            return { stdout: responses.data ?? "" };
+        },
+    });
+}
 
-describe("SQLite browser - getTables", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
+describe.each<HostKind>(["direct", "ssh"])("SQLite browser over a %s host", (kind) => {
+    describe("getTables()", () => {
+        it("parses tables and views", async () => {
+            const host = browserHost(kind, { tables: "users|table\nactive_users|view\n", counts: "42\n" });
+            const result = await getTables(baseConfig as never, "", host);
+
+            expect(result.map(t => t.type)).toEqual(["table", "view"]);
+            expect(result[0]).toMatchObject({ name: "users", rowCount: 42 });
+        });
+
+        it("returns nothing for a blank listing", async () => {
+            const host = browserHost(kind, { tables: "" });
+            expect(await getTables(baseConfig as never, "", host)).toEqual([]);
+        });
+
+        it("keeps the table list when the row counts cannot be read", async () => {
+            const host = createFakeHost({
+                kind,
+                onExec: (argv) => queryOf(argv).includes("sqlite_master")
+                    ? { stdout: "users|table\n" }
+                    : { code: 1, stderr: "no such table" },
+            });
+
+            const result = await getTables(baseConfig as never, "", host);
+            expect(result).toEqual([{ name: "users", type: "table" }]);
+        });
+
+        it("reports a failing listing rather than returning nothing", async () => {
+            const host = createFakeHost({ kind, onExec: () => ({ code: 1, stderr: "unable to open database" }) });
+            await expect(getTables(baseConfig as never, "", host))
+                .rejects.toThrow(/Failed to list tables.*unable to open database/);
+        });
     });
 
-    it("returns parsed tables from sqlite_master output", async () => {
-        queueExecResponses(
-            { stdout: "users|table\norders|table\n" }, // list tables
-            { stdout: "5\n12\n" }                      // row counts
-        );
+    describe("getTableData()", () => {
+        const options = { database: "app.sqlite", table: "users", page: 1, pageSize: 10 };
 
-        const result = await getTables(baseConfig as any, "");
+        it("returns rows, total count and columns", async () => {
+            const host = browserHost(kind, {
+                pragma: "0|id|INTEGER|1||1\n1|name|TEXT|0||0\n",
+                count: "2\n",
+                data: "1\tAlice\n2\tBob\n",
+            });
 
-        expect(result).toHaveLength(2);
-        expect(result[0]).toMatchObject({ name: "users", type: "table", rowCount: 5 });
-        expect(result[1]).toMatchObject({ name: "orders", type: "table", rowCount: 12 });
-    });
+            const result = await getTableData(baseConfig as never, options as never, host);
 
-    it("maps 'view' type correctly", async () => {
-        queueExecResponses({ stdout: "v_active|view\n" });
+            expect(result.totalCount).toBe(2);
+            expect(result.columns.map(c => c.name)).toEqual(["id", "name"]);
+            expect(result.rows).toHaveLength(2);
+        });
 
-        const result = await getTables(baseConfig as any, "");
+        it("asks for tab separated output so values keep their shape", async () => {
+            const host = browserHost(kind, { pragma: "", count: "0\n", data: "" });
+            await getTableData(baseConfig as never, options as never, host);
 
-        expect(result[0].type).toBe("view");
-    });
+            const dataCall = host.calls.exec.find(a => a.includes("-separator"))!;
+            expect(dataCall[dataCall.indexOf("-separator") + 1]).toBe("\t");
+        });
 
-    it("returns empty array when no tables exist", async () => {
-        queueExecResponses({ stdout: "" });
+        it("surfaces which of the three queries failed", async () => {
+            const host = createFakeHost({
+                kind,
+                onExec: (argv) => queryOf(argv).startsWith("SELECT COUNT(*)")
+                    ? { code: 1, stderr: "boom" }
+                    : { stdout: "" },
+            });
 
-        const result = await getTables(baseConfig as any, "");
+            await expect(getTableData(baseConfig as never, options as never, host))
+                .rejects.toThrow(/Count query failed: boom/);
+        });
 
-        expect(result).toEqual([]);
-    });
+        it("doubles quotes in an identifier", async () => {
+            const host = browserHost(kind, { pragma: "", count: "0\n", data: "" });
+            await getTableData(
+                baseConfig as never,
+                { ...options, table: 'we"ird' } as never,
+                host,
+            );
 
-    it("ignores empty lines", async () => {
-        queueExecResponses(
-            { stdout: "\nusers|table\n\n" },
-            { stdout: "7\n" }
-        );
-
-        const result = await getTables(baseConfig as any, "");
-
-        expect(result).toHaveLength(1);
-    });
-});
-
-describe("SQLite browser - getTableData", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
-    });
-
-    const options = {
-        database: "",
-        table: "users",
-        page: 1,
-        pageSize: 5,
-    };
-
-    it("returns columns and rows from PRAGMA and SELECT output", async () => {
-        queueExecResponses(
-            { stdout: "0|id|INTEGER|1|NULL|1\n1|name|TEXT|0|NULL|0\n" }, // PRAGMA
-            { stdout: "3\n" },                                            // COUNT(*)
-            { stdout: "1\tAlice\n2\tBob\n3\tCarl\n" }                    // SELECT *
-        );
-
-        const result = await getTableData(baseConfig as any, options as any);
-
-        expect(result.totalCount).toBe(3);
-        expect(result.columns).toHaveLength(2);
-        expect(result.columns[0]).toMatchObject({ name: "id", primaryKey: true });
-        expect(result.rows).toHaveLength(3);
-        expect(result.rows[0]).toEqual({ id: "1", name: "Alice" });
-    });
-
-    it("handles search with 'equals' matchMode", async () => {
-        queueExecResponses(
-            { stdout: "0|name|TEXT|0|NULL|0\n" },
-            { stdout: "1\n" },
-            { stdout: "Alice\n" }
-        );
-
-        const result = await getTableData(baseConfig as any, {
-            ...options,
-            search: "Alice",
-            searchColumn: "name",
-            matchMode: "equals",
-        } as any);
-
-        expect(result.rows).toHaveLength(1);
+            const dataCall = host.calls.exec.find(a => queryOf(a).startsWith("SELECT * FROM"))!;
+            expect(queryOf(dataCall)).toContain('"we""ird"');
+        });
     });
 });

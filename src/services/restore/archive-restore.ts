@@ -21,6 +21,7 @@ import crypto from "crypto";
 import { pipeline } from "stream/promises";
 import prisma from "@/lib/prisma";
 import { registry } from "@/lib/core/registry";
+import { createHost, resolveTransport } from "@/lib/transport";
 import { DatabaseAdapter, StorageAdapter, AdapterConfig } from "@/lib/core/interfaces";
 import { resolveAdapterConfig } from "@/lib/adapters/config-resolver";
 import { LogLevel, LogType, RESTORE_STAGES } from "@/lib/core/logs";
@@ -34,6 +35,7 @@ import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
 import { summariseExcluded, formatExcludeSummary } from "@/lib/exclude-summary";
 import { entryKey, IndexFileLine, partitionSymlinks } from "@/lib/archive/types";
 import { getTempDir } from "@/lib/temp-dir";
+import { stripTrailingSlashes } from "@/lib/paths";
 import { openArchiveForRestore } from "./file-restore";
 import type { RestoreInput } from "./types";
 
@@ -45,7 +47,7 @@ import type { RestoreInput } from "./types";
  * the path rather than a label followed by a file.
  */
 function entryLabel(sourceLabel: string, filePath: string): string {
-    return `${sourceLabel.replace(/\/+$/, "")}/${filePath}`;
+    return `${stripTrailingSlashes(sourceLabel)}/${filePath}`;
 }
 
 export interface ArchiveRestoreCallbacks {
@@ -421,63 +423,72 @@ async function restoreDatabases(
     dbConf.type = sourceConfig.adapterId;
     if (input.privilegedAuth) dbConf.privilegedAuth = input.privilegedAuth;
 
-    if (sourceAdapter.test) {
-        try {
-            const testResult = await sourceAdapter.test(dbConf) as { success: boolean; version?: string };
-            if (testResult.success && testResult.version) {
-                dbConf.detectedVersion = testResult.version;
-                log(`Target server version: ${testResult.version}`, 'info');
+    // One transport for the whole database portion: the version probe, the
+    // prepare step and every restoreOne share a single connection.
+    const host = createHost(resolveTransport(sourceAdapter, dbConf));
+    try {
+
+        if (sourceAdapter.test) {
+            try {
+                const testResult = await sourceAdapter.test(dbConf, host) as { success: boolean; version?: string };
+                if (testResult.success && testResult.version) {
+                    dbConf.detectedVersion = testResult.version;
+                    log(`Target server version: ${testResult.version}`, 'info');
+                }
+            } catch { /* ignore - cosmetic binary-selection hint only */ }
+        }
+
+        const targetNames = selectedDbNames.map((name) => getTargetDatabaseName(name, dbMapping));
+        if (sourceAdapter.prepareRestore) {
+            log(`Preparing target database(s): ${targetNames.join(', ')}...`, 'info');
+            try {
+                await sourceAdapter.prepareRestore(dbConf, targetNames, host);
+            } catch (e: unknown) {
+                const message = e instanceof Error ? e.message : String(e);
+                throw new Error(`Failed to prepare target database(s): ${message}`);
             }
-        } catch { /* ignore - cosmetic binary-selection hint only */ }
-    }
-
-    const targetNames = selectedDbNames.map((name) => getTargetDatabaseName(name, dbMapping));
-    if (sourceAdapter.prepareRestore) {
-        log(`Preparing target database(s): ${targetNames.join(', ')}...`, 'info');
-        try {
-            await sourceAdapter.prepareRestore(dbConf, targetNames);
-        } catch (e: unknown) {
-            const message = e instanceof Error ? e.message : String(e);
-            throw new Error(`Failed to prepare target database(s): ${message}`);
-        }
-    }
-
-    for (const dbName of selectedDbNames) {
-        const dbLine = archive.index.databases.find((d) => d.name === dbName);
-        const entry = dbLine ? archive.index.entries.get(entryKey(undefined, dbLine.n)) : undefined;
-        if (!dbLine || !entry) {
-            errors.push({ entry: `database:${dbName}`, error: "Not found in the archive index" });
-            log(`Database '${dbName}' is missing from the archive index`, 'error');
-            continue;
         }
 
-        const targetName = getTargetDatabaseName(dbName, dbMapping);
-        const dumpPath = path.join(getTempDir(), `restore-db-${process.pid}-${crypto.randomUUID()}`);
+        for (const dbName of selectedDbNames) {
+            const dbLine = archive.index.databases.find((d) => d.name === dbName);
+            const entry = dbLine ? archive.index.entries.get(entryKey(undefined, dbLine.n)) : undefined;
+            if (!dbLine || !entry) {
+                errors.push({ entry: `database:${dbName}`, error: "Not found in the archive index" });
+                log(`Database '${dbName}' is missing from the archive index`, 'error');
+                continue;
+            }
 
-        try {
-            log(`Fetching dump for '${dbName}' (${archive.ranged ? "ranged read" : "from downloaded archive"})...`, 'info');
-            await pipeline(
-                await openArchiveEntry(archive.source, archive.manifest, entry, archive.masterKey),
-                createWriteStream(dumpPath)
-            );
+            const targetName = getTargetDatabaseName(dbName, dbMapping);
+            const dumpPath = path.join(getTempDir(), `restore-db-${process.pid}-${crypto.randomUUID()}`);
 
-            log(`Restoring database: ${dbName} → ${targetName}`, 'info');
-            await sourceAdapter.restoreOne(
-                dbConf,
-                dumpPath,
-                targetName,
-                (msg, level, type, details) => log(msg, level, type, details),
-                undefined,
-                dbName
-            );
-            restoredDatabases.push(targetName);
-            log(`Database restored: ${targetName}`, 'success');
-        } catch (e: unknown) {
-            const message = e instanceof Error ? e.message : String(e);
-            errors.push({ entry: `database:${dbName}`, error: message });
-            log(`Failed to restore database '${dbName}': ${message}`, 'error');
-        } finally {
-            await fs.unlink(dumpPath).catch(() => { });
+            try {
+                log(`Fetching dump for '${dbName}' (${archive.ranged ? "ranged read" : "from downloaded archive"})...`, 'info');
+                await pipeline(
+                    await openArchiveEntry(archive.source, archive.manifest, entry, archive.masterKey),
+                    createWriteStream(dumpPath)
+                );
+
+                log(`Restoring database: ${dbName} → ${targetName}`, 'info');
+                await sourceAdapter.restoreOne(
+                    dbConf,
+                    dumpPath,
+                    targetName,
+                    host,
+                    (msg, level, type, details) => log(msg, level, type, details),
+                    undefined,
+                    dbName
+                );
+                restoredDatabases.push(targetName);
+                log(`Database restored: ${targetName}`, 'success');
+            } catch (e: unknown) {
+                const message = e instanceof Error ? e.message : String(e);
+                errors.push({ entry: `database:${dbName}`, error: message });
+                log(`Failed to restore database '${dbName}': ${message}`, 'error');
+            } finally {
+                await fs.unlink(dumpPath).catch(() => { });
+            }
         }
+    } finally {
+        await host.dispose().catch(() => {});
     }
 }

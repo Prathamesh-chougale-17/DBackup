@@ -1,3 +1,5 @@
+import type { ExecutionHost } from "@/lib/transport";
+import { withPool } from "./pool";
 import sql from "mssql";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
@@ -8,42 +10,19 @@ const log = logger.child({ adapter: "mssql" });
 /**
  * Build connection configuration for mssql package
  */
-export function buildConnectionConfig(config: MSSQLConfig): sql.config {
-    return {
-        server: config.host,
-        port: config.port || 1433,
-        user: config.user,
-        password: config.password || "",
-        database: "master", // Connect to master for admin operations
-        options: {
-            encrypt: config.encrypt ?? true,
-            trustServerCertificate: config.trustServerCertificate ?? false,
-            connectTimeout: 15000,
-            // Use configurable timeout (default 5 min) for large backup/restore operations
-            requestTimeout: config.requestTimeout ?? 300000,
-        },
-    };
-}
 
 /**
  * Test connection and retrieve version
  */
-export async function test(config: MSSQLConfig): Promise<{ success: boolean; message: string; version?: string; edition?: string }> {
-    let pool: sql.ConnectionPool | null = null;
-
+export async function test(config: MSSQLConfig, host?: ExecutionHost): Promise<{ success: boolean; message: string; version?: string; edition?: string }> {
     try {
-        const connConfig = buildConnectionConfig(config);
-        pool = new sql.ConnectionPool(connConfig);
-        await pool.connect();
-
-        // Get version and edition information
-        const result = await pool.request().query(`
+        const result = await withPool(config, host!, (pool) => pool.request().query(`
             SELECT
                 @@VERSION AS Version,
                 SERVERPROPERTY('ProductVersion') AS ProductVersion,
                 SERVERPROPERTY('Edition') AS Edition,
                 SERVERPROPERTY('EngineEdition') AS EngineEdition
-        `);
+        `));
 
         const fullVersion = result.recordset[0]?.Version || "";
         const productVersion = result.recordset[0]?.ProductVersion || "";
@@ -100,41 +79,27 @@ export async function test(config: MSSQLConfig): Promise<{ success: boolean; mes
         }
 
         return { success: false, message: `Connection failed: ${message}` };
-    } finally {
-        if (pool) {
-            await pool.close();
-        }
     }
 }
 
 /**
  * Get list of user databases (exclude system databases)
  */
-export async function getDatabases(config: MSSQLConfig): Promise<string[]> {
-    let pool: sql.ConnectionPool | null = null;
-
+export async function getDatabases(config: MSSQLConfig, host: ExecutionHost): Promise<string[]> {
     try {
-        const connConfig = buildConnectionConfig(config);
-        pool = new sql.ConnectionPool(connConfig);
-        await pool.connect();
-
         // Exclude system databases (database_id <= 4: master, tempdb, model, msdb)
-        const result = await pool.request().query(`
+        const result = await withPool(config, host, (pool) => pool.request().query(`
             SELECT name
             FROM sys.databases
             WHERE database_id > 4
               AND state = 0
             ORDER BY name
-        `);
+        `));
 
         return result.recordset.map((row: any) => row.name);
     } catch (error: unknown) {
         log.error("Failed to get databases", {}, wrapError(error));
         return [];
-    } finally {
-        if (pool) {
-            await pool.close();
-        }
     }
 }
 
@@ -143,14 +108,9 @@ import { DatabaseInfo } from "@/lib/core/interfaces";
 /**
  * Get user databases with size and table count information
  */
-export async function getDatabasesWithStats(config: MSSQLConfig): Promise<DatabaseInfo[]> {
-    let pool: sql.ConnectionPool | null = null;
-
+export async function getDatabasesWithStats(config: MSSQLConfig, host: ExecutionHost): Promise<DatabaseInfo[]> {
     try {
-        const connConfig = buildConnectionConfig(config);
-        pool = new sql.ConnectionPool(connConfig);
-        await pool.connect();
-
+        return await withPool(config, host, async (pool) => {
         // Get database names and sizes from master catalog views.
         // Include all user databases regardless of state so offline/restoring DBs
         // are still visible. state_desc is included for display purposes.
@@ -191,13 +151,10 @@ export async function getDatabasesWithStats(config: MSSQLConfig): Promise<Databa
         }
 
         return databases;
+        });
     } catch (error: unknown) {
         log.error("Failed to get databases with stats", {}, wrapError(error));
         throw wrapError(error);
-    } finally {
-        if (pool) {
-            await pool.close();
-        }
     }
 }
 
@@ -225,23 +182,13 @@ export interface QueryResultWithMessages {
  * Execute a SQL query and return raw results
  * Used internally by dump/restore operations
  */
-export async function executeQuery(config: MSSQLConfig, query: string, database?: string): Promise<sql.IResult<any>> {
-    let pool: sql.ConnectionPool | null = null;
-
-    try {
-        const connConfig = buildConnectionConfig(config);
-        if (database) {
-            connConfig.database = database;
-        }
-
-        pool = new sql.ConnectionPool(connConfig);
-        await pool.connect();
-        return await pool.request().query(query);
-    } finally {
-        if (pool) {
-            await pool.close();
-        }
-    }
+export async function executeQuery(
+    config: MSSQLConfig,
+    host: ExecutionHost,
+    query: string,
+    database?: string,
+): Promise<sql.IResult<any>> {
+    return withPool(config, host, (pool) => pool.request().query(query), { database });
 }
 
 /**
@@ -254,36 +201,27 @@ export async function executeQuery(config: MSSQLConfig, query: string, database?
  */
 export async function executeQueryWithMessages(
     config: MSSQLConfig,
+    host: ExecutionHost,
     query: string,
     database?: string,
     requestTimeout?: number,
     onMessage?: (msg: SqlServerMessage) => void
 ): Promise<QueryResultWithMessages> {
-    let pool: sql.ConnectionPool | null = null;
     const messages: SqlServerMessage[] = [];
 
     try {
-        const connConfig = buildConnectionConfig(config);
-        if (database) {
-            connConfig.database = database;
-        }
-        // Allow callers to override requestTimeout (e.g. 0 for long-running BACKUP/RESTORE)
-        if (requestTimeout !== undefined && connConfig.options) {
-            connConfig.options.requestTimeout = requestTimeout;
-        }
+        return await withPool(config, host, async (pool) => {
+            const request = pool.request();
 
-        pool = new sql.ConnectionPool(connConfig);
-        await pool.connect();
-        const request = pool.request();
+            // Capture all SQL Server info messages (progress reports, warnings, errors)
+            request.on("info", (info: SqlServerMessage) => {
+                messages.push(info);
+                if (onMessage) onMessage(info);
+            });
 
-        // Capture all SQL Server info messages (progress reports, warnings, errors)
-        request.on("info", (info: SqlServerMessage) => {
-            messages.push(info);
-            if (onMessage) onMessage(info);
-        });
-
-        const result = await request.query(query);
-        return { result, messages };
+            const result = await request.query(query);
+            return { result, messages };
+        }, { database, requestTimeout });
     } catch (error: unknown) {
         // Enhance the error with captured SQL Server messages
         const serverMessages = messages
@@ -316,10 +254,6 @@ export async function executeQueryWithMessages(
         }
 
         throw error;
-    } finally {
-        if (pool) {
-            await pool.close();
-        }
     }
 }
 
@@ -329,33 +263,18 @@ export async function executeQueryWithMessages(
  */
 export async function executeParameterizedQuery(
     config: MSSQLConfig,
+    host: ExecutionHost,
     query: string,
     params: Record<string, string | number | boolean>,
     database?: string
 ): Promise<sql.IResult<any>> {
-    let pool: sql.ConnectionPool | null = null;
-
-    try {
-        const connConfig = buildConnectionConfig(config);
-        if (database) {
-            connConfig.database = database;
-        }
-
-        pool = new sql.ConnectionPool(connConfig);
-        await pool.connect();
+    return withPool(config, host, (pool) => {
         const request = pool.request();
-
-        // Add parameters to the request
         for (const [key, value] of Object.entries(params)) {
             request.input(key, value);
         }
-
-        return await request.query(query);
-    } finally {
-        if (pool) {
-            await pool.close();
-        }
-    }
+        return request.query(query);
+    }, { database });
 }
 
 /**
@@ -363,10 +282,11 @@ export async function executeParameterizedQuery(
  * Supported in: Enterprise, Standard (SQL 2008 R2+), Business Intelligence, Developer
  * NOT supported in: Express, Web
  */
-export async function supportsCompression(config: MSSQLConfig): Promise<boolean> {
+export async function supportsCompression(config: MSSQLConfig, host: ExecutionHost): Promise<boolean> {
     try {
         const result = await executeQuery(
             config,
+            host,
             "SELECT SERVERPROPERTY('Edition') AS Edition, SERVERPROPERTY('EngineEdition') AS EngineEdition"
         );
 

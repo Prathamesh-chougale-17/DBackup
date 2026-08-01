@@ -2,6 +2,64 @@
 
 All notable changes to DBackup are documented here.
 
+## v3.1.0 - SSH Connection Mode for MSSQL, SSH Transport rewrite, and Bug Fixes
+*Released: Aug 1, 2026*
+
+### ✨ Features
+
+- **mssql**: SQL Server sources can now use **SSH connection mode**, like every other database source. The connection to SQL Server is tunnelled through SSH, so the SQL Server port no longer has to be reachable from DBackup, and backup files travel over that same connection with no separate file transfer setup. Certificate validation stays intact through the tunnel. The existing **File Transfer** setting is untouched and keeps working exactly as before for sources that connect directly, so no existing SQL Server source needs any change.
+
+### 🐛 Bug Fixes
+
+- **backup**: A failed run wrote its error into the log twice, and the second copy was styled as ordinary output because it carried an `ERROR:` prefix instead of the error level.
+- **MSSQL**: Testing an SQL Server connection now verifies that SQL Server and the SSH account mean the same backup directory, rather than only checking that the path exists over SSH. A containerized SQL Server writing into its own copy of that path passed the test and then failed the backup with nothing but "No such file", which the download error now explains too.
+- **mysql**: Restoring a database under a new name over SSH no longer corrupts the dump when the name contains a slash, backslash or ampersand. The rename was performed by a remote `sed` expression that the database names were pasted into; it now runs as a stream rewrite, the same one direct restores already used.
+- **redis**: Restore preparation on an SSH source queried the wrong server. It ran `redis-cli` from DBackup against the host field, which in SSH mode describes the database as seen from the SSH server, so the reported data directory and RDB filename were wrong or the step failed outright.
+- **redis**: Browsing keys over SSH no longer breaks on key names containing quotes or spaces. The key list was pasted into a remote shell command and is now passed as separate arguments.
+- **firebird**: The health check on an SSH source reported the connection as healthy whenever SSH itself worked, even when the Firebird server behind it was down. It now opens the database port as reachable from the SSH host.
+- **sqlite**: Browsing tables over SSH no longer fails on a database path or table name containing a quote or a space. The path and the query were assembled into a remote shell command and are now passed as separate arguments.
+- **mongodb**: Listing collections and browsing documents over SSH no longer break on a database or collection name containing a single quote. The query script was pasted into a quoted remote shell command and is now passed as one argument.
+- **mongodb**: A single-database restore no longer streams the archive through the client's standard input. It reads the archive from a path, the same way multi-database restores already did, which removes a source of truncated restores on large archives.
+
+### 🔒 Security
+
+- **restore**: Trimming trailing slashes off a restore target path used a regular expression that runs in quadratic time on a long run of slashes, letting a crafted target path occupy the server. Reported by CodeQL as `js/polynomial-redos`.
+- **MSSQL**: The SSH connection test now rejects a backup path that is empty or carries control characters, instead of passing whatever the request sent on to the server. It also probes the directory with the same file transfer the backup uses, rather than a remote shell command, so the check exercises what has to work and the path never reaches a command line. Remote arguments were already quoted, so this closes no known hole.
+- **storage**: The same quadratic slash trimming was still in use for the S3 path prefix, the Dropbox and OneDrive folder path, the SMB share, directory downloads, file exclusion patterns, and the ntfy and Gotify server URLs. All seventeen now use the linear-time helper.
+
+### 🎨 Improvements
+
+- **paths**: Slash trimming moved into one shared helper that cannot backtrack, replacing the three hand-rolled copies that had drifted apart.
+- **ssh**: Added a transport layer that models direct and SSH connections as interchangeable implementations of one interface. Commands are now described as argument lists rather than assembled shell strings, so remote quoting lives in a single tested place instead of being repeated at every call site.
+- **ssh**: A backup or restore now opens one SSH connection for the whole run instead of one per adapter call. A combined backup of ten databases previously performed twelve separate handshakes against the same server.
+- **health check**: The per-adapter timeout now runs inside the connection scope. Previously a check that timed out while still connecting left its socket open, once a minute for every unreachable source.
+- **mysql**: SSH-mode dumps now use the same version-aware options as direct dumps. Previously the SSH path built a smaller set of arguments by hand and missed them, so a MySQL 8 dump taken over SSH did not get `--default-character-set=utf8mb4`.
+- **mysql**: Listing databases with sizes now falls back to a plain listing when `information_schema` is unreadable. A least-privilege backup user previously saw an error instead of the database list in direct mode.
+- **postgres**: Connecting, listing databases and reading sizes now run through one code path for both connection modes, so the two no longer differ in which errors they report or how they fall back between the `postgres`, `template1` and configured databases.
+
+### 📝 Documentation
+
+- **MSSQL**: The SQL Server guide now documents the new SSH connection mode, and states which settings apply to direct connections only. The supported-engine tables listed SQL Server as direct-only with SSH available for file transfer.
+- **MSSQL**: The "Backup Permission Denied" fix now covers containers, where SQL Server runs as UID 10001 and the advice to grant the `mssql` user access does not apply.
+- **sources**: The connection mode overview was missing Firebird from the list of adapters that support SSH mode.
+- **wiki**: The developer guide now documents the transport layer, replacing the sections that described the removed SSH client.
+
+### 🧪 Tests
+
+- **ssh**: SSH mode is now covered by automated integration tests against a real SSH server, for MySQL, MariaDB, PostgreSQL, Redis, Valkey and SQLite. It previously had none, and every SSH code path was rewritten in this release.
+- **ssh**: Added a lint guard that rejects transport branching in adapter code, direct process spawning and hand-written escaping, and checks that every source offering SSH credentials actually resolves a transport.
+- **paths**: Added coverage that slash trimming matches what the regular expressions produced and stays linear on a pathological run of slashes.
+- **mysql**: The adapter suites now run every expectation against both connection modes from one table and assert on argument lists rather than assembled command strings.
+- **ssh**: New transport test suite covering both connection modes. Argument quoting is verified by round-tripping hostile values (command substitution, embedded quotes, newlines, non-ASCII) through a real shell and comparing the recovered arguments against the originals.
+
+### 🐳 Docker
+
+- **Image**: `skyfay/dbackup:v3.1.0`
+- **Also tagged as**: `latest`, `v3`
+- **CI Image**: `skyfay/dbackup:ci`
+- **Platforms**: linux/amd64, linux/arm64
+
+
 ## v3.0.2 - Bug Fixes and Improvements for File Backups and MSSQL Restores
 *Released: Aug 1, 2026*
 

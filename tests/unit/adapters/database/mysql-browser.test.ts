@@ -1,32 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 
-// Mock child_process execFile before importing the module under test.
-vi.mock("child_process", () => ({
-    execFile: vi.fn(),
-}));
-
-// Mock SSH helpers so tests never open real connections.
-vi.mock("@/lib/ssh", () => ({
-    SshClient: vi.fn(),
-    isSSHMode: vi.fn(() => false),
-    extractSshConfig: vi.fn(),
-    buildMysqlArgs: vi.fn(() => []),
-    withLocalMyCnf: vi.fn(async (_password: unknown, fn: (path: null) => Promise<unknown>) => fn(null)),
-    withRemoteMyCnf: vi.fn(),
-    remoteBinaryCheck: vi.fn(),
-    shellEscape: vi.fn((s: string) => s),
-}));
-
-vi.mock("@/lib/adapters/database/mysql/tools", () => ({
-    getMysqlCommand: vi.fn(() => "mysql"),
-}));
-
-vi.mock("@/lib/adapters/database/mysql/connection", () => ({
-    execFileAsync: vi.fn(),
-}));
-
+import { createFakeHost, type FakeHost } from "@/lib/testing/fake-host";
 import { getTables, getTableData } from "@/lib/adapters/database/mysql/browser";
-import { execFileAsync } from "@/lib/adapters/database/mysql/connection";
+import type { HostKind } from "@/lib/transport/types";
+
+/**
+ * The browser no longer builds shell strings, so these assert on argv arrays.
+ * That is strictly stronger than the previous substring matching, and it is
+ * identical for both transports, which is why one table covers direct and ssh.
+ */
 
 const baseConfig = {
     host: "localhost",
@@ -35,190 +17,210 @@ const baseConfig = {
     password: "secret",
     database: "testdb",
     disableSsl: false,
-    sshEnabled: false,
 };
 
-describe("MySQL browser - getTables", () => {
-    beforeEach(() => vi.clearAllMocks());
+/** The SQL passed after -e for a recorded exec call. */
+function queryOf(argv: string[]): string {
+    return argv[argv.indexOf("-e") + 1];
+}
 
-    it("returns parsed table list for local connection", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({
-            stdout: "users\tBASE TABLE\t42\t8192\n",
-            stderr: "",
-        } as any);
+/** Route a canned stdout to whichever of the three concurrent queries asked for it. */
+function hostWith(kind: HostKind, responses: { columns?: string; count?: string; data?: string; tables?: string }): FakeHost {
+    return createFakeHost({
+        kind,
+        onExec: (argv) => {
+            const query = queryOf(argv) ?? "";
+            if (query.includes("COLUMN_NAME")) return { stdout: responses.columns ?? "" };
+            if (query.includes("COUNT(*)")) return { stdout: responses.count ?? "" };
+            if (query.includes("TABLE_TYPE")) return { stdout: responses.tables ?? "" };
+            return { stdout: responses.data ?? "" };
+        },
+    });
+}
 
-        const result = await getTables(baseConfig as any, "testdb");
+describe.each<HostKind>(["direct", "ssh"])("MySQL browser over a %s host", (kind) => {
+    describe("getTables()", () => {
+        it("parses the table listing", async () => {
+            const host = hostWith(kind, { tables: "users\tBASE TABLE\t42\t8192\n" });
 
-        expect(result).toHaveLength(1);
-        expect(result[0]).toMatchObject({
-            name: "users",
-            type: "table",
-            rowCount: 42,
-            sizeInBytes: 8192,
+            const result = await getTables(baseConfig as never, "testdb", host);
+
+            expect(result).toHaveLength(1);
+            expect(result[0]).toMatchObject({
+                name: "users",
+                type: "table",
+                rowCount: 42,
+                sizeInBytes: 8192,
+            });
+        });
+
+        it("maps VIEW onto the view type", async () => {
+            const host = hostWith(kind, { tables: "v_active\tVIEW\t0\t0\n" });
+            const result = await getTables(baseConfig as never, "testdb", host);
+            expect(result[0].type).toBe("view");
+        });
+
+        it("ignores blank lines in the output", async () => {
+            const host = hostWith(kind, { tables: "\n\norders\tBASE TABLE\t5\t1024\n\n" });
+            const result = await getTables(baseConfig as never, "testdb", host);
+            expect(result).toHaveLength(1);
+            expect(result[0].name).toBe("orders");
+        });
+
+        it("returns nothing when the output is blank", async () => {
+            const host = hostWith(kind, { tables: "" });
+            expect(await getTables(baseConfig as never, "testdb", host)).toEqual([]);
+        });
+
+        it("passes connection settings as separate arguments", async () => {
+            const host = hostWith(kind, { tables: "" });
+            await getTables(baseConfig as never, "testdb", host);
+
+            const argv = host.calls.exec[0];
+            expect(argv).toContain("-h");
+            expect(argv[argv.indexOf("-h") + 1]).toBe("localhost");
+            expect(argv[argv.indexOf("-P") + 1]).toBe("3306");
+            expect(argv[argv.indexOf("-u") + 1]).toBe("root");
+            expect(argv).toContain("--skip-column-names");
+            expect(argv).toContain("--batch");
+        });
+
+        it("reports a failing query instead of returning an empty list", async () => {
+            const host = createFakeHost({
+                kind,
+                onExec: () => ({ code: 1, stderr: "ERROR 1044: Access denied" }),
+            });
+
+            await expect(getTables(baseConfig as never, "testdb", host))
+                .rejects.toThrow(/Failed to list tables.*Access denied/);
         });
     });
 
-    it("maps VIEW type correctly", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({
-            stdout: "v_active\tVIEW\t0\t0\n",
-            stderr: "",
-        } as any);
+    describe("getTableData()", () => {
+        const options = { database: "testdb", table: "users", page: 1, pageSize: 10 };
 
-        const result = await getTables(baseConfig as any, "testdb");
+        it("returns rows, total count and columns", async () => {
+            const host = hostWith(kind, {
+                columns: "id\tint\tNO\tPRI\tNULL\nname\tvarchar\tYES\t\tNULL\n",
+                count: "3\n",
+                data: "1\tAlice\n2\tBob\n3\tCarl\n",
+            });
 
-        expect(result[0].type).toBe("view");
+            const result = await getTableData(baseConfig as never, options as never, host);
+
+            expect(result.totalCount).toBe(3);
+            expect(result.columns).toHaveLength(2);
+            expect(result.columns[0]).toMatchObject({ name: "id", dataType: "int", primaryKey: true });
+            expect(result.columns[1]).toMatchObject({ name: "name", dataType: "varchar", nullable: true });
+            expect(result.rows).toHaveLength(3);
+            expect(result.rows[0]).toEqual({ id: "1", name: "Alice" });
+        });
+
+        it("treats \\N as null", async () => {
+            const host = hostWith(kind, {
+                columns: "name\tvarchar\tYES\t\tNULL\n",
+                count: "1\n",
+                data: "\\N\n",
+            });
+
+            const result = await getTableData(baseConfig as never, options as never, host);
+            expect(result.rows[0].name).toBeNull();
+        });
+
+        it("puts the sort clause in the data query", async () => {
+            const host = hostWith(kind, { columns: "", count: "0\n", data: "" });
+
+            await getTableData(
+                baseConfig as never,
+                { ...options, sortBy: "name", sortDir: "desc" } as never,
+                host,
+            );
+
+            const dataQuery = host.calls.exec.map(queryOf).find(q => q?.startsWith("SELECT * FROM"));
+            expect(dataQuery).toContain("ORDER BY `name` DESC");
+        });
+
+        it("surfaces which of the three queries failed", async () => {
+            const host = createFakeHost({
+                kind,
+                onExec: (argv) => queryOf(argv)?.includes("COUNT(*)")
+                    ? { code: 1, stderr: "boom" }
+                    : { stdout: "" },
+            });
+
+            await expect(getTableData(baseConfig as never, options as never, host))
+                .rejects.toThrow(/Count query failed: boom/);
+        });
     });
 
-    it("ignores empty lines in output", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({
-            stdout: "\n\norders\tBASE TABLE\t5\t1024\n\n",
-            stderr: "",
-        } as any);
+    describe("SQL escaping", () => {
+        it("doubles backslashes in the database name", async () => {
+            const host = hostWith(kind, { tables: "" });
+            await getTables(baseConfig as never, "back\\slash", host);
+            expect(queryOf(host.calls.exec[0])).toContain("'back\\\\slash'");
+        });
 
-        const result = await getTables(baseConfig as any, "testdb");
+        it("escapes single quotes in the database name", async () => {
+            const host = hostWith(kind, { tables: "" });
+            await getTables(baseConfig as never, "it's", host);
+            expect(queryOf(host.calls.exec[0])).toContain("'it\\'s'");
+        });
 
-        expect(result).toHaveLength(1);
-        expect(result[0].name).toBe("orders");
-    });
+        it("strips null bytes from the database name", async () => {
+            const host = hostWith(kind, { tables: "" });
+            await getTables(baseConfig as never, "db\0name", host);
 
-    it("returns empty array when output is blank", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({ stdout: "", stderr: "" } as any);
+            const query = queryOf(host.calls.exec[0]);
+            expect(query).toContain("'dbname'");
+            expect(query).not.toContain("\0");
+        });
 
-        const result = await getTables(baseConfig as any, "testdb");
+        it("escapes the database name in the columns query", async () => {
+            const host = hostWith(kind, { columns: "", count: "0\n", data: "" });
+            await getTableData(
+                baseConfig as never,
+                { database: "back\\slash", table: "users", page: 1, pageSize: 10 } as never,
+                host,
+            );
 
-        expect(result).toEqual([]);
+            const colQuery = host.calls.exec.map(queryOf).find(q => q?.includes("COLUMN_NAME"));
+            expect(colQuery).toContain("'back\\\\slash'");
+        });
+
+        it("escapes single quotes in the table name", async () => {
+            const host = hostWith(kind, { columns: "", count: "0\n", data: "" });
+            await getTableData(
+                baseConfig as never,
+                { database: "testdb", table: "o'reilly", page: 1, pageSize: 10 } as never,
+                host,
+            );
+
+            const colQuery = host.calls.exec.map(queryOf).find(q => q?.includes("COLUMN_NAME"));
+            expect(colQuery).toContain("'o\\'reilly'");
+        });
     });
 });
 
-describe("MySQL browser - getTableData", () => {
-    beforeEach(() => vi.clearAllMocks());
+describe("MySQL browser transport differences", () => {
+    it("forces TCP only when the client runs beside DBackup", async () => {
+        // Over SSH the client runs on the database host, where the setup guide
+        // documents granting 'user'@'localhost' for the local socket path.
+        const direct = hostWith("direct", { tables: "" });
+        const ssh = hostWith("ssh", { tables: "" });
 
-    const options = {
-        database: "testdb",
-        table: "users",
-        page: 1,
-        pageSize: 10,
-    };
+        await getTables(baseConfig as never, "testdb", direct);
+        await getTables(baseConfig as never, "testdb", ssh);
 
-    it("returns rows, totalCount and columns", async () => {
-        // Column query result
-        const colStdout = "id\tint\tNO\tPRI\tNULL\nname\tvarchar\tYES\t\tNULL\n";
-        // Count query result
-        const countStdout = "3\n";
-        // Data query result
-        const dataStdout = "1\tAlice\n2\tBob\n3\tCarl\n";
-
-        vi.mocked(execFileAsync)
-            .mockResolvedValueOnce({ stdout: colStdout, stderr: "" } as any)
-            .mockResolvedValueOnce({ stdout: countStdout, stderr: "" } as any)
-            .mockResolvedValueOnce({ stdout: dataStdout, stderr: "" } as any);
-
-        const result = await getTableData(baseConfig as any, options as any);
-
-        expect(result.totalCount).toBe(3);
-        expect(result.columns).toHaveLength(2);
-        expect(result.columns[0]).toMatchObject({ name: "id", dataType: "int", primaryKey: true });
-        expect(result.columns[1]).toMatchObject({ name: "name", dataType: "varchar", nullable: true });
-        expect(result.rows).toHaveLength(3);
-        expect(result.rows[0]).toEqual({ id: "1", name: "Alice" });
+        expect(direct.calls.exec[0]).toContain("--protocol=tcp");
+        expect(ssh.calls.exec[0]).not.toContain("--protocol=tcp");
     });
 
-    it("treats \\N values as null", async () => {
-        const colStdout = "name\tvarchar\tYES\t\tNULL\n";
-        const countStdout = "1\n";
-        const dataStdout = "\\N\n";
+    it("keeps the password out of argv and in a 0600 defaults-file", async () => {
+        const host = hostWith("ssh", { tables: "" });
+        await getTables(baseConfig as never, "testdb", host);
 
-        vi.mocked(execFileAsync)
-            .mockResolvedValueOnce({ stdout: colStdout, stderr: "" } as any)
-            .mockResolvedValueOnce({ stdout: countStdout, stderr: "" } as any)
-            .mockResolvedValueOnce({ stdout: dataStdout, stderr: "" } as any);
-
-        const result = await getTableData(baseConfig as any, options as any);
-
-        expect(result.rows[0].name).toBeNull();
-    });
-
-    it("applies sortBy and sortDir to the query", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({ stdout: "", stderr: "" } as any);
-
-        await getTableData(baseConfig as any, {
-            ...options,
-            sortBy: "name",
-            sortDir: "desc",
-        } as any);
-
-        // Verify that execFileAsync was called (queries were built with sort clause).
-        expect(execFileAsync).toHaveBeenCalled();
-    });
-});
-
-describe("MySQL browser - SQL escaping", () => {
-    beforeEach(() => vi.clearAllMocks());
-
-    // Helper to extract the SQL query arg from a getTables execFileAsync call.
-    function getTablesQueryArg(): string {
-        const args = vi.mocked(execFileAsync).mock.calls[0][1] as string[];
-        return args[args.indexOf("-e") + 1];
-    }
-
-    // Helper to find the columnsQuery arg from a getTableData call set.
-    function getColumnsQueryArg(): string {
-        const colCall = vi.mocked(execFileAsync).mock.calls.find(c =>
-            (c[1] as string[]).at(-1)?.includes("COLUMN_NAME")
-        );
-        expect(colCall).toBeDefined();
-        return (colCall![1] as string[]).at(-1)!;
-    }
-
-    it("doubles backslashes in database name (tablesQuery)", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({ stdout: "", stderr: "" } as any);
-
-        await getTables(baseConfig as any, "back\\slash");
-
-        expect(getTablesQueryArg()).toContain("'back\\\\slash'");
-    });
-
-    it("escapes single quotes in database name (tablesQuery)", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({ stdout: "", stderr: "" } as any);
-
-        await getTables(baseConfig as any, "it's");
-
-        expect(getTablesQueryArg()).toContain("'it\\'s'");
-    });
-
-    it("removes null bytes from database name (tablesQuery)", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({ stdout: "", stderr: "" } as any);
-
-        await getTables(baseConfig as any, "db\0name");
-
-        const query = getTablesQueryArg();
-        expect(query).toContain("'dbname'");
-        expect(query).not.toContain("\0");
-    });
-
-    it("doubles backslashes in database name (columnsQuery)", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({ stdout: "", stderr: "" } as any);
-
-        await getTableData(baseConfig as any, {
-            database: "back\\slash",
-            table: "users",
-            page: 1,
-            pageSize: 10,
-        } as any);
-
-        expect(getColumnsQueryArg()).toContain("'back\\\\slash'");
-    });
-
-    it("escapes single quotes in table name (columnsQuery)", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({ stdout: "", stderr: "" } as any);
-
-        await getTableData(baseConfig as any, {
-            database: "testdb",
-            table: "o'reilly",
-            page: 1,
-            pageSize: 10,
-        } as any);
-
-        expect(getColumnsQueryArg()).toContain("'o\\'reilly'");
+        expect(host.calls.exec[0].join(" ")).not.toContain("secret");
+        expect(host.calls.tempFiles[0]).toMatchObject({ mode: 0o600 });
+        expect(host.calls.tempFiles[0].content).toContain('password="secret"');
     });
 });

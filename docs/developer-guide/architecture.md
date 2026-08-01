@@ -53,13 +53,16 @@ DBackup follows a strictly layered architecture to decouple the UI from business
    └──────────┘ └──────┘
 ```
 
-### SSH Remote Execution
+### Transport Layer
 
-Database adapters support two connection modes:
-- **Direct**: CLI tools run locally on the DBackup server, connecting to the database via TCP
-- **SSH**: CLI tools run remotely on the target server via SSH exec (not tunneling)
+A database adapter describes **what** runs. An `ExecutionHost` from `src/lib/transport/` decides **how** and **where**:
 
-SSH mode uses a shared infrastructure (`src/lib/ssh/`) with `SshClient`, `shellEscape`, `remoteBinaryCheck`, and per-adapter argument builders. See [Database Adapters](/developer-guide/adapters/database#ssh-mode-architecture) for implementation details.
+- **Direct**: CLI tools run on the DBackup server and reach the database over TCP
+- **SSH**: CLI tools run on the target server, their output is streamed back over the SSH connection
+
+SSH mode is remote execution, not a tunnel: `mysqldump` runs on the database server. The one exception is MSSQL, which tunnels its TDS connection because a `.bak` file has to be written by SQL Server itself.
+
+Adapters have a single code path and never branch on the transport. A `TransportResolver` turns the stored config into a `TransportSpec` once, `withHost()` creates the host and disposes it, and one host is shared across a whole job run. See [Database Adapters](/developer-guide/adapters/database#transport-architecture-src-lib-transport) for the interface and the rules for writing an adapter against it.
 
 ## Four-Layer Architecture
 

@@ -1,9 +1,9 @@
-import { DatabaseDialect } from "../../common/dialect";
+import { MySQLBaseDialect } from "./mysql-base";
 import { MySQL80Dialect } from "./mysql-8";
 import { MySQL57Dialect } from "./mysql-5-7";
 import { MariaDBDialect } from "./mariadb";
 
-export function getDialect(adapterId: string, version?: string): DatabaseDialect {
+export function getDialect(adapterId: string, version?: string): MySQLBaseDialect {
     // 1. Explicit MariaDB Adapter Check
     if (adapterId === 'mariadb') {
         return new MariaDBDialect(); // Could be extended for MariaDB 10 vs 11

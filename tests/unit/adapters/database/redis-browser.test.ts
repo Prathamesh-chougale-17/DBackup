@@ -1,139 +1,136 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 
-// ---------------------------------------------------------------------------
-// Hoisted mock state
-// ---------------------------------------------------------------------------
-const { mockExecFile, mockIsSSHMode } = vi.hoisted(() => ({
-    mockExecFile: vi.fn(),
-    mockIsSSHMode: vi.fn().mockReturnValue(false),
-}));
-
-// Include `default` export so CJS interop works correctly.
-vi.mock("child_process", () => ({
-    execFile: mockExecFile,
-    default: { execFile: mockExecFile },
-}));
-
-vi.mock("@/lib/ssh", () => ({
-    SshClient: class {
-        connect = vi.fn();
-        exec = vi.fn();
-        end = vi.fn();
-    },
-    isSSHMode: (...args: unknown[]) => mockIsSSHMode(...args),
-    extractSshConfig: vi.fn(),
-    buildRedisArgs: vi.fn(() => ["-h", "localhost", "-p", "6379"]),
-    remoteBinaryCheck: vi.fn(),
-}));
-
+import { createFakeHost, type FakeHost } from "@/lib/testing/fake-host";
 import { getTables, getTableData } from "@/lib/adapters/database/redis/browser";
-
-/**
- * Helper: queue callback-style results for execFile calls.
- * util.promisify(execFile) resolves with { stdout, stderr } so the callback
- * must receive the result as a single object (matching Node's custom promisify).
- */
-function queueExecResponses(...responses: Array<{ stdout: string; stderr?: string }>) {
-    for (const r of responses) {
-        mockExecFile.mockImplementationOnce((...args: unknown[]) => {
-            const cb = args[args.length - 1] as (
-                err: null,
-                result: { stdout: string; stderr: string }
-            ) => void;
-            cb(null, { stdout: r.stdout, stderr: r.stderr ?? "" });
-        });
-    }
-}
+import type { HostKind } from "@/lib/transport/types";
 
 const baseConfig = {
-    host: "localhost",
+    host: "redis.internal",
     port: 6379,
+    password: "secret",
+    database: 0,
 };
 
-describe("Redis browser - getTables", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
+/** The redis command a recorded call issued, ignoring connection flags. */
+function commandOf(argv: string[]): string {
+    const known = ["DBSIZE", "SCAN", "EVAL", "PING", "INFO", "CONFIG", "ACL"];
+    return argv.find(a => known.includes(a)) ?? "";
+}
+
+function browserHost(kind: HostKind, responses: { dbsize?: string; scan?: string; evalOut?: string }): FakeHost {
+    return createFakeHost({
+        kind,
+        onExec: (argv) => {
+            switch (commandOf(argv)) {
+                case "DBSIZE": return { stdout: responses.dbsize ?? "0\n" };
+                case "SCAN": return { stdout: responses.scan ?? "0\n" };
+                case "EVAL": return { stdout: responses.evalOut ?? "" };
+                default: return { stdout: "" };
+            }
+        },
+    });
+}
+
+describe.each<HostKind>(["direct", "ssh"])("Redis browser over a %s host", (kind) => {
+    describe("getTables()", () => {
+        it("reports the key count as a single pseudo table", async () => {
+            const host = browserHost(kind, { dbsize: "42\n" });
+            const result = await getTables(baseConfig as never, "0", host);
+
+            expect(result).toEqual([{ name: "Keys", type: "table", rowCount: 42 }]);
+        });
+
+        it("reports zero when DBSIZE fails", async () => {
+            const host = createFakeHost({ kind, onExec: () => ({ code: 1, stderr: "NOAUTH" }) });
+            const result = await getTables(baseConfig as never, "0", host);
+
+            expect(result[0].rowCount).toBe(0);
+        });
+
+        it("selects the database being browsed", async () => {
+            const host = browserHost(kind, {});
+            await getTables(baseConfig as never, "3", host);
+
+            const argv = host.calls.exec[0];
+            expect(argv[argv.indexOf("-n") + 1]).toBe("3");
+        });
+
+        it("states database zero explicitly rather than relying on the default", async () => {
+            const host = browserHost(kind, {});
+            await getTables(baseConfig as never, "0", host);
+
+            expect(host.calls.exec[0]).toContain("-n");
+            expect(host.calls.exec[0][host.calls.exec[0].indexOf("-n") + 1]).toBe("0");
+        });
     });
 
-    it("returns a single 'Keys' table with DBSIZE as rowCount", async () => {
-        queueExecResponses({ stdout: "42\n" });
+    describe("getTableData()", () => {
+        const options = { database: "0", table: "Keys", page: 1, pageSize: 10 };
 
-        const result = await getTables(baseConfig as any, "0");
+        it("returns scanned keys with their type and ttl", async () => {
+            const host = browserHost(kind, {
+                dbsize: "2\n",
+                scan: "0\nuser:1\nuser:2\n",
+                evalOut: '1) "string\t-1"\n2) "hash\t60"\n',
+            });
 
-        expect(result).toHaveLength(1);
-        expect(result[0]).toMatchObject({ name: "Keys", type: "table", rowCount: 42 });
-    });
+            const result = await getTableData(baseConfig as never, options as never, host);
 
-    it("returns rowCount 0 when DBSIZE output is not a number", async () => {
-        queueExecResponses({ stdout: "ERR\n" });
+            expect(result.totalCount).toBe(2);
+            expect(result.rows).toEqual([
+                { key: "user:1", type: "string", ttl: "no expiry" },
+                { key: "user:2", type: "hash", ttl: "60s" },
+            ]);
+        });
 
-        const result = await getTables(baseConfig as any, "0");
+        it("labels an expired key", async () => {
+            const host = browserHost(kind, {
+                dbsize: "1\n",
+                scan: "0\ngone\n",
+                evalOut: '1) "string\t-2"\n',
+            });
 
-        expect(result[0].rowCount).toBe(0);
-    });
-});
+            const result = await getTableData(baseConfig as never, options as never, host);
+            expect(result.rows[0].ttl).toBe("expired");
+        });
 
-describe("Redis browser - getTableData", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
-    });
+        it("returns nothing when the database is empty", async () => {
+            const host = browserHost(kind, { dbsize: "0\n", scan: "0\n" });
+            const result = await getTableData(baseConfig as never, options as never, host);
 
-    const options = {
-        database: "0",
-        table: "Keys",
-        page: 1,
-        pageSize: 10,
-    };
+            expect(result.rows).toEqual([]);
+            expect(result.totalCount).toBe(0);
+        });
 
-    it("returns rows with key, type and ttl columns", async () => {
-        queueExecResponses(
-            { stdout: "2\n" },                              // DBSIZE
-            { stdout: "0\nfoo\nbar\n" },                   // SCAN
-            { stdout: '1) "string\t30"\n2) "hash\t-1"\n' } // EVAL
-        );
+        it("falls back to unknown when the key lookup fails", async () => {
+            const host = createFakeHost({
+                kind,
+                onExec: (argv) => {
+                    switch (commandOf(argv)) {
+                        case "DBSIZE": return { stdout: "1\n" };
+                        case "SCAN": return { stdout: "0\nuser:1\n" };
+                        default: return { code: 1, stderr: "NOSCRIPT" };
+                    }
+                },
+            });
 
-        const result = await getTableData(baseConfig as any, options as any);
+            const result = await getTableData(baseConfig as never, options as never, host);
+            expect(result.rows[0]).toMatchObject({ key: "user:1", type: "unknown" });
+        });
 
-        expect(result.totalCount).toBe(2);
-        expect(result.columns.map(c => c.name)).toEqual(["key", "type", "ttl"]);
-        expect(result.rows).toHaveLength(2);
-    });
+        it("passes each key as its own argument", async () => {
+            // The SSH path used to paste keys into a shell string, so a key with
+            // a quote or a space could break out of the command.
+            const host = browserHost(kind, {
+                dbsize: "1\n",
+                scan: `0\nweird key'with"quotes\n`,
+                evalOut: '1) "string\t-1"\n',
+            });
 
-    it("formats TTL -1 as 'no expiry'", async () => {
-        queueExecResponses(
-            { stdout: "1\n" },
-            { stdout: "0\nmykey\n" },
-            { stdout: '1) "string\t-1"\n' }
-        );
+            await getTableData(baseConfig as never, options as never, host);
 
-        const result = await getTableData(baseConfig as any, options as any);
-
-        expect(result.rows[0].ttl).toBe("no expiry");
-    });
-
-    it("formats TTL -2 as 'expired'", async () => {
-        queueExecResponses(
-            { stdout: "1\n" },
-            { stdout: "0\nexpiredkey\n" },
-            { stdout: '1) "string\t-2"\n' }
-        );
-
-        const result = await getTableData(baseConfig as any, options as any);
-
-        expect(result.rows[0].ttl).toBe("expired");
-    });
-
-    it("formats positive TTL with 's' suffix", async () => {
-        queueExecResponses(
-            { stdout: "1\n" },
-            { stdout: "0\ntmpkey\n" },
-            { stdout: '1) "string\t120"\n' }
-        );
-
-        const result = await getTableData(baseConfig as any, options as any);
-
-        expect(result.rows[0].ttl).toBe("120s");
+            const evalCall = host.calls.exec.find(a => a.includes("EVAL"))!;
+            expect(evalCall).toContain(`weird key'with"quotes`);
+        });
     });
 });

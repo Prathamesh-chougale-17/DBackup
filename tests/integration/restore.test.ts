@@ -1,3 +1,4 @@
+import { withHost } from "@/lib/transport";
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { registry } from '@/lib/core/registry';
 import { registerAdapters } from '@/lib/adapters';
@@ -36,20 +37,22 @@ describe('Integration Tests: Database Restore', () => {
 
                 // 1. Create a fresh dump to restore from
                 // We trust backup works (tested in backup.test.ts), but we need a file here.
-                const dumpResult = await adapter.dump(
+                const dumpResult = await withHost(adapter, config, (host) => adapter.dump(
                     config as any,
                     dumpFile,
-                );
+                    host,
+                ));
                 expect(dumpResult.success).toBe(true);
                 expect(fs.existsSync(dumpFile)).toBe(true);
 
                 // 2. Perform Restore (Round-trip)
                 // Restoring back to the same DB (effectively a no-op data wise, but exercises the restore path)
-                const restoreResult = await adapter.restore(
+                const restoreResult = await withHost(adapter, config, (host) => adapter.restore(
                     config as any,
                     dumpFile,
-                    (_) => { /* console.log(progress) */ }
-                );
+                    host,
+                    (_: string) => { /* console.log(progress) */ }
+                ));
 
                 expect(restoreResult.success).toBe(true);
             }, 90000); // 1.5 min timeout (dump + restore)

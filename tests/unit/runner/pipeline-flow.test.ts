@@ -54,7 +54,7 @@ describe('Backup Pipeline Integration', () => {
     // Mock Adapters
     const mockDbAdapter = {
         type: 'database',
-        dump: vi.fn().mockImplementation(async (config, destPath, log) => {
+        dump: vi.fn().mockImplementation(async (config, destPath, _host, log) => {
             log('Mock Dump Started');
             // Write a small dummy file
             fs.writeFileSync(destPath, 'DUMMY BACKUP CONTENT');

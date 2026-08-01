@@ -1,17 +1,45 @@
 import { DatabaseAdapter } from "@/lib/core/interfaces";
-import { spawn } from "child_process";
-import fs from "fs";
-import { SshClient, shellEscape, extractSqliteSshConfig } from "@/lib/ssh";
-import { SQLiteConfig } from "@/lib/adapters/definitions";
-import { randomUUID } from "crypto";
+import type { ExecutionHost } from "@/lib/transport";
 
-export const prepareRestore: NonNullable<DatabaseAdapter["prepareRestore"]> = async (_config, _databases) => {
-     // No major prep needed for SQLite mostly, but could check write permissions here
+export const prepareRestore: NonNullable<DatabaseAdapter["prepareRestore"]> = async () => {
+    // SQLite needs no preparation: the restore replaces a single file.
 };
 
-export const restore: DatabaseAdapter["restore"] = async (config, sourcePath, onLog, onProgress) => {
+/**
+ * Move the current database aside before it is replaced.
+ *
+ * The direct path used fs calls and the SSH path an inline `if [ -f ... ]` shell
+ * construct with a `$(date +%s)` suffix. Both are now the same argv commands
+ * with the timestamp computed here, so the two modes cannot drift apart.
+ */
+async function backupExisting(
+    host: ExecutionHost,
+    dbPath: string,
+    log: (msg: string) => void,
+): Promise<void> {
+    const existing = await host.stat(dbPath);
+    if (!existing) {
+        log("No existing database to back up.");
+        return;
+    }
+
+    const backupPath = `${dbPath}.bak-${Date.now()}`;
+    log(`Backing up existing database to ${backupPath}`);
+
+    const copied = await host.exec(["cp", dbPath, backupPath]);
+    if (copied.code !== 0) {
+        throw new Error(`Could not back up the existing database: ${copied.stderr.trim()}`);
+    }
+
+    log("Removing existing database file before restore...");
+    const removed = await host.exec(["rm", "-f", dbPath]);
+    if (removed.code !== 0) {
+        throw new Error(`Could not remove the existing database: ${removed.stderr.trim()}`);
+    }
+}
+
+export const restore: DatabaseAdapter["restore"] = async (config, sourcePath, host, onLog, onProgress) => {
     const startedAt = new Date();
-    const mode = config.mode || "local";
     const logs: string[] = [];
 
     const log = (msg: string) => {
@@ -20,26 +48,39 @@ export const restore: DatabaseAdapter["restore"] = async (config, sourcePath, on
     };
 
     try {
-        log(`Starting SQLite restore in ${mode} mode...`);
-
-        if (mode === "local") {
-            return await restoreLocal(config as SQLiteConfig, sourcePath, log, onProgress).then(res => ({
-                ...res,
-                startedAt,
-                completedAt: new Date(),
-                logs
-            }));
-        } else if (mode === "ssh") {
-            return await restoreSsh(config as SQLiteConfig, sourcePath, log, onProgress).then(res => ({
-                ...res,
-                startedAt,
-                completedAt: new Date(),
-                logs
-            }));
-        } else {
-            throw new Error(`Invalid mode: ${mode}`);
+        if (!host) {
+            throw new Error("SQLite adapter requires an execution host. Call it through withHost().");
         }
 
+        const dbPath = config.path as string;
+        const binary = await host.which((config.sqliteBinaryPath as string) || "sqlite3");
+
+        log(`Starting SQLite restore of ${dbPath}...`);
+        await backupExisting(host, dbPath, log);
+
+        // `.restore` reads from a path, so the backup file is staged onto the
+        // execution host. On a direct host that is the original file, no copy.
+        await host.stageInput(sourcePath, {}, async (stagedPath) => {
+            onProgress?.(50);
+
+            const argv = [binary, dbPath, `.restore ${stagedPath}`];
+            log(`Executing: ${argv.join(" ")}`);
+
+            const result = await host.exec(argv);
+            if (result.code !== 0) {
+                throw new Error(
+                    `SQLite restore failed with code ${result.code}: ${result.stderr.trim() || result.stdout.trim()}`,
+                );
+            }
+            if (result.stderr.trim()) {
+                log(`[SQLite Stderr]: ${result.stderr.trim()}`);
+            }
+        });
+
+        onProgress?.(100);
+        log("Restore completed successfully.");
+
+        return { success: true, logs, startedAt, completedAt: new Date() };
     } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         log(`Error during restore: ${message}`);
@@ -48,108 +89,7 @@ export const restore: DatabaseAdapter["restore"] = async (config, sourcePath, on
             error: message,
             logs,
             startedAt,
-            completedAt: new Date()
+            completedAt: new Date(),
         };
     }
 };
-
-async function restoreLocal(config: SQLiteConfig, sourcePath: string, log: (msg: string) => void, onProgress?: (percent: number) => void): Promise<any> {
-    const binaryPath = config.sqliteBinaryPath || "sqlite3";
-    const dbPath = config.path;
-
-    // Safety backup
-    if (fs.existsSync(dbPath)) {
-        const backupPath = `${dbPath}.bak-${Date.now()}`;
-        log(`Backing up existing database to ${backupPath}`);
-        fs.copyFileSync(dbPath, backupPath);
-
-        log(`Removing existing database file before restore...`);
-        fs.unlinkSync(dbPath);
-    }
-
-    log(`Executing: ${binaryPath} "${dbPath}" ".restore ${sourcePath}"`);
-
-    return new Promise((resolve, reject) => {
-        const child = spawn(binaryPath, [dbPath, `.restore ${sourcePath}`]);
-
-        child.stderr.on("data", (data) => {
-            log(`[SQLite Stderr]: ${data.toString()}`);
-        });
-
-        child.on("close", (code) => {
-            if (code === 0) {
-                if (onProgress) onProgress(100);
-                log("Restore completed successfully.");
-                resolve({ success: true });
-            } else {
-                reject(new Error(`SQLite restore process failed with code ${code}`));
-            }
-        });
-
-        child.on("error", (err) => {
-            reject(err);
-        });
-    });
-}
-
-async function restoreSsh(config: SQLiteConfig, sourcePath: string, log: (msg: string) => void, onProgress?: (percent: number) => void): Promise<any> {
-    const client = new SshClient();
-    const binaryPath = config.sqliteBinaryPath || "sqlite3";
-    const dbPath = config.path;
-
-    const sshConfig = extractSqliteSshConfig(config);
-    if (!sshConfig) throw new Error("SSH host and username are required");
-    await client.connect(sshConfig);
-    log("SSH connection established.");
-
-    const remoteTempFile = `/tmp/dbackup_sqlite_restore_${randomUUID()}.db`;
-
-    try {
-        // Create remote backup and delete original
-        log("Creating remote backup of existing DB and cleaning up...");
-        const escapedPath = shellEscape(dbPath);
-        const backupCmd = `if [ -f ${escapedPath} ]; then cp ${escapedPath} ${escapedPath}.bak-$(date +%s); rm ${escapedPath}; echo "Backed up and removed old DB"; else echo "No existing DB"; fi`;
-        await client.exec(backupCmd);
-
-        // 1. Upload SQL dump to remote via SFTP
-        const totalSize = (await fs.promises.stat(sourcePath)).size;
-        log(`Uploading dump to remote server via SFTP (${(totalSize / 1024 / 1024).toFixed(1)} MB)...`);
-        await client.uploadFile(sourcePath, remoteTempFile);
-
-        // Verify upload integrity
-        try {
-            const sizeCheck = await client.exec(`stat -c '%s' ${shellEscape(remoteTempFile)} 2>/dev/null || stat -f '%z' ${shellEscape(remoteTempFile)}`);
-            const remoteSize = parseInt(sizeCheck.stdout.trim(), 10);
-            if (remoteSize !== totalSize) {
-                throw new Error(`Upload size mismatch! Local: ${totalSize}, Remote: ${remoteSize}`);
-            }
-            log(`Upload verified: ${(remoteSize / 1024 / 1024).toFixed(1)} MB`);
-        } catch (e) {
-            if (e instanceof Error && e.message.includes('mismatch')) throw e;
-        }
-
-        if (onProgress) onProgress(50);
-
-        // 2. Restore the binary backup on the remote server via .restore
-        const command = `${shellEscape(binaryPath)} ${escapedPath} ".restore ${remoteTempFile}"`;
-        log(`Executing remote command: ${binaryPath} ${dbPath}`);
-        const result = await client.exec(command);
-        if (result.code !== 0) {
-            throw new Error(`Remote restore failed (code ${result.code}): ${result.stderr.trim()}`);
-        }
-        if (result.stderr) {
-            log(`[Remote Stderr]: ${result.stderr}`);
-        }
-
-        if (onProgress) onProgress(100);
-        log("Remote restore completed successfully.");
-
-        return { success: true };
-    } finally {
-        // Cleanup remote temp file
-        await client.exec(`rm -f ${shellEscape(remoteTempFile)}`).catch(() => {});
-        client.end();
-    }
-}
-
-

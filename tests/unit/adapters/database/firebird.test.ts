@@ -1,358 +1,292 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { EventEmitter } from "events";
 
-// --- Mocks: child_process ---------------------------------------------------
-
-const { mockSpawn } = vi.hoisted(() => ({ mockSpawn: vi.fn() }));
-vi.mock("child_process", () => {
-    const mocked = {
-        spawn: (...args: unknown[]) => mockSpawn(...args),
-        execFile: vi.fn(),
-    };
-    return { ...mocked, default: mocked };
-});
-
-// --- Mocks: fs / fs/promises -------------------------------------------------
-
-vi.mock("fs/promises", async () => {
-    const actual = await vi.importActual<typeof import("fs/promises")>("fs/promises");
-    const mocked = {
-        ...actual,
-        stat: vi.fn(async () => ({ size: 1024 })),
-    };
-    return { ...mocked, default: mocked };
-});
-
-vi.mock("fs", async () => {
-    const actual = await vi.importActual<typeof import("fs")>("fs");
-    return {
-        ...actual,
-        createWriteStream: vi.fn(() => {
-            const stream = new EventEmitter() as any;
-            stream.pipe = vi.fn();
-            return stream;
-        }),
-    };
-});
-
-// --- Mocks: SSH helpers -------------------------------------------------------
-
-const { connectMock, execMock, execStreamMock, uploadFileMock, endMock } = vi.hoisted(() => ({
-    connectMock: vi.fn(async () => {}),
-    execMock: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
-    execStreamMock: vi.fn(),
-    uploadFileMock: vi.fn(async () => {}),
-    endMock: vi.fn(),
+const { mockFsStat, mockIsMultiDbTar, mockReadTarManifest } = vi.hoisted(() => ({
+    mockFsStat: vi.fn(),
+    mockIsMultiDbTar: vi.fn(),
+    mockReadTarManifest: vi.fn(),
 }));
 
-vi.mock("@/lib/ssh", () => ({
-    SshClient: vi.fn(function SshClient() {
-        return {
-            connect: connectMock,
-            exec: execMock,
-            execStream: execStreamMock,
-            uploadFile: uploadFileMock,
-            end: endMock,
-        };
-    }),
-    isSSHMode: vi.fn((config: any) => config.connectionMode === "ssh"),
-    extractSshConfig: vi.fn(() => ({ host: "ssh-host", username: "root", authType: "password" })),
-    remoteEnv: vi.fn((vars: Record<string, string | undefined>, cmd: string) => {
-        const parts = Object.entries(vars)
-            .filter(([, v]) => v !== undefined && v !== "")
-            .map(([k, v]) => `export ${k}='${v}'`);
-        return parts.length ? `${parts.join("; ")}; ${cmd}` : cmd;
-    }),
-    remoteBinaryCheck: vi.fn(async (_ssh: unknown, ...candidates: string[]) => candidates[0]),
-    shellEscape: vi.fn((s: string) => `'${s}'`),
+vi.mock("fs/promises", () => ({
+    default: { stat: (...args: unknown[]) => mockFsStat(...args) },
+    stat: (...args: unknown[]) => mockFsStat(...args),
 }));
 
+vi.mock("@/lib/adapters/database/common/tar-utils", () => ({
+    isMultiDbTar: (...args: unknown[]) => mockIsMultiDbTar(...args),
+    readTarManifest: (...args: unknown[]) => mockReadTarManifest(...args),
+    createMultiDbTar: vi.fn(),
+    createTempDir: vi.fn(),
+    cleanupTempDir: vi.fn(),
+    extractSelectedDatabases: vi.fn(),
+    shouldRestoreDatabase: vi.fn(() => true),
+    getTargetDatabaseName: vi.fn((n: string) => n),
+}));
+
+import { createFakeHost, type FakeHost } from "@/lib/testing/fake-host";
 import {
     resolveAliasPath,
     buildConnectionString,
     getDatabases,
     getDatabasesWithStats,
     test as testConnection,
+    ping,
 } from "@/lib/adapters/database/firebird/connection";
 import { dump } from "@/lib/adapters/database/firebird/dump";
 import { restore } from "@/lib/adapters/database/firebird/restore";
 import { analyzeDump } from "@/lib/adapters/database/firebird/analyze";
-import * as tarUtils from "@/lib/adapters/database/common/tar-utils";
-
-function createFakeProcess() {
-    const proc = new EventEmitter() as any;
-    proc.stdout = new EventEmitter();
-    proc.stderr = new EventEmitter();
-    proc.stdin = { write: vi.fn(), end: vi.fn() };
-    return proc;
-}
-
-function createFakeSshStream() {
-    const stream = new EventEmitter() as any;
-    stream.pipe = vi.fn();
-    stream.stderr = new EventEmitter();
-    return stream;
-}
+import type { HostKind } from "@/lib/transport/types";
 
 const baseConfig = {
-    host: "192.168.1.10",
+    host: "fb.internal",
     port: 3050,
     user: "SYSDBA",
     password: "masterkey",
-    databases: [
-        { name: "erp", path: "/data/erp.fdb" },
-        { name: "crm", path: "/data/crm.fdb" },
-    ],
-    database: "erp",
-    connectionMode: "direct",
+    databases: [{ name: "shop", path: "/var/lib/firebird/shop.fdb" }],
 };
 
-beforeEach(() => {
-    vi.clearAllMocks();
-});
+/**
+ * Firebird verifies that a resolved binary really is its own before using it,
+ * because several distributions ship an unrelated `isql` from unixODBC. The
+ * fake answers that probe so the adapter gets past it.
+ */
+function firebirdHost(kind: HostKind, opts: {
+    onExec?: (argv: string[]) => { code?: number; stdout?: string; stderr?: string } | undefined;
+    onSpawn?: (argv: string[]) => { code?: number; stdout?: string; stderr?: string } | undefined;
+} = {}): FakeHost {
+    return createFakeHost({
+        kind,
+        onSpawn: (argv) => argv.includes("-z")
+            ? { stdout: "gbak: Firebird 5.0" }
+            : opts.onSpawn?.(argv),
+        onExec: opts.onExec,
+    });
+}
 
-describe("Firebird connection - resolveAliasPath", () => {
+describe("Firebird alias handling", () => {
     it("resolves a configured alias to its path", () => {
-        expect(resolveAliasPath(baseConfig as any, "crm")).toBe("/data/crm.fdb");
+        expect(resolveAliasPath(baseConfig as never, "shop")).toBe("/var/lib/firebird/shop.fdb");
     });
 
-    it("throws a clear error listing valid aliases for an unknown alias", () => {
-        expect(() => resolveAliasPath(baseConfig as any, "accounting")).toThrow(
-            /Unknown Firebird database alias "accounting".*erp, crm/
-        );
-    });
-});
-
-describe("Firebird connection - buildConnectionString", () => {
-    it("omits the port segment for the default port in direct mode", () => {
-        expect(buildConnectionString({ ...baseConfig, port: 3050 } as any, "/data/erp.fdb")).toBe(
-            "192.168.1.10:/data/erp.fdb"
-        );
+    it("names the valid aliases when one is unknown", () => {
+        expect(() => resolveAliasPath(baseConfig as never, "nope"))
+            .toThrow(/Unknown Firebird database alias "nope".*shop/);
     });
 
-    it("includes a port segment for a non-default port in direct mode", () => {
-        expect(buildConnectionString({ ...baseConfig, port: 3051 } as any, "/data/erp.fdb")).toBe(
-            "192.168.1.10/3051:/data/erp.fdb"
-        );
+    it("omits the port segment for the default port", () => {
+        expect(buildConnectionString(baseConfig as never, "/db.fdb")).toBe("fb.internal:/db.fdb");
     });
 
-    it("builds the same host/port connection string in SSH mode, as reachable from the SSH target", () => {
-        expect(
-            buildConnectionString({ ...baseConfig, connectionMode: "ssh", port: 3051 } as any, "/data/erp.fdb")
-        ).toBe("192.168.1.10/3051:/data/erp.fdb");
+    it("includes a port segment for a non-default port", () => {
+        expect(buildConnectionString({ ...baseConfig, port: 3051 } as never, "/db.fdb"))
+            .toBe("fb.internal/3051:/db.fdb");
     });
 });
 
-describe("Firebird connection - getDatabases / getDatabasesWithStats", () => {
-    it("returns configured alias names without spawning any process", async () => {
-        const result = await getDatabases(baseConfig as any);
-        expect(result).toEqual(["erp", "crm"]);
-        expect(mockSpawn).not.toHaveBeenCalled();
+describe.each<HostKind>(["direct", "ssh"])("Firebird over a %s host", (kind) => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mockFsStat.mockResolvedValue({ size: 4096 });
     });
 
-    it("returns alias entries with path, table count from a live query, and undefined size", async () => {
-        const stdouts = ["3\n", "0\n"];
-        let call = 0;
-        mockSpawn.mockImplementation(() => {
-            const proc = createFakeProcess();
-            const stdout = stdouts[call++];
-            setImmediate(() => {
-                proc.stdout.emit("data", Buffer.from(stdout));
-                proc.emit("close", 0);
+    describe("getDatabases()", () => {
+        it("returns the configured alias names without running anything", async () => {
+            const host = firebirdHost(kind);
+            expect(await getDatabases(baseConfig as never, host)).toEqual(["shop"]);
+            expect(host.calls.exec).toHaveLength(0);
+        });
+    });
+
+    describe("getDatabasesWithStats()", () => {
+        it("adds a table count from a live query and leaves the size undefined", async () => {
+            const host = firebirdHost(kind, { onExec: () => ({ stdout: "  12  \n" }) });
+
+            expect(await getDatabasesWithStats(baseConfig as never, host)).toEqual([
+                { name: "shop", path: "/var/lib/firebird/shop.fdb", tableCount: 12 },
+            ]);
+        });
+
+        it("falls back to a path-only entry when the query fails", async () => {
+            const host = firebirdHost(kind, { onExec: () => ({ code: 1, stderr: "unavailable database" }) });
+
+            expect(await getDatabasesWithStats(baseConfig as never, host)).toEqual([
+                { name: "shop", path: "/var/lib/firebird/shop.fdb" },
+            ]);
+        });
+    });
+
+    describe("test()", () => {
+        it("parses the engine version from the isql output", async () => {
+            const host = firebirdHost(kind, { onExec: () => ({ stdout: "\n  5.0.1\n\n" }) });
+            const result = await testConnection(baseConfig as never, host);
+
+            expect(result.success).toBe(true);
+            expect(result.version).toBe("5.0.1");
+        });
+
+        it("feeds the SQL through stdin rather than a shell pipeline", async () => {
+            let seenStdin: unknown;
+            const host = createFakeHost({
+                kind,
+                onSpawn: (argv) => argv.includes("-z") ? { stdout: "isql: Firebird 5.0" } : undefined,
+                onExec: (_argv, options) => { seenStdin = options?.stdin; return { stdout: "5.0.1" }; },
             });
-            return proc;
+
+            await testConnection(baseConfig as never, host);
+            expect(String(seenStdin)).toContain("rdb$get_context");
         });
 
-        const result = await getDatabasesWithStats(baseConfig as any);
-        expect(result).toEqual([
-            { name: "erp", path: "/data/erp.fdb", tableCount: 3 },
-            { name: "crm", path: "/data/crm.fdb", tableCount: 0 },
-        ]);
-        expect(mockSpawn).toHaveBeenCalledTimes(2);
-    });
-
-    it("falls back to path-only entry when the live table count query fails", async () => {
-        mockSpawn.mockImplementation(() => {
-            const proc = createFakeProcess();
-            setImmediate(() => {
-                proc.stderr.emit("data", Buffer.from("connection refused"));
-                proc.emit("close", 1);
+        it("keeps the password out of argv and in the environment", async () => {
+            let seenEnv: Record<string, string | undefined> | undefined;
+            const host = createFakeHost({
+                kind,
+                onSpawn: (argv) => argv.includes("-z") ? { stdout: "isql: Firebird 5.0" } : undefined,
+                onExec: (_argv, options) => { seenEnv = options?.env; return { stdout: "5.0.1" }; },
             });
-            return proc;
+
+            await testConnection(baseConfig as never, host);
+
+            expect(seenEnv?.ISC_PASSWORD).toBe("masterkey");
+            const isqlCall = host.calls.exec.find(a => a.includes("-user"))!;
+            expect(isqlCall.join(" ")).not.toContain("masterkey");
         });
 
-        const result = await getDatabasesWithStats(baseConfig as any);
-        expect(result).toEqual([
-            { name: "erp", path: "/data/erp.fdb" },
-            { name: "crm", path: "/data/crm.fdb" },
-        ]);
-    });
-});
+        it("fails when no aliases are configured", async () => {
+            const result = await testConnection({ ...baseConfig, databases: [] } as never, firebirdHost(kind));
+            expect(result.success).toBe(false);
+            expect(result.message).toContain("No database aliases configured");
+        });
 
-describe("Firebird connection - test()", () => {
-    it("returns success and parses the engine version from isql output (direct mode)", async () => {
-        mockSpawn.mockImplementation(() => {
-            const proc = createFakeProcess();
-            setImmediate(() => {
-                proc.stdout.emit("data", Buffer.from("\nCONSTANT\n========\n5.0.1\n\n"));
-                proc.emit("close", 0);
+        it("reports the server error when isql exits non-zero", async () => {
+            const host = firebirdHost(kind, { onExec: () => ({ code: 1, stderr: "Your user name and password are not defined" }) });
+            const result = await testConnection(baseConfig as never, host);
+
+            expect(result.success).toBe(false);
+            expect(result.message).toContain("not defined");
+        });
+    });
+
+    describe("ping()", () => {
+        it("opens the database port rather than only proving the transport works", async () => {
+            // Over SSH this used to report success as soon as the SSH handshake
+            // succeeded, so a source whose Firebird server was down looked healthy.
+            const host = firebirdHost(kind);
+            const result = await ping(baseConfig as never, host);
+
+            expect(result.success).toBe(true);
+            expect(host.calls.forwards).toHaveLength(0);
+        });
+
+        it("rejects a call made without a transport", async () => {
+            const result = await ping(baseConfig as never, undefined);
+            expect(result.success).toBe(false);
+            expect(result.message).toContain("requires an execution host");
+        });
+    });
+
+    describe("dump()", () => {
+        it("runs gbak in backup mode with the user on argv and the password in the environment", async () => {
+            let seenEnv: Record<string, string | undefined> | undefined;
+            const host = createFakeHost({
+                kind,
+                onSpawn: (argv, options) => {
+                    if (argv.includes("-z")) return { stdout: "gbak: Firebird 5.0" };
+                    seenEnv = options?.env;
+                    return { code: 0 };
+                },
             });
-            return proc;
+
+            const result = await dump({ ...baseConfig, database: "shop" } as never, "/tmp/out.fbk", host);
+
+            expect(result.success).toBe(true);
+            const gbakCall = host.calls.spawn.find(a => a.includes("-b"))!;
+            expect(gbakCall).toContain("-user");
+            expect(gbakCall).toContain("SYSDBA");
+            expect(gbakCall.join(" ")).not.toContain("masterkey");
+            expect(seenEnv?.ISC_PASSWORD).toBe("masterkey");
         });
 
-        const result = await testConnection(baseConfig as any);
+        it("fails with a clear error for an unknown alias", async () => {
+            const result = await dump({ ...baseConfig, database: "nope" } as never, "/tmp/out.fbk", firebirdHost(kind));
 
-        expect(result.success).toBe(true);
-        expect(result.version).toBe("5.0.1");
+            expect(result.success).toBe(false);
+            expect(result.error).toContain("Unknown Firebird database alias");
+        });
 
-        // Password must be passed via env, never in argv.
-        const [, args, options] = mockSpawn.mock.calls[0];
-        expect(args).not.toContain("masterkey");
-        expect((options as any).env.ISC_PASSWORD).toBe("masterkey");
+        it("fails when gbak exits non-zero", async () => {
+            const host = createFakeHost({
+                kind,
+                onSpawn: (argv) => argv.includes("-z")
+                    ? { stdout: "gbak: Firebird 5.0" }
+                    : { code: 1, stderr: "cannot open backup file" },
+            });
+
+            const result = await dump({ ...baseConfig, database: "shop" } as never, "/tmp/out.fbk", host);
+            expect(result.success).toBe(false);
+            expect(result.error).toContain("exited with code 1");
+        });
     });
 
-    it("returns failure when no database aliases are configured", async () => {
-        const result = await testConnection({ ...baseConfig, databases: [] } as any);
-        expect(result.success).toBe(false);
-        expect(mockSpawn).not.toHaveBeenCalled();
+    describe("restore()", () => {
+        beforeEach(() => mockIsMultiDbTar.mockResolvedValue(false));
+
+        it("always uses replace mode and keeps the password in the environment", async () => {
+            let seenEnv: Record<string, string | undefined> | undefined;
+            const host = createFakeHost({
+                kind,
+                onSpawn: (argv, options) => {
+                    if (argv.includes("-z")) return { stdout: "gbak: Firebird 5.0" };
+                    seenEnv = options?.env;
+                    return { code: 0 };
+                },
+            });
+
+            const result = await restore({ ...baseConfig, database: "shop" } as never, "/tmp/in.fbk", host);
+
+            expect(result.success).toBe(true);
+            const gbakCall = host.calls.spawn.find(a => a.includes("-rep"))!;
+            expect(gbakCall.join(" ")).not.toContain("masterkey");
+            expect(seenEnv?.ISC_PASSWORD).toBe("masterkey");
+        });
+
+        it("treats an explicit target name as a literal path", async () => {
+            const host = firebirdHost(kind, { onSpawn: () => ({ code: 0 }) });
+
+            await restore(
+                { ...baseConfig, database: "shop", targetDatabaseName: "/srv/restored.fdb" } as never,
+                "/tmp/in.fbk",
+                host,
+            );
+
+            const gbakCall = host.calls.spawn.find(a => a.includes("-rep"))!;
+            expect(gbakCall.join(" ")).toContain("/srv/restored.fdb");
+        });
+
+        it("fails when gbak exits non-zero", async () => {
+            const host = createFakeHost({
+                kind,
+                onSpawn: (argv) => argv.includes("-z")
+                    ? { stdout: "gbak: Firebird 5.0" }
+                    : { code: 1, stderr: "database already exists" },
+            });
+
+            const result = await restore({ ...baseConfig, database: "shop" } as never, "/tmp/in.fbk", host);
+            expect(result.success).toBe(false);
+        });
     });
 });
 
-describe("Firebird dump - direct mode", () => {
-    it("runs gbak with -user on argv and ISC_PASSWORD only in env", async () => {
-        mockSpawn.mockImplementation(() => {
-            const proc = createFakeProcess();
-            setImmediate(() => proc.emit("close", 0));
-            return proc;
-        });
+describe("Firebird analyzeDump", () => {
+    beforeEach(() => vi.clearAllMocks());
 
-        const result = await dump({ ...baseConfig, database: "erp" } as any, "/tmp/erp.fbk");
+    it("returns the database names from a multi-database archive manifest", async () => {
+        mockIsMultiDbTar.mockResolvedValue(true);
+        mockReadTarManifest.mockResolvedValue({ databases: [{ name: "shop" }, { name: "analytics" }] });
 
-        expect(result.error).toBeUndefined();
-        expect(result.success).toBe(true);
-        expect(mockSpawn).toHaveBeenCalledTimes(1);
-
-        const [bin, args, options] = mockSpawn.mock.calls[0];
-        expect(bin).toBe("gbak");
-        expect(args).toEqual(["-b", "-user", "SYSDBA", "192.168.1.10:/data/erp.fdb", "/tmp/erp.fbk"]);
-        expect(args).not.toContain("masterkey");
-        expect((options as any).env.ISC_PASSWORD).toBe("masterkey");
+        expect(await analyzeDump("/tmp/multi.tar")).toEqual(["shop", "analytics"]);
     });
 
-    it("fails with a clear error for an unknown alias", async () => {
-        const result = await dump({ ...baseConfig, database: "unknown" } as any, "/tmp/unknown.fbk");
-        expect(result.success).toBe(false);
-        expect(result.error).toMatch(/Unknown Firebird database alias "unknown"/);
-        expect(mockSpawn).not.toHaveBeenCalled();
-    });
-});
-
-describe("Firebird dump - SSH mode", () => {
-    it("streams gbak stdout to the local destination file via remoteEnv", async () => {
-        execStreamMock.mockImplementation((_cmd: string, cb: (err: unknown, stream: unknown) => void) => {
-            const stream = createFakeSshStream();
-            cb(null, stream);
-            setImmediate(() => stream.emit("exit", 0));
-        });
-
-        const sshConfig = { ...baseConfig, connectionMode: "ssh", database: "erp" };
-        const result = await dump(sshConfig as any, "/tmp/erp.fbk");
-
-        expect(result.error).toBeUndefined();
-        expect(result.success).toBe(true);
-        expect(execStreamMock).toHaveBeenCalledTimes(1);
-
-        const [cmd] = execStreamMock.mock.calls[0];
-        expect(cmd).toContain("export ISC_PASSWORD='masterkey'");
-        expect(cmd).toContain("gbak -b -user 'SYSDBA' '192.168.1.10:/data/erp.fdb' stdout");
-    });
-});
-
-describe("Firebird restore - direct mode", () => {
-    it("always uses -rep (replace) and passes ISC_PASSWORD via env", async () => {
-        mockSpawn.mockImplementation(() => {
-            const proc = createFakeProcess();
-            setImmediate(() => proc.emit("close", 0));
-            return proc;
-        });
-
-        const result = await restore({ ...baseConfig, database: "erp" } as any, "/tmp/erp.fbk");
-
-        expect(result.success).toBe(true);
-        const [bin, args, options] = mockSpawn.mock.calls[0];
-        expect(bin).toBe("gbak");
-        expect(args).toEqual(["-rep", "-user", "SYSDBA", "/tmp/erp.fbk", "192.168.1.10:/data/erp.fdb"]);
-        expect(args).not.toContain("masterkey");
-        expect((options as any).env.ISC_PASSWORD).toBe("masterkey");
-    });
-
-    it("fails with a clear error when leaving the field empty resolves to an unconfigured alias", async () => {
-        const result = await restore({ ...baseConfig, database: "unknown" } as any, "/tmp/erp.fbk");
-        expect(result.success).toBe(false);
-        expect(result.error).toMatch(/Unknown Firebird database alias "unknown"/);
-    });
-
-    it("treats an explicit targetDatabaseName as a literal path, bypassing alias resolution", async () => {
-        mockSpawn.mockImplementation(() => {
-            const proc = createFakeProcess();
-            setImmediate(() => proc.emit("close", 0));
-            return proc;
-        });
-
-        const result = await restore(
-            { ...baseConfig, database: "erp", targetDatabaseName: "/custom/new-location.fdb" } as any,
-            "/tmp/erp.fbk"
-        );
-
-        expect(result.success).toBe(true);
-        const [, args] = mockSpawn.mock.calls[0];
-        expect(args).toEqual(["-rep", "-user", "SYSDBA", "/tmp/erp.fbk", "192.168.1.10:/custom/new-location.fdb"]);
-    });
-});
-
-describe("Firebird restore - SSH mode", () => {
-    it("uploads the backup file then runs gbak -rep remotely via remoteEnv", async () => {
-        execStreamMock.mockImplementation((_cmd: string, cb: (err: unknown, stream: unknown) => void) => {
-            const stream = createFakeSshStream();
-            cb(null, stream);
-            setImmediate(() => stream.emit("exit", 0));
-        });
-
-        const sshConfig = { ...baseConfig, connectionMode: "ssh", database: "erp" };
-        const result = await restore(sshConfig as any, "/tmp/erp.fbk");
-
-        expect(result.success).toBe(true);
-        expect(uploadFileMock).toHaveBeenCalledTimes(1);
-
-        const [cmd] = execStreamMock.mock.calls[0];
-        expect(cmd).toContain("export ISC_PASSWORD='masterkey'");
-        expect(cmd).toContain("gbak -rep -user 'SYSDBA'");
-        expect(cmd).toContain("'192.168.1.10:/data/erp.fdb'");
-    });
-});
-
-describe("Firebird analyze - analyzeDump", () => {
-    it("returns database names from the manifest for a Multi-DB TAR archive", async () => {
-        vi.spyOn(tarUtils, "isMultiDbTar").mockResolvedValue(true);
-        vi.spyOn(tarUtils, "readTarManifest").mockResolvedValue({
-            version: 1,
-            createdAt: new Date().toISOString(),
-            sourceType: "firebird",
-            databases: [
-                { name: "erp", filename: "erp.fbk", size: 100, format: "fbk" },
-                { name: "crm", filename: "crm.fbk", size: 200, format: "fbk" },
-            ],
-            totalSize: 300,
-        } as any);
-
-        const result = await analyzeDump("/tmp/backup.tar");
-        expect(result).toEqual(["erp", "crm"]);
-    });
-
-    it("returns an empty array for a single .fbk file (binary format, not introspectable)", async () => {
-        vi.spyOn(tarUtils, "isMultiDbTar").mockResolvedValue(false);
-
-        const result = await analyzeDump("/tmp/erp.fbk");
-        expect(result).toEqual([]);
+    it("returns nothing for a single binary backup file", async () => {
+        mockIsMultiDbTar.mockResolvedValue(false);
+        expect(await analyzeDump("/tmp/single.fbk")).toEqual([]);
     });
 });

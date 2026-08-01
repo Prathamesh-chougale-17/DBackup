@@ -335,8 +335,8 @@ describe('executeCombinedDump', () => {
         createdTempFiles.push(ctx.tempFile!);
 
         expect(dbAdapter.dumpOne).toHaveBeenCalledTimes(2);
-        expect(dbAdapter.dumpOne).toHaveBeenCalledWith(expect.anything(), 'auto1', expect.any(String), expect.any(Function));
-        expect(dbAdapter.dumpOne).toHaveBeenCalledWith(expect.anything(), 'auto2', expect.any(String), expect.any(Function));
+        expect(dbAdapter.dumpOne).toHaveBeenCalledWith(expect.anything(), 'auto1', expect.any(String), expect.anything(), expect.any(Function));
+        expect(dbAdapter.dumpOne).toHaveBeenCalledWith(expect.anything(), 'auto2', expect.any(String), expect.anything(), expect.any(Function));
     });
 
     it('throws when the database adapter does not support combined backups (no dumpOne)', async () => {

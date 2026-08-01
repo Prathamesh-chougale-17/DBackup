@@ -3,6 +3,7 @@ import { GotifySchema, GotifyConfig } from "@/lib/adapters/definitions";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { validateOutboundUrl } from "@/lib/url-validation";
+import { stripTrailingSlashes } from "@/lib/paths";
 
 const log = logger.child({ adapter: "gotify" });
 
@@ -56,7 +57,7 @@ export const GotifyAdapter: NotificationAdapter = {
 
     async test(config: GotifyConfig): Promise<{ success: boolean; message: string }> {
         try {
-            const baseUrl = config.serverUrl.replace(/\/+$/, "");
+            const baseUrl = stripTrailingSlashes(config.serverUrl);
             const url = `${baseUrl}/message`;
 
             validateOutboundUrl(url);
@@ -90,7 +91,7 @@ export const GotifyAdapter: NotificationAdapter = {
 
     async send(config: GotifyConfig, message: string, context?: any): Promise<boolean> {
         try {
-            const baseUrl = config.serverUrl.replace(/\/+$/, "");
+            const baseUrl = stripTrailingSlashes(config.serverUrl);
             const url = `${baseUrl}/message`;
             const priority = resolvePriority(config.priority ?? 5, context);
             const formattedMessage = buildMarkdownMessage(message, context);

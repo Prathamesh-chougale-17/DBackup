@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { registry } from "@/lib/core/registry";
+import { withHost } from "@/lib/transport";
 import { registerAdapters } from "@/lib/adapters";
 import { headers } from "next/headers";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
@@ -65,11 +66,13 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ success: false, message: "Adapter not found" }, { status: 404 });
         }
 
-        if (!adapter.getTables) {
+        const listTables = adapter.getTables;
+        if (!listTables) {
             return NextResponse.json({ success: false, message: "This adapter does not support listing tables." });
         }
 
-        const tables = await adapter.getTables(resolvedConfig, database);
+        const config = resolvedConfig;
+        const tables = await withHost(adapter, config, (host) => listTables(config, database, host));
 
         return NextResponse.json({ success: true, tables });
 

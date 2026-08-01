@@ -1,7 +1,8 @@
+import type { ExecutionHost } from "@/lib/transport";
 import sql from "mssql";
 import { MSSQLConfig } from "@/lib/adapters/definitions";
 import { TableInfo, ColumnInfo, TableDataOptions, TableDataResult } from "@/lib/core/interfaces";
-import { buildConnectionConfig } from "./connection";
+import { withPool } from "./pool";
 
 /** Sanitize a SQL Server identifier for bracket-quoting. */
 function escapeMssqlIdentifier(name: string): string {
@@ -13,15 +14,10 @@ function escapeMssqlStringLiteral(name: string): string {
     return name.replace(/'/g, "''").replace(/\0/g, "");
 }
 
-export async function getTables(config: MSSQLConfig, database: string): Promise<TableInfo[]> {
+export async function getTables(config: MSSQLConfig, database: string, host: ExecutionHost): Promise<TableInfo[]> {
     const dbId = escapeMssqlIdentifier(database);
-    let pool: sql.ConnectionPool | null = null;
 
-    try {
-        const connCfg = buildConnectionConfig(config);
-        pool = new sql.ConnectionPool(connCfg);
-        await pool.connect();
-
+    return withPool(config, host, async (pool) => {
         const result = await pool.request().query(`
             SELECT
                 t.TABLE_SCHEMA AS schema_name,
@@ -44,14 +40,13 @@ export async function getTables(config: MSSQLConfig, database: string): Promise<
             rowCount: Number(row.row_count) || 0,
             sizeInBytes: Number(row.size_bytes) || 0,
         }));
-    } finally {
-        if (pool) await pool.close().catch(() => {});
-    }
+    });
 }
 
 export async function getTableData(
     config: MSSQLConfig,
-    options: TableDataOptions
+    options: TableDataOptions,
+    host: ExecutionHost,
 ): Promise<TableDataResult> {
     const { database, table, page, pageSize, sortBy, sortDir, search, searchColumn, matchMode } = options;
     const offset = (page - 1) * pageSize;
@@ -83,13 +78,7 @@ export async function getTableData(
             ? ` WHERE CAST([${escapeMssqlIdentifier(searchColumn!)}] AS NVARCHAR(MAX)) = @searchTerm`
             : ` WHERE CAST([${escapeMssqlIdentifier(searchColumn!)}] AS NVARCHAR(MAX)) LIKE @searchTerm`
         : "";
-    let pool: sql.ConnectionPool | null = null;
-
-    try {
-        const connCfg = buildConnectionConfig(config);
-        pool = new sql.ConnectionPool(connCfg);
-        await pool.connect();
-
+    return withPool(config, host, async (pool) => {
         const colReq = pool.request();
         const countReq = pool.request();
         const dataReq = pool.request();
@@ -141,7 +130,5 @@ export async function getTableData(
         });
 
         return { rows, totalCount, columns };
-    } finally {
-        if (pool) await pool.close().catch(() => {});
-    }
+    });
 }

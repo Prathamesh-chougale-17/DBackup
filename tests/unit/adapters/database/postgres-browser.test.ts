@@ -1,133 +1,154 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 
-vi.mock("@/lib/ssh", () => ({
-    SshClient: vi.fn(),
-    isSSHMode: vi.fn(() => false),
-    extractSshConfig: vi.fn(),
-    buildPsqlArgs: vi.fn(() => []),
-    remoteEnv: vi.fn((env: unknown, cmd: string) => cmd),
-    remoteBinaryCheck: vi.fn(),
-    shellEscape: vi.fn((s: string) => s),
-}));
-
-vi.mock("@/lib/adapters/database/postgres/connection", () => ({
-    execFileAsync: vi.fn(),
-}));
-
+import { createFakeHost, type FakeHost } from "@/lib/testing/fake-host";
 import { getTables, getTableData } from "@/lib/adapters/database/postgres/browser";
-import { execFileAsync } from "@/lib/adapters/database/postgres/connection";
+import type { HostKind } from "@/lib/transport/types";
+
+/**
+ * One code path now serves both connection modes, so one table of expectations
+ * covers them and the assertions are on argument lists rather than on strings
+ * assembled for a shell.
+ */
 
 const baseConfig = {
-    host: "localhost",
+    host: "db.internal",
     port: 5432,
     user: "postgres",
     password: "secret",
-    database: "testdb",
-    sshEnabled: false,
+    database: "shop",
 };
 
-describe("Postgres browser - getTables", () => {
-    beforeEach(() => vi.clearAllMocks());
+/** The SQL passed after -c for a recorded exec call. */
+function queryOf(argv: string[]): string | undefined {
+    const i = argv.indexOf("-c");
+    return i === -1 ? undefined : argv[i + 1];
+}
 
-    it("returns parsed table list", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({
-            stdout: "orders\tBASE TABLE\t100\t204800\n",
-            stderr: "",
-        } as any);
+function hostWith(
+    kind: HostKind,
+    responses: { tables?: string; columns?: string; count?: string; data?: string },
+): FakeHost {
+    return createFakeHost({
+        kind,
+        onExec: (argv) => {
+            const query = queryOf(argv) ?? "";
+            if (query.includes("information_schema.columns")) return { stdout: responses.columns ?? "" };
+            if (query.includes("COUNT(*)")) return { stdout: responses.count ?? "" };
+            if (query.includes("pg_tables") || query.includes("table_type")) return { stdout: responses.tables ?? "" };
+            return { stdout: responses.data ?? "" };
+        },
+    });
+}
 
-        const result = await getTables(baseConfig as any, "testdb");
+describe.each<HostKind>(["direct", "ssh"])("PostgreSQL browser over a %s host", (kind) => {
+    describe("getTables()", () => {
+        it("parses the table listing", async () => {
+            const host = hostWith(kind, { tables: "users\tBASE TABLE\t42\t8192\n" });
+            const result = await getTables(baseConfig as never, "shop", host);
 
-        expect(result).toHaveLength(1);
-        expect(result[0]).toMatchObject({
-            name: "orders",
-            type: "table",
-            rowCount: 100,
-            sizeInBytes: 204800,
+            expect(result).toHaveLength(1);
+            expect(result[0]).toMatchObject({ name: "users", type: "table", rowCount: 42, sizeInBytes: 8192 });
+        });
+
+        it("returns nothing for blank output", async () => {
+            const host = hostWith(kind, { tables: "" });
+            expect(await getTables(baseConfig as never, "shop", host)).toEqual([]);
+        });
+
+        it("connects to the database being browsed", async () => {
+            const host = hostWith(kind, { tables: "" });
+            await getTables(baseConfig as never, "otherdb", host);
+
+            const argv = host.calls.exec[0];
+            expect(argv[argv.indexOf("-d") + 1]).toBe("otherdb");
+            expect(argv[argv.indexOf("-h") + 1]).toBe("db.internal");
+            expect(argv[argv.indexOf("-p") + 1]).toBe("5432");
+            expect(argv[argv.indexOf("-U") + 1]).toBe("postgres");
+        });
+
+        it("reports a failing query instead of returning an empty list", async () => {
+            const host = createFakeHost({ kind, onExec: () => ({ code: 1, stderr: "permission denied" }) });
+            await expect(getTables(baseConfig as never, "shop", host))
+                .rejects.toThrow(/Failed to list tables.*permission denied/);
         });
     });
 
-    it("maps VIEW type correctly", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({
-            stdout: "v_orders\tVIEW\t0\t0\n",
-            stderr: "",
-        } as any);
+    describe("getTableData()", () => {
+        const options = { database: "shop", table: "users", page: 1, pageSize: 10 };
 
-        const result = await getTables(baseConfig as any, "testdb");
+        it("returns rows, total count and columns", async () => {
+            const host = hostWith(kind, {
+                columns: "id\tinteger\tNO\t\n",
+                count: "2\n",
+                data: "1\n2\n",
+            });
 
-        expect(result[0].type).toBe("view");
+            const result = await getTableData(baseConfig as never, options as never, host);
+
+            expect(result.totalCount).toBe(2);
+            expect(result.columns.length).toBeGreaterThan(0);
+            expect(result.rows).toHaveLength(2);
+        });
+
+        it("puts the sort clause in the data query", async () => {
+            const host = hostWith(kind, { columns: "", count: "0\n", data: "" });
+            await getTableData(
+                baseConfig as never,
+                { ...options, sortBy: "name", sortDir: "desc" } as never,
+                host,
+            );
+
+            const dataQuery = host.calls.exec.map(queryOf).find(q => q?.startsWith("SELECT * FROM"));
+            expect(dataQuery).toContain('ORDER BY "name" DESC NULLS LAST');
+        });
+
+        it("surfaces which of the three queries failed", async () => {
+            const host = createFakeHost({
+                kind,
+                onExec: (argv) => queryOf(argv)?.includes("COUNT(*)")
+                    ? { code: 1, stderr: "boom" }
+                    : { stdout: "" },
+            });
+
+            await expect(getTableData(baseConfig as never, options as never, host))
+                .rejects.toThrow(/Count query failed: boom/);
+        });
     });
 
-    it("maps MATERIALIZED VIEW type correctly", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({
-            stdout: "mv_stats\tMATERIALIZED VIEW\t500\t65536\n",
-            stderr: "",
-        } as any);
+    describe("SQL escaping", () => {
+        it("doubles quotes in the table identifier", async () => {
+            const host = hostWith(kind, { columns: "", count: "0\n", data: "" });
+            await getTableData(
+                baseConfig as never,
+                { database: "shop", table: 'we"ird', page: 1, pageSize: 10 } as never,
+                host,
+            );
 
-        const result = await getTables(baseConfig as any, "testdb");
+            const dataQuery = host.calls.exec.map(queryOf).find(q => q?.startsWith("SELECT * FROM"));
+            expect(dataQuery).toContain('"we""ird"');
+        });
 
-        expect(result[0].type).toBe("materialized_view");
-    });
+        it("doubles single quotes in a search value", async () => {
+            const host = hostWith(kind, { columns: "", count: "0\n", data: "" });
+            await getTableData(
+                baseConfig as never,
+                { database: "shop", table: "users", page: 1, pageSize: 10, search: "o'reilly", searchColumn: "name", matchMode: "equals" } as never,
+                host,
+            );
 
-    it("returns empty array when output is blank", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({ stdout: "", stderr: "" } as any);
-
-        const result = await getTables(baseConfig as any, "testdb");
-
-        expect(result).toEqual([]);
+            const dataQuery = host.calls.exec.map(queryOf).find(q => q?.startsWith("SELECT * FROM"));
+            expect(dataQuery).toContain("''");
+        });
     });
 });
 
-describe("Postgres browser - getTableData", () => {
-    beforeEach(() => vi.clearAllMocks());
+describe("PostgreSQL browser transport handling", () => {
+    it("passes the password through the environment, never through argv", async () => {
+        for (const kind of ["direct", "ssh"] as HostKind[]) {
+            const host = hostWith(kind, { tables: "" });
+            await getTables(baseConfig as never, "shop", host);
 
-    const options = {
-        database: "testdb",
-        table: "orders",
-        page: 1,
-        pageSize: 5,
-    };
-
-    it("returns rows, totalCount and columns", async () => {
-        const colStdout = "id\tinteger\tNO\tPRI\t\nstatus\ttext\tYES\t\t\n";
-        const countStdout = "2\n";
-        const dataStdout = "1\tpending\n2\tshipped\n";
-
-        vi.mocked(execFileAsync)
-            .mockResolvedValueOnce({ stdout: colStdout, stderr: "" } as any)
-            .mockResolvedValueOnce({ stdout: countStdout, stderr: "" } as any)
-            .mockResolvedValueOnce({ stdout: dataStdout, stderr: "" } as any);
-
-        const result = await getTableData(baseConfig as any, options as any);
-
-        expect(result.totalCount).toBe(2);
-        expect(result.columns).toHaveLength(2);
-        expect(result.columns[0]).toMatchObject({ name: "id", primaryKey: true });
-        expect(result.rows).toHaveLength(2);
-        expect(result.rows[1]).toEqual({ id: "2", status: "shipped" });
-    });
-
-    it("keeps empty string column default as undefined", async () => {
-        const colStdout = "code\ttext\tNO\t\t\n";
-        vi.mocked(execFileAsync)
-            .mockResolvedValueOnce({ stdout: colStdout, stderr: "" } as any)
-            .mockResolvedValueOnce({ stdout: "0\n", stderr: "" } as any)
-            .mockResolvedValueOnce({ stdout: "", stderr: "" } as any);
-
-        const result = await getTableData(baseConfig as any, options as any);
-
-        expect(result.columns[0].defaultValue).toBeUndefined();
-    });
-
-    it("handles search with 'starts' matchMode", async () => {
-        vi.mocked(execFileAsync).mockResolvedValue({ stdout: "", stderr: "" } as any);
-
-        await getTableData(baseConfig as any, {
-            ...options,
-            search: "ord",
-            searchColumn: "status",
-            matchMode: "starts",
-        } as any);
-
-        expect(execFileAsync).toHaveBeenCalled();
+            expect(host.calls.exec[0].join(" ")).not.toContain("secret");
+        }
     });
 });

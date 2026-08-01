@@ -1,6 +1,6 @@
 {
   "name": "dbackup",
-  "version": "3.0.2",
+  "version": "3.1.0",
   "private": true,
   "scripts": {
     "dev": "prisma migrate deploy && prisma generate && next dev",
@@ -13,7 +13,7 @@
     "test:coverage": "vitest run --coverage",
     "test:integration:run": "vitest run -c vitest.integration.config.ts",
     "test:integration": "./scripts/run-integration-tests.sh",
-    "test:env:up": "docker compose -f docker-compose.test.yml up -d",
+    "test:env:up": "./scripts/ensure-ssh-test-key.sh && docker compose -f docker-compose.test.yml up -d",
     "test:env:down": "docker compose -f docker-compose.test.yml down",
     "test:seed": "npx tsx scripts/seed-test-sources.ts",
     "test:seed:snapshots": "npx tsx scripts/seed-storage-snapshots.ts",

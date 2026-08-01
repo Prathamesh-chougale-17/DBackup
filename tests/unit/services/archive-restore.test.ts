@@ -200,7 +200,7 @@ describe('restoreArchiveSnapshot', () => {
         expect(result.status).toBe('Success');
         expect(result.restoredDatabases.sort()).toEqual(['db1_restored', 'db2']);
         expect(result.restoredDirectories).toEqual(['src-1']);
-        expect(dbAdapter.prepareRestore).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining(['db1_restored', 'db2']));
+        expect(dbAdapter.prepareRestore).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining(['db1_restored', 'db2']), expect.anything());
         expect(dbAdapter.restoreOne).toHaveBeenCalledTimes(2);
         expect(storageAdapter.upload).toHaveBeenCalledWith(expect.anything(), expect.any(String), '/restore/dir/a.txt', undefined, expect.any(Function));
     });

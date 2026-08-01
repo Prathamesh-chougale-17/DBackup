@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { LogLevel, LogType } from "./logs";
 import type { AdapterCredentialRequirements } from "./credentials";
+import type { ExecutionHost, TransportResolver } from "@/lib/transport/types";
 
 /**
  * Base configuration type for adapters.
@@ -204,28 +205,25 @@ export interface BaseAdapter {
      * Read by the credential picker (UI) and the config resolver (runtime).
      */
     credentials?: AdapterCredentialRequirements;
+
     /**
      * Optional method to test the connection configuration (full write/delete verification).
+     *
+     * `host` is the transport the config asked for (direct or SSH). It is optional
+     * here because test() is the one method both storage and database adapters
+     * implement, and storage adapters manage their own connections. Database
+     * adapters must reject a missing host rather than guess a transport: silently
+     * defaulting to direct would check a different machine than the one configured
+     * and report it healthy. Always obtain one through `runConnectivityCheck()`.
      */
-    test?: (config: AdapterConfig) => Promise<{ success: boolean; message: string; version?: string }>;
+    test?: (config: AdapterConfig, host?: ExecutionHost) => Promise<{ success: boolean; message: string; version?: string }>;
 
     /**
      * Optional lightweight connectivity check that verifies reachability without writing any files.
      * Used by the periodic health check (every minute) to avoid creating test files that accumulate
      * under S3 governance/retention policies. Falls back to test() when not implemented.
      */
-    ping?: (config: AdapterConfig) => Promise<{ success: boolean; message: string }>;
-
-    /**
-     * Optional method to list available databases (for Source adapters)
-     */
-    getDatabases?: (config: AdapterConfig) => Promise<string[]>;
-
-    /**
-     * Optional method to list databases with size and table count information.
-     * Falls back to getDatabases() if not implemented.
-     */
-    getDatabasesWithStats?: (config: AdapterConfig) => Promise<DatabaseInfo[]>;
+    ping?: (config: AdapterConfig, host?: ExecutionHost) => Promise<{ success: boolean; message: string }>;
 }
 
 export type BackupResult = {
@@ -242,30 +240,62 @@ export type BackupResult = {
 
 export interface DatabaseAdapter extends BaseAdapter {
     type: 'database';
+
+    /**
+     * Optional: builds the TransportSpec from this adapter's config.
+     * Omit it to use the standard `connectionMode` plus `ssh*` field convention.
+     * SQLite and MSSQL declare their own because their stored configs predate it.
+     */
+    transport?: TransportResolver;
+
+    /**
+     * Every method below takes `host` as a REQUIRED parameter, unlike test() and
+     * ping() on BaseAdapter. `AdapterConfig` is `any`, so argument count is the
+     * only thing the compiler can still check, and an arity error is one of the
+     * few things `any` cannot swallow. Forgetting the host is therefore a build
+     * failure rather than a run that quietly talks to the wrong machine.
+     *
+     * getDatabases and getDatabasesWithStats live here rather than on BaseAdapter
+     * because no storage or notification adapter implements them.
+     */
+
+    /**
+     * Optional method to list available databases (for Source adapters)
+     */
+    getDatabases?: (config: AdapterConfig, host: ExecutionHost) => Promise<string[]>;
+
+    /**
+     * Optional method to list databases with size and table count information.
+     * Falls back to getDatabases() if not implemented.
+     */
+    getDatabasesWithStats?: (config: AdapterConfig, host: ExecutionHost) => Promise<DatabaseInfo[]>;
+
     /**
      * Optional method to prepare/validate restore before starting.
      * Useful for permission checks (e.g. Can I create the database?).
      * If this fails, the promise should reject (or return error status).
      */
-    prepareRestore?(config: AdapterConfig, databases: string[]): Promise<void>;
+    prepareRestore?(config: AdapterConfig, databases: string[], host: ExecutionHost): Promise<void>;
 
     /**
      * Dumps the database to a local file path
      * @param config The user configuration for this adapter
      * @param destinationPath The path where the dump should be saved locally
+     * @param host The execution transport resolved from the config
      * @param onLog Optional callback for live logs
      * @param onProgress Optional callback for progress (0-100)
      */
-    dump(config: AdapterConfig, destinationPath: string, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void, onProgress?: (percentage: number) => void): Promise<BackupResult>;
+    dump(config: AdapterConfig, destinationPath: string, host: ExecutionHost, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void, onProgress?: (percentage: number) => void): Promise<BackupResult>;
 
     /**
      * Restores the database from a local file path
      * @param config The user configuration for this adapter
      * @param sourcePath The path to the dump file
+     * @param host The execution transport resolved from the config
      * @param onLog Optional callback for live logs
      * @param onProgress Optional callback for progress (0-100)
      */
-    restore(config: AdapterConfig, sourcePath: string, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void, onProgress?: (percentage: number, detail?: string) => void): Promise<BackupResult>;
+    restore(config: AdapterConfig, sourcePath: string, host: ExecutionHost, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void, onProgress?: (percentage: number, detail?: string) => void): Promise<BackupResult>;
 
     /**
      * Optional method to analyze a dump file and return contained databases
@@ -276,13 +306,13 @@ export interface DatabaseAdapter extends BaseAdapter {
      * Optional method to list tables, views, or collections inside a database.
      * Returns TableInfo[] with optional row count and size.
      */
-    getTables?: (config: AdapterConfig, database: string) => Promise<TableInfo[]>;
+    getTables?: (config: AdapterConfig, database: string, host: ExecutionHost) => Promise<TableInfo[]>;
 
     /**
      * Optional method to fetch paginated row data from a table or collection.
      * Returns rows, total count, and column definitions.
      */
-    getTableData?: (config: AdapterConfig, options: TableDataOptions) => Promise<TableDataResult>;
+    getTableData?: (config: AdapterConfig, options: TableDataOptions, host: ExecutionHost) => Promise<TableDataResult>;
 
     /**
      * Optional: dumps a single named database to a plain local file, without any
@@ -295,6 +325,7 @@ export interface DatabaseAdapter extends BaseAdapter {
         config: AdapterConfig,
         dbName: string,
         destinationPath: string,
+        host: ExecutionHost,
         onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
     ): Promise<{ size: number }>;
 
@@ -309,6 +340,7 @@ export interface DatabaseAdapter extends BaseAdapter {
         config: AdapterConfig,
         filePath: string,
         targetDbName: string,
+        host: ExecutionHost,
         onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
         onProgress?: (percentage: number, detail?: string) => void,
         originalDbName?: string

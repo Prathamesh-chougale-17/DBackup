@@ -3,6 +3,8 @@ import { headers } from "next/headers";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
 import { registry } from "@/lib/core/registry";
+import { withHost } from "@/lib/transport";
+import type { DatabaseAdapter } from "@/lib/core/interfaces";
 import { registerAdapters } from "@/lib/adapters";
 import { resolveAdapterConfig } from "@/lib/adapters/config-resolver";
 import prisma from "@/lib/prisma";
@@ -34,14 +36,15 @@ export async function GET(
         return NextResponse.json({ error: "Database source not found" }, { status: 404 });
     }
 
-    const adapter = registry.get(adapterConfig.adapterId);
-    if (!adapter || !adapter.getDatabases) {
+    const adapter = registry.get(adapterConfig.adapterId) as DatabaseAdapter | undefined;
+    if (!adapter?.getDatabases) {
         return NextResponse.json({ success: true, databases: [] });
     }
+    const listDatabases = adapter.getDatabases;
 
     try {
         const config = await resolveAdapterConfig(adapterConfig);
-        const databases = await adapter.getDatabases(config);
+        const databases = await withHost(adapter, config, (host) => listDatabases(config, host));
         return NextResponse.json({ success: true, databases });
     } catch (error: unknown) {
         const message = error instanceof Error ? error.message : "Unknown error";

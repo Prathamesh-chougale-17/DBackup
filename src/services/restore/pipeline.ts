@@ -1,5 +1,7 @@
 import prisma from "@/lib/prisma";
 import { registry } from "@/lib/core/registry";
+import { withHost } from "@/lib/transport";
+import { runAdapterTest } from "@/lib/transport/adapter-invoke";
 import { StorageAdapter, DatabaseAdapter, BackupMetadata } from "@/lib/core/interfaces";
 import { resolveAdapterConfig } from "@/lib/adapters/config-resolver";
 import { formatDuration, formatBytes } from "@/lib/utils";
@@ -218,7 +220,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
                     }
 
                     try {
-                        const test = await sourceAdapter.test?.(usageConfig);
+                        const test = await runAdapterTest(sourceAdapter, usageConfig);
                         if (test?.success && test.version) {
                             log(`Compatibility Check: Backup Version [${metadata.engineVersion}] vs Target [${test.version}]`, 'info');
                             if (parseFloat(metadata.engineVersion) > parseFloat(test.version)) {
@@ -489,7 +491,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
                     testConf.privilegedAuth = privilegedAuth;
                 }
 
-                const testResult = await sourceAdapter.test(testConf);
+                const testResult = (await runAdapterTest(sourceAdapter, testConf))!;
                 if (testResult.success && testResult.version) {
                     dbConf.detectedVersion = testResult.version;
                     log(`Target server version: ${testResult.version}`, 'info');
@@ -536,7 +538,12 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
             dbConf.privilegedAuth = privilegedAuth;
         }
 
-        const restoreResult = await sourceAdapter.restore(dbConf, tempFile, (msg, level?: LogLevel, type?: LogType, details?: string) => {
+        // Bound to a const because the closure below loses the narrowing that the
+        // earlier null check gave `tempFile`.
+        const restoreFile = tempFile;
+        if (!restoreFile) throw new Error("Restore source file was not staged");
+
+        const restoreResult = await withHost(sourceAdapter, dbConf, (restoreHost) => sourceAdapter.restore(dbConf, restoreFile, restoreHost, (msg, level?: LogLevel, type?: LogType, details?: string) => {
             let finalLevel: LogLevel = level || 'info';
 
             if (!level) {
@@ -552,7 +559,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
             currentProgress = p;
             currentDetail = detail || null;
             flushLogs();
-        });
+        }));
 
         if (!restoreResult.success) {
             if (restoreResult.error) {

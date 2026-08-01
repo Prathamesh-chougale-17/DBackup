@@ -70,7 +70,8 @@ describe('preflightRestore()', () => {
 
         expect(prepareRestore).toHaveBeenCalledWith(
             expect.any(Object),
-            ['my_db']
+            ['my_db'],
+            expect.anything(),
         );
     });
 
@@ -189,6 +190,7 @@ describe('preflightRestore()', () => {
         expect(prepareRestore).toHaveBeenCalledWith(
             expect.any(Object),
             ['db_new'],
+            expect.anything(),
         );
     });
 
@@ -208,6 +210,7 @@ describe('preflightRestore()', () => {
         expect(prepareRestore).toHaveBeenCalledWith(
             expect.any(Object),
             expect.arrayContaining(['new_db', 'shop_restored']),
+            expect.anything(),
         );
     });
 
@@ -319,6 +322,7 @@ describe('preflightRestore()', () => {
         expect(prepareRestore).toHaveBeenCalledWith(
             expect.objectContaining({ privilegedAuth: { user: 'root', password: 'pass' } }),
             ['restore_db'],
+            expect.anything(),
         );
     });
 

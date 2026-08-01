@@ -1,581 +1,309 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { MySQLConfig } from "@/lib/adapters/definitions";
+import { describe, it, expect } from "vitest";
 
-// --- Hoisted mocks ---
-
-const {
-    mockExecFileCb,
-    mockIsSSHMode,
-    mockGetMysqlCommand,
-    mockGetMysqladminCommand,
-    mockSshConnect,
-    mockSshExec,
-    mockSshEnd,
-    mockExtractSshConfig,
-    mockRemoteBinaryCheck,
-    mockBuildMysqlArgs,
-} = vi.hoisted(() => ({
-    mockExecFileCb: vi.fn(),
-    mockIsSSHMode: vi.fn(),
-    mockGetMysqlCommand: vi.fn(() => "mysql"),
-    mockGetMysqladminCommand: vi.fn(() => "mysqladmin"),
-    mockSshConnect: vi.fn(),
-    mockSshExec: vi.fn(),
-    mockSshEnd: vi.fn(),
-    mockExtractSshConfig: vi.fn(() => ({ host: "jump.example.com", port: 22 })),
-    mockRemoteBinaryCheck: vi.fn(() => Promise.resolve("mysql")),
-    mockBuildMysqlArgs: vi.fn(() => ["-h", "db.internal", "-u", "root"]),
-}));
-
-// connection.ts uses util.promisify(execFile); mock execFile so promisify wraps the mock.
-vi.mock("child_process", () => ({
-    execFile: mockExecFileCb,
-    default: { execFile: mockExecFileCb },
-}));
-
-vi.mock("@/lib/ssh", () => ({
-    SshClient: class {
-        connect = (...args: any[]) => mockSshConnect(...args);
-        exec = (...args: any[]) => mockSshExec(...args);
-        end = (...args: any[]) => mockSshEnd(...args);
-        uploadFile = vi.fn().mockResolvedValue(undefined);
-    },
-    isSSHMode: (...args: any[]) => mockIsSSHMode(...args),
-    extractSshConfig: (...args: any[]) => (mockExtractSshConfig as any)(...args),
-    buildMysqlArgs: (...args: any[]) => (mockBuildMysqlArgs as any)(...args),
-    withLocalMyCnf: vi.fn(async (password: any, callback: any) =>
-        password ? callback('/tmp/mock-local.cnf') : callback(undefined)
-    ),
-    withRemoteMyCnf: vi.fn(async (_ssh: any, password: any, callback: any) =>
-        password ? callback('/tmp/mock.cnf') : callback(undefined)
-    ),
-    remoteEnv: vi.fn((_env: any, cmd: string) => cmd),
-    remoteBinaryCheck: (...args: any[]) => (mockRemoteBinaryCheck as any)(...args),
-    shellEscape: vi.fn((s: string) => s),
-}));
-
-vi.mock("@/lib/adapters/database/mysql/tools", () => ({
-    getMysqlCommand: (...args: any[]) => (mockGetMysqlCommand as (...a: any[]) => any)(...args),
-    getMysqladminCommand: (...args: any[]) => (mockGetMysqladminCommand as (...a: any[]) => any)(...args),
-    getMysqldumpCommand: vi.fn(() => "mysqldump"),
-    initMysqlTools: vi.fn(),
-}));
-
+import { createFakeHost, type FakeHost } from "@/lib/testing/fake-host";
 import {
-    test,
+    ensureDatabase,
+    test as testConnection,
     getDatabases,
     getDatabasesWithStats,
-    ensureDatabase,
 } from "@/lib/adapters/database/mysql/connection";
+import type { HostKind } from "@/lib/transport/types";
 
-// -------------------------------------------------------------------------
-// Helpers
-// -------------------------------------------------------------------------
+/**
+ * Direct and SSH used to be two implementations with two test suites. They are
+ * one code path now, so one table of expectations covers both transports and
+ * anything that still differs gets its own explicit case at the bottom.
+ */
 
-function buildConfig(overrides: Partial<MySQLConfig> = {}): MySQLConfig {
-    return {
-        host: "localhost",
-        port: 3306,
-        user: "root",
-        password: "secret",
-        database: "testdb",
-        disableSsl: false,
-        ...overrides,
-    } as MySQLConfig;
+const baseConfig = {
+    host: "db.internal",
+    port: 3306,
+    user: "root",
+    password: "secret",
+    disableSsl: false,
+};
+
+/** The SQL passed after -e, or undefined when the call carries none. */
+function queryOf(argv: string[]): string | undefined {
+    const i = argv.indexOf("-e");
+    return i === -1 ? undefined : argv[i + 1];
 }
 
-/** Make mockExecFileCb call its last-arg callback successfully with the given stdout. */
-function execSucceeds(stdout = "") {
-    mockExecFileCb.mockImplementation((...args: unknown[]) => {
-        const cb = args[args.length - 1] as (err: null, result: { stdout: string; stderr: string }) => void;
-        cb(null, { stdout, stderr: "" });
-    });
-}
-
-/** Make mockExecFileCb call its last-arg callback with an error. */
-function execFails(message = "command failed", stderr = "") {
-    mockExecFileCb.mockImplementation((...args: unknown[]) => {
-        const cb = args[args.length - 1] as (err: { message: string; stderr: string }) => void;
-        cb({ message, stderr });
-    });
-}
-
-describe("MySQL Connection - test()", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
-    });
-
-    it("returns success with a parsed version on ping + version success", async () => {
-        mockExecFileCb
-            .mockImplementationOnce((...args: unknown[]) => {
-                // mysqladmin ping
-                const cb = args[args.length - 1] as (err: null, result: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "mysqld is alive", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                // mysql SELECT VERSION()
-                const cb = args[args.length - 1] as (err: null, result: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "8.0.35-MySQL Community Server\n", stderr: "" });
+describe.each<HostKind>(["direct", "ssh"])("MySQL connection over a %s host", (kind) => {
+    describe("test()", () => {
+        it("reports success with a parsed version", async () => {
+            const host = createFakeHost({
+                kind,
+                onExec: (argv) => queryOf(argv) === "SELECT VERSION()"
+                    ? { stdout: "8.0.44\n" }
+                    : { stdout: "" },
             });
 
-        const result = await test(buildConfig());
+            const result = await testConnection(baseConfig as never, host);
 
-        expect(result.success).toBe(true);
-        expect(result.message).toContain("Connection successful");
-        expect(result.version).toBe("8.0.35");
-    });
+            expect(result.success).toBe(true);
+            expect(result.version).toBe("8.0.44");
+        });
 
-    it("strips MariaDB suffix from version string", async () => {
-        mockExecFileCb
-            .mockImplementationOnce((...args: unknown[]) => {
-                const cb = args[args.length - 1] as (err: null, result: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "mysqld is alive", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                const cb = args[args.length - 1] as (err: null, result: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "11.4.9-MariaDB-ubu2404\n", stderr: "" });
+        it("strips the MariaDB suffix from the version", async () => {
+            const host = createFakeHost({
+                kind,
+                onExec: (argv) => queryOf(argv) === "SELECT VERSION()"
+                    ? { stdout: "11.4.9-MariaDB-ubu2404\n" }
+                    : { stdout: "" },
             });
 
-        const result = await test(buildConfig());
-
-        expect(result.success).toBe(true);
-        expect(result.version).toBe("11.4.9");
-    });
-
-    it("returns failure when mysqladmin ping fails", async () => {
-        mockExecFileCb.mockImplementationOnce((...args: unknown[]) => {
-            const cb = args[args.length - 1] as (err: { stderr: string; message: string }) => void;
-            cb({ stderr: "Access denied for user", message: "Command failed" });
+            expect((await testConnection(baseConfig as never, host)).version).toBe("11.4.9");
         });
 
-        const result = await test(buildConfig());
-
-        expect(result.success).toBe(false);
-        expect(result.message).toContain("Connection failed");
-        expect(result.message).toContain("Access denied");
-    });
-
-    it("returns the raw version string when it does not start with digits", async () => {
-        mockExecFileCb
-            .mockImplementationOnce((...args: unknown[]) => {
-                const cb = args[args.length - 1] as (err: null, result: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "mysqld is alive", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                const cb = args[args.length - 1] as (err: null, result: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "custom-build\n", stderr: "" });
+        it("keeps a version string that does not start with digits", async () => {
+            const host = createFakeHost({
+                kind,
+                onExec: (argv) => queryOf(argv) === "SELECT VERSION()"
+                    ? { stdout: "unknown-build\n" }
+                    : { stdout: "" },
             });
 
-        const result = await test(buildConfig());
+            expect((await testConnection(baseConfig as never, host)).version).toBe("unknown-build");
+        });
 
-        expect(result.success).toBe(true);
-        expect(result.version).toBe("custom-build");
-    });
-
-    it("includes --skip-ssl args when disableSsl is true", async () => {
-        mockExecFileCb
-            .mockImplementationOnce((...args: unknown[]) => {
-                const cmdArgs = args[1] as string[];
-                expect(cmdArgs).toContain("--skip-ssl");
-                const cb = args[args.length - 1] as (err: null, result: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "mysqld is alive", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                const cb = args[args.length - 1] as (err: null, result: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "8.0.35\n", stderr: "" });
+        it("fails when the server is unreachable", async () => {
+            const host = createFakeHost({
+                kind,
+                onExec: (argv) => argv.includes("ping")
+                    ? { code: 1, stderr: "connect to server failed" }
+                    : { stdout: "" },
             });
 
-        await test(buildConfig({ disableSsl: true }));
-    });
-});
-
-describe("MySQL Connection - getDatabases()", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
-    });
-
-    it("returns user databases and filters system databases", async () => {
-        execSucceeds("information_schema\nmysql\nperformance_schema\nsys\ntestdb\n");
-
-        const dbs = await getDatabases(buildConfig());
-
-        expect(dbs).toEqual(["testdb"]);
-        expect(dbs).not.toContain("information_schema");
-        expect(dbs).not.toContain("mysql");
-        expect(dbs).not.toContain("performance_schema");
-        expect(dbs).not.toContain("sys");
-    });
-
-    it("returns multiple user databases", async () => {
-        execSucceeds("shop\nanalytics\nblog\n");
-
-        const dbs = await getDatabases(buildConfig());
-
-        expect(dbs).toEqual(["shop", "analytics", "blog"]);
-    });
-
-    it("returns an empty array when only system databases exist", async () => {
-        execSucceeds("information_schema\nmysql\n");
-
-        const dbs = await getDatabases(buildConfig());
-
-        expect(dbs).toEqual([]);
-    });
-
-    it("passes --skip-ssl to the command when disableSsl is true", async () => {
-        mockExecFileCb.mockImplementation((...args: unknown[]) => {
-            const cmdArgs = args[1] as string[];
-            expect(cmdArgs).toContain("--skip-ssl");
-            const cb = args[args.length - 1] as (err: null, result: { stdout: string; stderr: string }) => void;
-            cb(null, { stdout: "mydb\n", stderr: "" });
+            const result = await testConnection(baseConfig as never, host);
+            expect(result.success).toBe(false);
+            expect(result.message).toContain("connect to server failed");
         });
 
-        const dbs = await getDatabases(buildConfig({ disableSsl: true }));
+        it("fails when the credentials are rejected even though ping succeeded", async () => {
+            // mysqladmin ping answers on some MariaDB builds where query auth does not.
+            const host = createFakeHost({
+                kind,
+                onExec: (argv) => queryOf(argv) === "SELECT 1"
+                    ? { code: 1, stderr: "Access denied for user" }
+                    : { stdout: "" },
+            });
 
-        expect(dbs).toEqual(["mydb"]);
-    });
-});
-
-describe("MySQL Connection - getDatabasesWithStats()", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
-    });
-
-    it("parses tab-separated stats output correctly", async () => {
-        execSucceeds("shop\t102400\t12\nanalytics\t512000\t3\n");
-
-        const stats = await getDatabasesWithStats(buildConfig());
-
-        expect(stats).toHaveLength(2);
-        expect(stats[0]).toEqual({ name: "shop", sizeInBytes: 102400, tableCount: 12 });
-        expect(stats[1]).toEqual({ name: "analytics", sizeInBytes: 512000, tableCount: 3 });
-    });
-
-    it("returns an empty array for empty stdout", async () => {
-        execSucceeds("");
-
-        const stats = await getDatabasesWithStats(buildConfig());
-
-        expect(stats).toEqual([]);
-    });
-
-    it("defaults size and count to 0 for unparseable values", async () => {
-        execSucceeds("broken\tNULL\tNULL\n");
-
-        const stats = await getDatabasesWithStats(buildConfig());
-
-        expect(stats[0]).toEqual({ name: "broken", sizeInBytes: 0, tableCount: 0 });
-    });
-
-    it("passes --skip-ssl to the command when disableSsl is true", async () => {
-        mockExecFileCb.mockImplementation((...args: unknown[]) => {
-            const cmdArgs = args[1] as string[];
-            expect(cmdArgs).toContain("--skip-ssl");
-            const cb = args[args.length - 1] as (err: null, result: { stdout: string; stderr: string }) => void;
-            cb(null, { stdout: "shop\t1024\t5\n", stderr: "" });
+            const result = await testConnection(baseConfig as never, host);
+            expect(result.success).toBe(false);
+            expect(result.message).toContain("Access denied");
         });
 
-        const stats = await getDatabasesWithStats(buildConfig({ disableSsl: true }));
+        it("still succeeds when only the version query fails", async () => {
+            const host = createFakeHost({
+                kind,
+                onExec: (argv) => queryOf(argv) === "SELECT VERSION()"
+                    ? { code: 1, stderr: "denied" }
+                    : { stdout: "" },
+            });
 
-        expect(stats[0].name).toBe("shop");
-    });
-});
-
-describe("MySQL Connection - ensureDatabase()", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
-    });
-
-    it("runs CREATE DATABASE when not privileged", async () => {
-        execSucceeds();
-
-        const logs: string[] = [];
-        await ensureDatabase(buildConfig(), "newdb", "root", "secret", false, logs);
-
-        expect(logs).toContain("Database 'newdb' ensured.");
-        // Only one execFile call (CREATE DATABASE, no GRANT)
-        expect(mockExecFileCb).toHaveBeenCalledTimes(1);
-    });
-
-    it("runs CREATE DATABASE and GRANT when privileged", async () => {
-        execSucceeds();
-
-        const logs: string[] = [];
-        await ensureDatabase(buildConfig(), "newdb", "admin", "adminpw", true, logs);
-
-        expect(logs).toContain("Database 'newdb' ensured.");
-        expect(logs).toContain("Permissions granted for 'newdb'.");
-        // Two execFile calls: CREATE DATABASE + GRANT
-        expect(mockExecFileCb).toHaveBeenCalledTimes(2);
-    });
-
-    it("pushes a warning to logs when the command fails", async () => {
-        execFails("Access denied");
-
-        const logs: string[] = [];
-        await ensureDatabase(buildConfig(), "faildb", "root", "secret", false, logs);
-
-        expect(logs.some((l) => l.includes("Warning") && l.includes("faildb"))).toBe(true);
-    });
-
-    it("includes --skip-ssl in args when disableSsl is true", async () => {
-        mockExecFileCb.mockImplementation((...args: unknown[]) => {
-            const cmdArgs = args[1] as string[];
-            expect(cmdArgs).toContain("--skip-ssl");
-            const cb = args[args.length - 1] as (err: null, result: { stdout: string; stderr: string }) => void;
-            cb(null, { stdout: "", stderr: "" });
+            const result = await testConnection(baseConfig as never, host);
+            expect(result.success).toBe(true);
+            expect(result.message).toContain("version unknown");
+            expect(result.version).toBeUndefined();
         });
 
-        const logs: string[] = [];
-        await ensureDatabase(buildConfig({ disableSsl: true }), "newdb", "root", "secret", false, logs);
+        it("turns a thrown transport error into a failure result", async () => {
+            // test() must never throw: the connection dialog renders its message.
+            const host = createFakeHost({ kind, onWhich: () => null });
+            const result = await testConnection(baseConfig as never, host);
+            expect(result.success).toBe(false);
+        });
 
-        expect(logs).toContain("Database 'newdb' ensured.");
+        it("adds --skip-ssl when SSL is disabled", async () => {
+            const host = createFakeHost({ kind });
+            await testConnection({ ...baseConfig, disableSsl: true } as never, host);
+            expect(host.calls.exec[0]).toContain("--skip-ssl");
+        });
+    });
+
+    describe("getDatabases()", () => {
+        const listing = (stdout: string) => createFakeHost({ kind, onExec: () => ({ stdout }) });
+
+        it("filters out the system databases", async () => {
+            const host = listing("information_schema\nmysql\nperformance_schema\nsys\nshop\n");
+            expect(await getDatabases(baseConfig as never, host)).toEqual(["shop"]);
+        });
+
+        it("returns every user database", async () => {
+            const host = listing("shop\nanalytics\nmysql\n");
+            expect(await getDatabases(baseConfig as never, host)).toEqual(["shop", "analytics"]);
+        });
+
+        it("returns nothing when only system databases exist", async () => {
+            const host = listing("information_schema\nmysql\n");
+            expect(await getDatabases(baseConfig as never, host)).toEqual([]);
+        });
+
+        it("throws with the server error when the query fails", async () => {
+            const host = createFakeHost({ kind, onExec: () => ({ code: 1, stderr: "Access denied" }) });
+            await expect(getDatabases(baseConfig as never, host))
+                .rejects.toThrow(/Failed to list databases.*Access denied/);
+        });
+
+        it("adds --skip-ssl when SSL is disabled", async () => {
+            const host = listing("");
+            await getDatabases({ ...baseConfig, disableSsl: true } as never, host);
+            expect(host.calls.exec[0]).toContain("--skip-ssl");
+        });
+    });
+
+    describe("getDatabasesWithStats()", () => {
+        it("parses the tab separated stats output", async () => {
+            const host = createFakeHost({
+                kind,
+                onExec: () => ({ stdout: "shop\t1024\t5\nanalytics\t2048\t10\n" }),
+            });
+
+            expect(await getDatabasesWithStats(baseConfig as never, host)).toEqual([
+                { name: "shop", sizeInBytes: 1024, tableCount: 5 },
+                { name: "analytics", sizeInBytes: 2048, tableCount: 10 },
+            ]);
+        });
+
+        it("returns nothing for empty output", async () => {
+            const host = createFakeHost({ kind, onExec: () => ({ stdout: "" }) });
+            expect(await getDatabasesWithStats(baseConfig as never, host)).toEqual([]);
+        });
+
+        it("defaults unparseable numbers to zero", async () => {
+            const host = createFakeHost({ kind, onExec: () => ({ stdout: "shop\tNULL\tNULL\n" }) });
+            expect(await getDatabasesWithStats(baseConfig as never, host)).toEqual([
+                { name: "shop", sizeInBytes: 0, tableCount: 0 },
+            ]);
+        });
+
+        it("falls back to a plain listing when information_schema is not readable", async () => {
+            // A least-privilege backup user often cannot read information_schema.
+            // Direct mode used to fail outright here instead of falling back.
+            const host = createFakeHost({
+                kind,
+                onExec: (argv) => queryOf(argv) === "SHOW DATABASES"
+                    ? { stdout: "shop\nmysql\n" }
+                    : { code: 1, stderr: "SELECT command denied" },
+            });
+
+            expect(await getDatabasesWithStats(baseConfig as never, host)).toEqual([
+                { name: "shop", sizeInBytes: 0, tableCount: 0 },
+            ]);
+        });
+
+        it("throws when the fallback listing also fails", async () => {
+            const host = createFakeHost({ kind, onExec: () => ({ code: 1, stderr: "denied" }) });
+            await expect(getDatabasesWithStats(baseConfig as never, host))
+                .rejects.toThrow(/Failed to list databases/);
+        });
+    });
+
+    describe("ensureDatabase()", () => {
+        it("creates the database without granting when not privileged", async () => {
+            const host = createFakeHost({ kind });
+            const logs: string[] = [];
+
+            await ensureDatabase(baseConfig as never, "shop", "root", "pw", false, logs, host);
+
+            expect(host.calls.exec).toHaveLength(1);
+            expect(queryOf(host.calls.exec[0])).toBe("CREATE DATABASE IF NOT EXISTS `shop`");
+            expect(logs).toContain("Database 'shop' ensured.");
+        });
+
+        it("grants privileges as well when privileged", async () => {
+            const host = createFakeHost({ kind });
+            const logs: string[] = [];
+
+            await ensureDatabase(baseConfig as never, "shop", "admin", "pw", true, logs, host);
+
+            expect(host.calls.exec).toHaveLength(2);
+            expect(queryOf(host.calls.exec[1])).toContain("GRANT ALL PRIVILEGES ON `shop`.*");
+            expect(logs).toContain("Permissions granted for 'shop'.");
+        });
+
+        it("connects as the privileged user when one is given", async () => {
+            const host = createFakeHost({ kind });
+            await ensureDatabase(baseConfig as never, "shop", "admin", "pw", false, [], host);
+
+            const argv = host.calls.exec[0];
+            expect(argv[argv.indexOf("-u") + 1]).toBe("admin");
+        });
+
+        it("warns instead of throwing when the create fails", async () => {
+            const host = createFakeHost({ kind, onExec: () => ({ code: 1, stderr: "denied" }) });
+            const logs: string[] = [];
+
+            await ensureDatabase(baseConfig as never, "shop", "root", "pw", false, logs, host);
+
+            expect(logs[0]).toContain("Warning ensures DB 'shop'");
+            expect(logs[0]).toContain("denied");
+        });
+
+        it("warns when only the grant fails", async () => {
+            const host = createFakeHost({
+                kind,
+                onExec: (argv) => queryOf(argv)?.startsWith("GRANT")
+                    ? { code: 1, stderr: "no grant option" }
+                    : { stdout: "" },
+            });
+            const logs: string[] = [];
+
+            await ensureDatabase(baseConfig as never, "shop", "root", "pw", true, logs, host);
+
+            expect(logs).toContain("Database 'shop' ensured.");
+            expect(logs.some(l => l.includes("Warning grants for 'shop'"))).toBe(true);
+        });
+
+        it("warns instead of throwing when the transport fails", async () => {
+            const host = createFakeHost({ kind, onWhich: () => null });
+            const logs: string[] = [];
+
+            await ensureDatabase(baseConfig as never, "shop", "root", "pw", false, logs, host);
+
+            expect(logs[0]).toContain("Warning ensures DB 'shop'");
+        });
+
+        it("writes no defaults-file when there is no password", async () => {
+            const host = createFakeHost({ kind });
+            await ensureDatabase(baseConfig as never, "shop", "root", undefined, false, [], host);
+
+            expect(host.calls.tempFiles).toHaveLength(0);
+            expect(host.calls.exec[0].some(a => a.startsWith("--defaults-file"))).toBe(false);
+        });
     });
 });
 
-// -------------------------------------------------------------------------
-// ensureDatabase() - SSH path
-// -------------------------------------------------------------------------
+describe("MySQL connection transport differences", () => {
+    const run = async (kind: HostKind): Promise<FakeHost> => {
+        const host = createFakeHost({ kind });
+        await getDatabases(baseConfig as never, host);
+        return host;
+    };
 
-describe("MySQL Connection - ensureDatabase() SSH path", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(true);
-        mockSshConnect.mockResolvedValue(undefined);
-        mockSshEnd.mockReturnValue(undefined);
-        mockRemoteBinaryCheck.mockResolvedValue("mysql");
-        mockBuildMysqlArgs.mockReturnValue(["-h", "db.internal", "-u", "root"]);
+    it("forces TCP only when the client runs beside DBackup", async () => {
+        // Over SSH the client runs on the database host, where the setup guide
+        // documents granting 'user'@'localhost' for the local socket path.
+        expect((await run("direct")).calls.exec[0]).toContain("--protocol=tcp");
+        expect((await run("ssh")).calls.exec[0]).not.toContain("--protocol=tcp");
     });
 
-    it("creates the database via SSH successfully", async () => {
-        mockSshExec.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-        const logs: string[] = [];
-        await ensureDatabase(buildConfig(), "newdb", "root", "secret", false, logs);
-
-        expect(logs).toContain("Database 'newdb' ensured.");
-        expect(mockSshEnd).toHaveBeenCalled();
+    it("never puts the password in argv", async () => {
+        for (const kind of ["direct", "ssh"] as HostKind[]) {
+            const host = await run(kind);
+            expect(host.calls.exec[0].join(" ")).not.toContain("secret");
+            expect(host.calls.tempFiles[0]).toMatchObject({ mode: 0o600 });
+        }
     });
 
-    it("creates database and grants privileges via SSH", async () => {
-        mockSshExec.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-        const logs: string[] = [];
-        await ensureDatabase(buildConfig(), "newdb", "root", "secret", true, logs);
+    it("rejects a call made without a transport", async () => {
+        // Guessing "direct" for an SSH source would check a different machine.
+        await expect(getDatabases(baseConfig as never, undefined as never))
+            .rejects.toThrow(/requires an execution host/);
 
-        expect(logs).toContain("Database 'newdb' ensured.");
-        expect(logs).toContain("Permissions granted for 'newdb'.");
-        expect(mockSshExec).toHaveBeenCalledTimes(2);
-    });
-
-    it("logs a warning when create database command returns non-zero code via SSH", async () => {
-        mockSshExec.mockResolvedValue({ code: 1, stdout: "", stderr: "Access denied" });
-        const logs: string[] = [];
-        await ensureDatabase(buildConfig(), "faildb", "root", "secret", false, logs);
-
-        expect(logs.some((l) => l.includes("Warning") && l.includes("faildb"))).toBe(true);
-    });
-
-    it("logs a warning when grant command fails via SSH", async () => {
-        mockSshExec
-            .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" })
-            .mockResolvedValueOnce({ code: 1, stdout: "", stderr: "Grant denied" });
-        const logs: string[] = [];
-        await ensureDatabase(buildConfig(), "newdb", "root", "secret", true, logs);
-
-        expect(logs).toContain("Database 'newdb' ensured.");
-        expect(logs.some((l) => l.includes("Warning grants"))).toBe(true);
-    });
-
-    it("catches SSH connection errors and logs a warning", async () => {
-        mockSshConnect.mockRejectedValue(new Error("SSH connection refused"));
-        const logs: string[] = [];
-        await ensureDatabase(buildConfig(), "newdb", "root", "secret", false, logs);
-
-        expect(logs.some((l) => l.includes("Warning") && l.includes("newdb"))).toBe(true);
-        expect(mockSshEnd).toHaveBeenCalled();
-    });
-
-    it("does not set MYSQL_PWD when pass is undefined", async () => {
-        mockSshExec.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-        const logs: string[] = [];
-        await ensureDatabase(buildConfig(), "newdb", "root", undefined, false, logs);
-
-        expect(logs).toContain("Database 'newdb' ensured.");
-    });
-});
-
-// -------------------------------------------------------------------------
-// test() - SSH path
-// -------------------------------------------------------------------------
-
-describe("MySQL Connection - test() SSH path", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(true);
-        mockSshConnect.mockResolvedValue(undefined);
-        mockSshEnd.mockReturnValue(undefined);
-        mockRemoteBinaryCheck.mockResolvedValue("mysql");
-        mockBuildMysqlArgs.mockReturnValue(["-h", "db.internal", "-u", "root"]);
-    });
-
-    it("returns success with version via SSH", async () => {
-        mockSshExec
-            .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" })  // ping
-            .mockResolvedValueOnce({ code: 0, stdout: "1", stderr: "" })  // SELECT 1
-            .mockResolvedValueOnce({ code: 0, stdout: "8.0.35-MySQL Community Server\n", stderr: "" }); // version
-
-        const result = await test(buildConfig());
-
-        expect(result.success).toBe(true);
-        expect(result.message).toContain("SSH");
-        expect(result.version).toBe("8.0.35");
-    });
-
-    it("returns failure when SSH ping fails", async () => {
-        mockSshExec.mockResolvedValue({ code: 1, stdout: "", stderr: "Connection refused" });
-
-        const result = await test(buildConfig());
-
+        const result = await testConnection(baseConfig as never, undefined);
         expect(result.success).toBe(false);
-        expect(result.message).toContain("SSH ping failed");
-    });
-
-    it("returns failure when auth check (SELECT 1) fails via SSH", async () => {
-        mockSshExec
-            .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" })  // ping
-            .mockResolvedValueOnce({ code: 1, stdout: "", stderr: "ERROR 1045 (28000): Access denied for user" }); // SELECT 1
-
-        const result = await test(buildConfig());
-
-        expect(result.success).toBe(false);
-        expect(result.message).toContain("Connection failed");
-    });
-
-    it("returns success with version unknown when version query fails via SSH", async () => {
-        mockSshExec
-            .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" })  // ping
-            .mockResolvedValueOnce({ code: 0, stdout: "1", stderr: "" })  // SELECT 1
-            .mockResolvedValueOnce({ code: 1, stdout: "", stderr: "Permission denied" }); // version fails
-
-        const result = await test(buildConfig());
-
-        expect(result.success).toBe(true);
-        expect(result.message).toContain("version unknown");
-    });
-
-    it("returns raw version string when regex does not match via SSH", async () => {
-        mockSshExec
-            .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" })  // ping
-            .mockResolvedValueOnce({ code: 0, stdout: "1", stderr: "" })  // SELECT 1
-            .mockResolvedValueOnce({ code: 0, stdout: "custom-build\n", stderr: "" }); // version
-
-        const result = await test(buildConfig());
-
-        expect(result.success).toBe(true);
-        expect(result.version).toBe("custom-build");
-    });
-
-    it("catches SSH exceptions and returns failure", async () => {
-        mockSshConnect.mockRejectedValue(new Error("Connection timeout"));
-
-        const result = await test(buildConfig());
-
-        expect(result.success).toBe(false);
-        expect(result.message).toContain("SSH connection failed");
-        expect(mockSshEnd).toHaveBeenCalled();
-    });
-
-    it("does not set MYSQL_PWD when password is not set via SSH", async () => {
-        mockSshExec
-            .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" })  // ping
-            .mockResolvedValueOnce({ code: 0, stdout: "1", stderr: "" })  // SELECT 1
-            .mockResolvedValueOnce({ code: 0, stdout: "8.0.35\n", stderr: "" }); // version
-
-        const result = await test(buildConfig({ password: undefined }));
-
-        expect(result.success).toBe(true);
-    });
-});
-
-// -------------------------------------------------------------------------
-// getDatabases() - SSH path
-// -------------------------------------------------------------------------
-
-describe("MySQL Connection - getDatabases() SSH path", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(true);
-        mockSshConnect.mockResolvedValue(undefined);
-        mockSshEnd.mockReturnValue(undefined);
-        mockRemoteBinaryCheck.mockResolvedValue("mysql");
-        mockBuildMysqlArgs.mockReturnValue(["-h", "db.internal", "-u", "root"]);
-    });
-
-    it("returns filtered databases via SSH", async () => {
-        mockSshExec.mockResolvedValue({ code: 0, stdout: "information_schema\nmysql\ntestdb\nshop\n", stderr: "" });
-
-        const dbs = await getDatabases(buildConfig());
-
-        expect(dbs).toEqual(["testdb", "shop"]);
-        expect(mockSshEnd).toHaveBeenCalled();
-    });
-
-    it("throws when SSH exec returns non-zero code", async () => {
-        mockSshExec.mockResolvedValue({ code: 1, stdout: "", stderr: "Permission denied" });
-
-        await expect(getDatabases(buildConfig())).rejects.toThrow("Failed to list databases");
-        expect(mockSshEnd).toHaveBeenCalled();
-    });
-
-    it("does not set MYSQL_PWD when password is not set via SSH", async () => {
-        mockSshExec.mockResolvedValue({ code: 0, stdout: "testdb\n", stderr: "" });
-
-        const dbs = await getDatabases(buildConfig({ password: undefined }));
-
-        expect(dbs).toEqual(["testdb"]);
-    });
-});
-
-// -------------------------------------------------------------------------
-// getDatabasesWithStats() - SSH path
-// -------------------------------------------------------------------------
-
-describe("MySQL Connection - getDatabasesWithStats() SSH path", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(true);
-        mockSshConnect.mockResolvedValue(undefined);
-        mockSshEnd.mockReturnValue(undefined);
-        mockRemoteBinaryCheck.mockResolvedValue("mysql");
-        mockBuildMysqlArgs.mockReturnValue(["-h", "db.internal", "-u", "root"]);
-    });
-
-    it("returns parsed database stats via SSH", async () => {
-        mockSshExec.mockResolvedValue({ code: 0, stdout: "shop\t102400\t12\nanalytics\t512000\t3\n", stderr: "" });
-
-        const stats = await getDatabasesWithStats(buildConfig());
-
-        expect(stats).toHaveLength(2);
-        expect(stats[0]).toEqual({ name: "shop", sizeInBytes: 102400, tableCount: 12 });
-        expect(mockSshEnd).toHaveBeenCalled();
-    });
-
-    it("throws when SSH exec returns non-zero code", async () => {
-        // Both the stats query and the SHOW DATABASES fallback fail.
-        mockSshExec.mockResolvedValue({ code: 1, stdout: "", stderr: "Permission denied" });
-
-        await expect(getDatabasesWithStats(buildConfig())).rejects.toThrow("Failed to list databases");
-        expect(mockSshEnd).toHaveBeenCalled();
-    });
-
-    it("does not set MYSQL_PWD when password is not set via SSH", async () => {
-        mockSshExec.mockResolvedValue({ code: 0, stdout: "shop\t1024\t5\n", stderr: "" });
-
-        const stats = await getDatabasesWithStats(buildConfig({ password: undefined }));
-
-        expect(stats[0].name).toBe("shop");
+        expect(result.message).toContain("requires an execution host");
     });
 });

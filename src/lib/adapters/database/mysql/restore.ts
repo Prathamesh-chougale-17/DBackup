@@ -1,16 +1,12 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { MySQLConfig, MariaDBConfig } from "@/lib/adapters/definitions";
 import { ensureDatabase } from "./connection";
 import { getDialect } from "./dialects";
-import { getMysqlCommand } from "./tools";
-import { spawn } from "child_process";
-import { createReadStream } from "fs";
 import fs from "fs/promises";
 import { Transform } from "stream";
-import { randomUUID } from "crypto";
 import path from "path";
-import { waitForProcess } from "@/lib/adapters/process";
 import {
     isMultiDbTar,
     extractSelectedDatabases,
@@ -20,16 +16,7 @@ import {
     getTargetDatabaseName,
 } from "../common/tar-utils";
 import { formatBytes } from "@/lib/utils";
-import {
-    SshClient,
-    isSSHMode,
-    extractSshConfig,
-    buildMysqlArgs,
-    withLocalMyCnf,
-    withRemoteMyCnf,
-    remoteBinaryCheck,
-    shellEscape,
-} from "@/lib/ssh";
+import { MYSQL_CLIENT, buildConnectionArgs, withAuthArgs } from "./args";
 
 /** Extended config with runtime fields for restore operations */
 type MySQLRestoreConfig = (MySQLConfig | MariaDBConfig) & {
@@ -167,242 +154,148 @@ function createStderrHandler(
     };
 }
 
-export async function prepareRestore(config: MySQLRestoreConfig, databases: string[]): Promise<void> {
+export async function prepareRestore(config: MySQLRestoreConfig, databases: string[], _host: ExecutionHost): Promise<void> {
     const usePrivileged = !!config.privilegedAuth;
     const user = usePrivileged ? config.privilegedAuth!.user : config.user;
     const pass = usePrivileged ? config.privilegedAuth!.password : config.password;
 
     for (const dbName of databases) {
-        await ensureDatabase(config, dbName, user, pass, usePrivileged, []);
+        await ensureDatabase(config, dbName, user, pass, usePrivileged, [], _host);
+    }
+}
+
+const DIAGNOSTICS_QUERY =
+    "SELECT CONCAT('max_allowed_packet=', @@global.max_allowed_packet, " +
+    "' innodb_buffer_pool_size=', @@global.innodb_buffer_pool_size, " +
+    "' log_bin=', @@global.log_bin, " +
+    "' innodb_flush_log_at_trx_commit=', @@global.innodb_flush_log_at_trx_commit)";
+
+/**
+ * After a failed restore, work out whether the server is still there.
+ *
+ * A restore that dies mid-stream is usually an OOM kill rather than a SQL error,
+ * and the mysql client's own message does not say so. Previously only the SSH
+ * path reported this.
+ */
+async function logPostFailureDiagnostics(
+    config: MySQLRestoreConfig,
+    host: ExecutionHost,
+    mysqlBin: string,
+    authArgs: string[],
+    onLog: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
+): Promise<void> {
+    try {
+        const alive = await host.exec([
+            mysqlBin, ...authArgs, ...buildConnectionArgs(config, host), "-N", "-e", "SELECT 'alive'",
+        ]);
+        if (alive.stdout.includes("alive")) {
+            onLog("Post-failure check: MySQL server is still running", "warning");
+        } else {
+            onLog(
+                `Post-failure check: MySQL server NOT responding - ${alive.stderr.trim() || alive.stdout.trim()}`,
+                "error",
+            );
+        }
+    } catch {
+        onLog("Post-failure check: Could not reach MySQL server (likely crashed/OOM-killed)", "error");
+    }
+
+    try {
+        // dmesg needs root on most hosts, so a failure here is expected and quiet.
+        const oom = await host.exec(["sh", "-c", "dmesg 2>/dev/null | grep -i 'oom\\|killed process' | tail -3"]);
+        if (oom.stdout.trim()) {
+            onLog(`OOM killer detected: ${oom.stdout.trim()}`, "error");
+        }
+    } catch {
+        // Not available, nothing to report.
     }
 }
 
 /**
  * Restore a single SQL file to a specific database.
+ *
  * Pass `originalDb` when the target name differs from the name embedded in the
- * dump - the function will rewrite `USE` / `CREATE DATABASE` references inline.
+ * dump. The rewrite happens in a Node transform on the way in, which replaces
+ * the remote `sed` pipeline the SSH path used to build. That pipeline embedded
+ * database names into a sed expression, so a name containing `/`, `\` or `&`
+ * silently corrupted the restore.
  */
 async function restoreSingleFile(
     config: MySQLRestoreConfig,
     sourcePath: string,
     targetDb: string,
+    host: ExecutionHost,
     onLog: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     onProgress?: (percentage: number, detail?: string) => void,
     originalDb?: string
 ): Promise<void> {
-    if (isSSHMode(config)) {
-        return restoreSingleFileSSH(config, sourcePath, targetDb, onLog, onProgress, originalDb);
-    }
+    const { size: totalSize } = await fs.stat(sourcePath);
 
-    const stats = await fs.stat(sourcePath);
-    const totalSize = stats.size;
-    let processedSize = 0;
-    let lastProgress = 0;
-
+    const mysqlBin = await host.which(...MYSQL_CLIENT);
     const dialect = getDialect(config.type === 'mariadb' ? 'mariadb' : 'mysql', config.detectedVersion);
-    const args = dialect.getRestoreArgs(config, targetDb);
+    const args = dialect.getRestoreArgs(config, targetDb, host);
 
-    onLog(`Restoring to database: ${targetDb}`, 'info', 'command', `${getMysqlCommand()} ${args.join(' ')}`);
-
-    await withLocalMyCnf(config.password, async (cnfPath) => {
-        const finalArgs = cnfPath ? [`--defaults-file=${cnfPath}`, ...args] : args;
-        const mysqlProc = spawn(getMysqlCommand(), finalArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
-        const fileStream = createReadStream(sourcePath, { highWaterMark: 64 * 1024 });
-
-        fileStream.on('data', (chunk) => {
-            if (onProgress && totalSize > 0) {
-                processedSize += chunk.length;
-                const p = Math.round((processedSize / totalSize) * 100);
-                if (p > lastProgress) {
-                    lastProgress = p;
-                    onProgress(p);
-                }
+    await withAuthArgs(host, config.password, async (authArgs) => {
+        // Best effort: server limits explain most restore failures after the fact.
+        try {
+            const diag = await host.exec([
+                mysqlBin, ...authArgs, ...buildConnectionArgs(config, host), "-N", "-e", DIAGNOSTICS_QUERY,
+            ]);
+            if (diag.code === 0 && diag.stdout.trim()) {
+                onLog(`Server settings: ${diag.stdout.trim()}`);
             }
-        });
-
-        fileStream.on('error', () => mysqlProc.kill());
-        mysqlProc.stdin.on('error', () => { /* ignore broken pipe */ });
-
-        const needsRename = originalDb && originalDb !== targetDb;
-        if (needsRename) {
-            fileStream
-                .pipe(createDatabaseRenameStream(originalDb!, targetDb))
-                .pipe(mysqlProc.stdin);
-        } else {
-            fileStream.pipe(mysqlProc.stdin);
+        } catch {
+            // Diagnostics are non-critical.
         }
 
-        const stderr = createStderrHandler(onLog);
-        await waitForProcess(mysqlProc, 'mysql', (d) => {
-            stderr.handle(d.toString());
-        });
-        stderr.flush();
+        const needsRename = Boolean(originalDb && originalDb !== targetDb);
+        const transferStart = Date.now();
+
+        try {
+            await host.stageInput(
+                sourcePath,
+                {
+                    transform: needsRename
+                        ? () => createDatabaseRenameStream(originalDb!, targetDb)
+                        : undefined,
+                    onProgress: (transferred) => {
+                        if (!onProgress || totalSize <= 0) return;
+                        // Staging occupies the first 90% of the reported progress.
+                        const percent = Math.min(90, Math.round((transferred / totalSize) * 90));
+                        const elapsed = (Date.now() - transferStart) / 1000;
+                        const speed = elapsed > 0 ? transferred / elapsed : 0;
+                        onProgress(
+                            percent,
+                            `${formatBytes(transferred)} / ${formatBytes(totalSize)} - ${formatBytes(speed)}/s`,
+                        );
+                    },
+                },
+                async (stagedPath) => {
+                    onProgress?.(95, 'Executing restore command...');
+                    onLog(`Restoring to database: ${targetDb}`, 'info', 'command', `${mysqlBin} ${args.join(' ')}`);
+
+                    const secrets = [config.password, config.privilegedAuth?.password].filter(Boolean) as string[];
+                    const stderr = createStderrHandler(onLog, secrets);
+
+                    const proc = await host.spawn([mysqlBin, ...authArgs, ...args], { stdinFile: stagedPath });
+                    proc.stdout.on('data', () => { /* mysql writes nothing useful here */ });
+                    proc.stderr.on('data', (data: Buffer) => stderr.handle(data.toString()));
+
+                    const { code, signal } = await proc.exit();
+                    stderr.flush();
+                    if (code !== 0) {
+                        throw new Error(
+                            `mysql exited with code ${code ?? 'null'}${signal ? ` (signal: ${signal})` : ''}`,
+                        );
+                    }
+                    onProgress?.(100, '');
+                },
+            );
+        } catch (error) {
+            await logPostFailureDiagnostics(config, host, mysqlBin, authArgs, onLog);
+            throw error;
+        }
     });
-}
-
-/**
- * SSH variant: upload SQL file to remote temp location, then run mysql restore locally.
- * Uses upload-then-restore pattern (like PostgreSQL) to avoid SSH channel streaming issues.
- */
-async function restoreSingleFileSSH(
-    config: MySQLRestoreConfig,
-    sourcePath: string,
-    targetDb: string,
-    onLog: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
-    onProgress?: (percentage: number, detail?: string) => void,
-    originalDb?: string
-): Promise<void> {
-    const stats = await fs.stat(sourcePath);
-    const totalSize = stats.size;
-
-    const sshConfig = extractSshConfig(config)!;
-    const ssh = new SshClient();
-    await ssh.connect(sshConfig);
-
-    const remoteTempFile = `/tmp/dbackup_restore_${randomUUID()}.sql`;
-
-    try {
-        const mysqlBin = await remoteBinaryCheck(ssh, "mariadb", "mysql");
-        const args = buildMysqlArgs(config);
-        args.push("--max-allowed-packet=64M");
-        args.push(shellEscape(targetDb));
-
-        // Pre-restore diagnostics: query server settings
-        try {
-            const diagArgs = buildMysqlArgs(config);
-            await withRemoteMyCnf(ssh, config.password, async (cnfPath) => {
-                const cnfPrefix = cnfPath ? `--defaults-file=${shellEscape(cnfPath)} ` : "";
-                const diagCmd = `${mysqlBin} ${cnfPrefix}${diagArgs.join(" ")} -N -e "SELECT CONCAT('max_allowed_packet=', @@global.max_allowed_packet, ' innodb_buffer_pool_size=', @@global.innodb_buffer_pool_size, ' log_bin=', @@global.log_bin, ' innodb_flush_log_at_trx_commit=', @@global.innodb_flush_log_at_trx_commit)"`;
-                const diagResult = await ssh.exec(diagCmd);
-                if (diagResult.code === 0 && diagResult.stdout.trim()) {
-                    onLog(`Server settings: ${diagResult.stdout.trim()}`);
-                }
-            });
-        } catch {
-            // Diagnostics are non-critical
-        }
-
-        // 1. Upload SQL file to remote temp location via SFTP (guarantees data integrity)
-        onLog(`Uploading dump to remote server via SFTP (${(totalSize / 1024 / 1024).toFixed(1)} MB)...`, 'info');
-        const uploadStart = Date.now();
-        await ssh.uploadFile(sourcePath, remoteTempFile, (transferred, total) => {
-            if (onProgress && total > 0) {
-                // Upload = 0-90% of total progress
-                const uploadPercent = Math.round((transferred / total) * 90);
-                const elapsed = (Date.now() - uploadStart) / 1000;
-                const speed = elapsed > 0 ? transferred / elapsed : 0;
-                onProgress(uploadPercent, `${formatBytes(transferred)} / ${formatBytes(total)} - ${formatBytes(speed)}/s`);
-            }
-        });
-
-        // Clear upload progress detail
-        onProgress?.(90);
-
-        // Verify upload integrity
-        try {
-            const sizeCheck = await ssh.exec(`stat -c '%s' ${shellEscape(remoteTempFile)} 2>/dev/null || stat -f '%z' ${shellEscape(remoteTempFile)}`);
-            const remoteSize = parseInt(sizeCheck.stdout.trim(), 10);
-            if (remoteSize !== totalSize) {
-                throw new Error(`Upload size mismatch! Local: ${totalSize}, Remote: ${remoteSize}`);
-            }
-            onLog(`Upload verified: ${(remoteSize / 1024 / 1024).toFixed(1)} MB`, 'success');
-        } catch (e) {
-            if (e instanceof Error && e.message.includes('mismatch')) throw e;
-            // stat command failed - non-critical
-        }
-
-        // 2. Run mysql restore on the remote server from the uploaded file.
-        // When restoring to a different name, rewrite USE/CREATE DATABASE refs via sed
-        // so the dump lands in targetDb regardless of what mysqldump embedded.
-        const needsRename = originalDb && originalDb !== targetDb;
-        let catPart: string;
-        if (needsRename) {
-            // Escape single quotes for embedding inside single-quoted sed patterns.
-            // MySQL identifiers cannot contain '/', '\' or '&' in practice, but
-            // we escape single quotes defensively.
-            const orig = originalDb!.replace(/'/g, "'\\''");
-            const tgt = targetDb.replace(/'/g, "'\\''");
-            catPart = [
-                `sed`,
-                `-e '/^USE /s/\`${orig}\`/\`${tgt}\`/g'`,
-                `-e '/^CREATE DATABASE /s/\`${orig}\`/\`${tgt}\`/g'`,
-                `-e '/^ALTER DATABASE /s/\`${orig}\`/\`${tgt}\`/g'`,
-                `${shellEscape(remoteTempFile)}`,
-            ].join(' ');
-        } else {
-            catPart = `cat ${shellEscape(remoteTempFile)}`;
-        }
-        const _restoreCmd = `${catPart} | ${mysqlBin} ${args.join(" ")}`;
-        onLog(`Restoring to database (SSH): ${targetDb}`, 'info', 'command', `${mysqlBin} ${args.join(" ")}`);
-        onProgress?.(95, 'Executing restore command...');
-
-        await withRemoteMyCnf(ssh, config.password, async (cnfPath) => {
-            const cnfPrefix = cnfPath ? `--defaults-file=${shellEscape(cnfPath)} ` : "";
-            const cmdWithCnf = `${catPart} | ${mysqlBin} ${cnfPrefix}${args.join(" ")}`;
-
-            await new Promise<void>((resolve, reject) => {
-                const secrets = [config.password, config.privilegedAuth?.password].filter(Boolean) as string[];
-                const stderr = createStderrHandler(onLog, secrets);
-
-                ssh.execStream(cmdWithCnf, (err, stream) => {
-                    if (err) return reject(err);
-
-                    stream.on('data', () => {});
-
-                    stream.stderr.on('data', (data: any) => {
-                        stderr.handle(data.toString());
-                    });
-
-                    stream.on('exit', (code: number | null, signal?: string) => {
-                        stderr.flush();
-                        if (code === 0) {
-                            onProgress?.(100, '');
-                            resolve();
-                        } else {
-                            reject(new Error(`Remote mysql exited with code ${code ?? 'null'}${signal ? ` (signal: ${signal})` : ''}`));
-                        }
-                    });
-
-                    stream.on('error', (err: Error) => reject(err));
-                });
-            });
-        });
-    } catch (error) {
-        // Post-failure diagnostics: check if MySQL server is still alive
-        try {
-            const mysqlBinFallback = await remoteBinaryCheck(ssh, "mariadb", "mysql").catch(() => "mysql");
-            const aliveArgs = buildMysqlArgs(config);
-            await withRemoteMyCnf(ssh, config.password, async (cnfPath) => {
-                const cnfPrefix = cnfPath ? `--defaults-file=${shellEscape(cnfPath)} ` : "";
-                const aliveCheck = await ssh.exec(
-                    `${mysqlBinFallback} ${cnfPrefix}${aliveArgs.join(" ")} -N -e "SELECT 'alive'" 2>&1`
-                );
-                if (aliveCheck.stdout.includes('alive')) {
-                    onLog(`Post-failure check: MySQL server is still running`, 'warning');
-                } else {
-                    onLog(`Post-failure check: MySQL server NOT responding - ${aliveCheck.stderr.trim() || aliveCheck.stdout.trim()}`, 'error');
-                }
-            });
-        } catch {
-            onLog(`Post-failure check: Could not reach MySQL server (likely crashed/OOM-killed)`, 'error');
-        }
-
-        // Check for OOM kills on the host
-        try {
-            const oomCheck = await ssh.exec(`dmesg 2>/dev/null | grep -i 'oom\\|killed process' | tail -3`);
-            if (oomCheck.stdout.trim()) {
-                onLog(`OOM killer detected: ${oomCheck.stdout.trim()}`, 'error');
-            }
-        } catch {
-            // dmesg might require root
-        }
-
-        throw error;
-    } finally {
-        // Cleanup remote temp file
-        await ssh.exec(`rm -f ${shellEscape(remoteTempFile)}`).catch(() => {});
-        ssh.end();
-    }
 }
 
 /**
@@ -416,14 +309,15 @@ export async function restoreOne(
     config: MySQLRestoreConfig,
     filePath: string,
     targetDbName: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     onProgress?: (percentage: number, detail?: string) => void,
     originalDbName?: string
 ): Promise<void> {
-    await restoreSingleFile(config, filePath, targetDbName, onLog ?? (() => {}), onProgress, originalDbName);
+    await restoreSingleFile(config, filePath, targetDbName, _host, onLog ?? (() => {}), onProgress, originalDbName);
 }
 
-export async function restore(config: MySQLRestoreConfig, sourcePath: string, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void, onProgress?: (percentage: number, detail?: string) => void): Promise<BackupResult> {
+export async function restore(config: MySQLRestoreConfig, sourcePath: string, _host: ExecutionHost, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void, onProgress?: (percentage: number, detail?: string) => void): Promise<BackupResult> {
     const startedAt = new Date();
     const logs: string[] = [];
     const log = (msg: string, level: LogLevel = 'info', type: LogType = 'general', details?: string) => {
@@ -471,10 +365,10 @@ export async function restore(config: MySQLRestoreConfig, sourcePath: string, on
                     }
 
                     // Ensure target database exists
-                    await ensureDatabase(config, targetDb, creationUser, creationPass, usePrivileged, logs);
+                    await ensureDatabase(config, targetDb, creationUser, creationPass, usePrivileged, logs, _host);
 
                     // Restore this database
-                    await restoreSingleFile(config, dbFile, targetDb, log, onProgress, dbEntry.name);
+                    await restoreSingleFile(config, dbFile, targetDb, _host, log, onProgress, dbEntry.name);
                     log(`Restored database: ${dbEntry.name} → ${targetDb}`);
                     restoredCount++;
                 }
@@ -498,16 +392,16 @@ export async function restore(config: MySQLRestoreConfig, sourcePath: string, on
             }
             originalDb = selected[0].originalName;
             targetDb = selected[0].targetName || originalDb;
-            await ensureDatabase(config, targetDb, creationUser, creationPass, usePrivileged, logs);
+            await ensureDatabase(config, targetDb, creationUser, creationPass, usePrivileged, logs, _host);
         } else if (config.database) {
             targetDb = Array.isArray(config.database) ? config.database[0] : config.database;
             originalDb = config.originalDatabase;
-            await ensureDatabase(config, targetDb, creationUser, creationPass, usePrivileged, logs);
+            await ensureDatabase(config, targetDb, creationUser, creationPass, usePrivileged, logs, _host);
         } else {
             throw new Error("No target database specified for restore");
         }
 
-        await restoreSingleFile(config, sourcePath, targetDb, log, onProgress, originalDb);
+        await restoreSingleFile(config, sourcePath, targetDb, _host, log, onProgress, originalDb);
 
         return { success: true, logs, startedAt, completedAt: new Date() };
 

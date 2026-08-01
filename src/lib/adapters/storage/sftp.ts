@@ -7,7 +7,7 @@ import {
     ListTreeResult,
     PrunedDirectory,
 } from "@/lib/core/interfaces";
-import { normalizeSshPrivateKey } from "@/lib/ssh/pkcs8-compat";
+import { normalizeSshPrivateKey } from "@/lib/transport/pkcs8-compat";
 import { createConnectionPool } from "@/lib/adapters/storage/common/connection-pool";
 import { mapWithConcurrency } from "@/lib/concurrency";
 import { canPruneDirectory } from "@/lib/exclude-patterns";

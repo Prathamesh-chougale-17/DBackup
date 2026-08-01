@@ -534,146 +534,54 @@ export function DatabaseFormContent({
     const sshAuthType = watch("config.sshAuthType");
     const connectionMode = watch("config.connectionMode");
 
-    // Adapters that support SSH connection mode (have connectionMode field in schema)
-    const hasSSH = adapter.configSchema.shape && "connectionMode" in adapter.configSchema.shape && !isMSSQL;
-
-    // SSH-capable adapters: show mode selector first, then contextual tabs
-    if (hasSSH) {
-        const isSSH = connectionMode === "ssh";
-        const defaultTab = isSSH ? "ssh" : "connection";
-
-        // Before mode is selected, show nothing (selector is in the parent form)
-        if (!connectionMode) {
-            return null;
-        }
-
-        return (
-            <SshAwareTabLayout
-                key={connectionMode}
-                isSSH={isSSH}
-                defaultTab={defaultTab}
-                adapter={adapter}
-                sshAuthType={sshAuthType}
-                detectedVersion={detectedVersion}
-                healthNotificationsDisabled={healthNotificationsDisabled}
-                onHealthNotificationsDisabledChange={onHealthNotificationsDisabledChange}
-                isRestoreExcluded={isRestoreExcluded}
-                onIsRestoreExcludedChange={onIsRestoreExcludedChange}
-                primaryCredentialId={primaryCredentialId}
-                sshCredentialId={sshCredentialId}
-                onPrimaryChange={onPrimaryChange}
-                onSshChange={onSshChange}
-            />
-        );
+    // Every database adapter except SQLite, which returned above with its own
+    // `mode` field, carries `connectionMode`. It decides the whole layout, so
+    // nothing is shown until a mode is picked - the two modes ask for
+    // different things and guessing one would present the wrong form.
+    const hasConnectionMode = Boolean(
+        adapter.configSchema.shape && "connectionMode" in adapter.configSchema.shape
+    );
+    if (hasConnectionMode && !connectionMode) {
+        return null;
     }
 
-    // MSSQL and adapters without SSH support
-    const tabCount = 2 + (isMSSQL ? 1 : 0);
+    const isSSH = connectionMode === "ssh";
 
     return (
-        <Tabs defaultValue="connection" className="w-full">
-            <TabsList className={cn("grid w-full",
-                tabCount === 2 && "grid-cols-2",
-                tabCount === 3 && "grid-cols-3",
-            )}>
-                <TabsTrigger value="connection">Connection</TabsTrigger>
-                <TabsTrigger value="configuration">Configuration</TabsTrigger>
-                {isMSSQL && <TabsTrigger value="filetransfer">File Transfer</TabsTrigger>}
-            </TabsList>
-
-            <TabsContent value="connection" className="space-y-4 pt-4">
-                {detectedVersion && (
-                    <div className="mb-4">
-                        <Badge variant="outline" className="bg-green-500/10 text-green-600 border-green-500/20">
-                            <Check className="w-3 h-3 mr-1" />
-                            Detected: {detectedVersion}
-                        </Badge>
-                    </div>
-                )}
-                <PrimaryCredentialPickerSlot
-                    adapter={adapter}
-                    primaryCredentialId={primaryCredentialId}
-                    onPrimaryChange={onPrimaryChange}
-                />
-                <FieldList
-                    keys={['host', 'port', 'user', 'username', 'password']}
-                    adapter={adapter}
-                />
-            </TabsContent>
-
-            <TabsContent value="configuration" className="space-y-4 pt-4">
-                {detectedVersion && (
-                    <div className="mb-4">
-                        <Badge variant="outline" className="bg-green-500/10 text-green-600 border-green-500/20">
-                            <Check className="w-3 h-3 mr-1" />
-                            Detected: {detectedVersion}
-                        </Badge>
-                    </div>
-                )}
-                {(adapter.id === 'redis' || adapter.id === 'valkey') && (
-                    <RedisDatabaseSelect />
-                )}
-                <FieldList
-                    keys={[
-                        'authenticationDatabase', 'options', 'disableSsl',
-                        // MSSQL-specific
-                        'encrypt', 'trustServerCertificate', 'requestTimeout',
-                        // Redis-specific (database is handled by RedisDatabaseSelect above)
-                        'mode', 'tls', 'sentinelMasterName', 'sentinelNodes',
-                    ]}
-                    adapter={adapter}
-                />
-                {onHealthNotificationsDisabledChange && (
-                    <HealthCheckNotificationSwitch
-                        type="database"
-                        disabled={healthNotificationsDisabled ?? false}
-                        onChange={onHealthNotificationsDisabledChange}
-                    />
-                )}
-                {onIsRestoreExcludedChange && (
-                    <RestoreExcludedSwitch
-                        excluded={isRestoreExcluded ?? false}
-                        onChange={onIsRestoreExcludedChange}
-                    />
-                )}
-            </TabsContent>
-
-            {isMSSQL && (
-                <TabsContent value="filetransfer" className="space-y-4 pt-4">
-                    <FieldList keys={['backupPath', 'fileTransferMode']} adapter={adapter} />
-
-                    {fileTransferMode === "ssh" && (
-                        <>
-                            <SshCredentialPickerSlot
-                                adapter={adapter}
-                                sshCredentialId={sshCredentialId}
-                                onSshChange={onSshChange}
-                            />
-                            <SshConfigSection adapter={adapter} sshAuthType={sshAuthType} sshCredentialId={sshCredentialId} />
-                        </>
-                    )}
-                    {fileTransferMode === "local" && (
-                        <div className="space-y-4">
-                            <FieldList keys={['localBackupPath']} adapter={adapter} />
-                            <p className="text-sm text-muted-foreground">
-                                The local path must point to the same directory as the server backup path (e.g. Docker volume mount or NFS share).
-                            </p>
-                        </div>
-                    )}
-                </TabsContent>
-            )}
-        </Tabs>
+        <SshAwareTabLayout
+            key={connectionMode ?? "direct"}
+            isSSH={isSSH}
+            defaultTab={isSSH ? "ssh" : "connection"}
+            adapter={adapter}
+            isMSSQL={isMSSQL}
+            fileTransferMode={fileTransferMode}
+            sshAuthType={sshAuthType}
+            detectedVersion={detectedVersion}
+            healthNotificationsDisabled={healthNotificationsDisabled}
+            onHealthNotificationsDisabledChange={onHealthNotificationsDisabledChange}
+            isRestoreExcluded={isRestoreExcluded}
+            onIsRestoreExcludedChange={onIsRestoreExcludedChange}
+            primaryCredentialId={primaryCredentialId}
+            sshCredentialId={sshCredentialId}
+            onPrimaryChange={onPrimaryChange}
+            onSshChange={onSshChange}
+        />
     );
 }
 
 /**
- * Tab layout for SSH-capable adapters. Uses key={connectionMode} to force remount on mode change,
- * ensuring the active tab resets to the first tab.
+ * Tab layout for every database adapter that picks a connection mode.
+ *
+ * Uses key={connectionMode} to force a remount on mode change, so the active
+ * tab resets to the first one rather than landing on a tab the new mode does
+ * not have.
  */
 function SshAwareTabLayout({
     isSSH,
     defaultTab,
     adapter,
+    isMSSQL,
+    fileTransferMode,
     sshAuthType,
     detectedVersion,
     healthNotificationsDisabled,
@@ -688,6 +596,9 @@ function SshAwareTabLayout({
     isSSH: boolean;
     defaultTab: string;
     adapter: AdapterDefinition;
+    /** SQL Server is the only adapter whose backup file needs its own transfer settings. */
+    isMSSQL?: boolean;
+    fileTransferMode?: string;
     sshAuthType: string;
     detectedVersion?: string | null;
     healthNotificationsDisabled?: boolean;
@@ -746,9 +657,21 @@ function SshAwareTabLayout({
                                 'authenticationDatabase', 'options', 'disableSsl',
                                 'mode', 'tls', 'sentinelMasterName', 'sentinelNodes',
                                 'firebirdBinaryPath',
+                                // SQL Server. `backupPath` lives here rather than
+                                // under File Transfer, because SSH mode has no
+                                // transfer to configure - the file comes back over
+                                // the connection that is already set up.
+                                'encrypt', 'trustServerCertificate', 'requestTimeout', 'backupPath',
                             ]}
                             adapter={adapter}
                         />
+                        {isMSSQL && (
+                            <p className="text-sm text-muted-foreground">
+                                SQL Server writes the backup file to this path, and it travels back over
+                                the same SSH connection. The SQL Server port does not need to be
+                                reachable from DBackup.
+                            </p>
+                        )}
                         {onHealthNotificationsDisabledChange && (
                             <HealthCheckNotificationSwitch
                                 type="database"
@@ -766,9 +689,10 @@ function SshAwareTabLayout({
                 </Tabs>
             ) : (
                 <Tabs defaultValue={defaultTab} className="w-full">
-                    <TabsList className="grid w-full grid-cols-2">
+                    <TabsList className={cn("grid w-full", isMSSQL ? "grid-cols-3" : "grid-cols-2")}>
                         <TabsTrigger value="connection">Connection</TabsTrigger>
                         <TabsTrigger value="configuration">Configuration</TabsTrigger>
+                        {isMSSQL && <TabsTrigger value="filetransfer">File Transfer</TabsTrigger>}
                     </TabsList>
 
                     <TabsContent value="connection" className="space-y-4 pt-4">
@@ -791,6 +715,7 @@ function SshAwareTabLayout({
                                 'authenticationDatabase', 'options', 'disableSsl',
                                 'mode', 'tls', 'sentinelMasterName', 'sentinelNodes',
                                 'firebirdBinaryPath',
+                                'encrypt', 'trustServerCertificate', 'requestTimeout',
                             ]}
                             adapter={adapter}
                         />
@@ -808,6 +733,31 @@ function SshAwareTabLayout({
                             />
                         )}
                     </TabsContent>
+
+                    {isMSSQL && (
+                        <TabsContent value="filetransfer" className="space-y-4 pt-4">
+                            <FieldList keys={['backupPath', 'fileTransferMode']} adapter={adapter} />
+
+                            {fileTransferMode === "ssh" && (
+                                <>
+                                    <SshCredentialPickerSlot
+                                        adapter={adapter}
+                                        sshCredentialId={sshCredentialId}
+                                        onSshChange={onSshChange}
+                                    />
+                                    <SshConfigSection adapter={adapter} sshAuthType={sshAuthType} sshCredentialId={sshCredentialId} />
+                                </>
+                            )}
+                            {fileTransferMode === "local" && (
+                                <div className="space-y-4">
+                                    <FieldList keys={['localBackupPath']} adapter={adapter} />
+                                    <p className="text-sm text-muted-foreground">
+                                        The local path must point to the same directory as the server backup path (e.g. Docker volume mount or NFS share).
+                                    </p>
+                                </div>
+                            )}
+                        </TabsContent>
+                    )}
                 </Tabs>
             )}
         </div>

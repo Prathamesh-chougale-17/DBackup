@@ -1,3 +1,4 @@
+import { withHost } from "@/lib/transport";
 import { describe, it, expect, beforeAll } from 'vitest';
 import { registry } from '@/lib/core/registry';
 import { registerAdapters } from '@/lib/adapters';
@@ -24,7 +25,7 @@ describe('Integration Tests: Database Connectivity', () => {
                 let result;
                 for(let i=0; i<3; i++) {
                     if (!adapter.test) throw new Error("Adapter does not implement test method");
-                    result = await adapter.test(config as any);
+                    result = await withHost(adapter, config, (host) => adapter.test!(config as any, host));
                     if(result.success) break;
                     await new Promise(r => setTimeout(r, 2000)); // Wait 2s before retry
                 }
@@ -44,11 +45,11 @@ describe('Integration Tests: Database Connectivity', () => {
 
                 let dbs;
                 try {
-                     dbs = await adapter.getDatabases(config as any);
+                     dbs = await withHost(adapter, config, (host) => adapter.getDatabases!(config as any, host));
                 } catch (_e) {
                     // Retry once
                     await new Promise(r => setTimeout(r, 2000));
-                    dbs = await adapter.getDatabases(config as any);
+                    dbs = await withHost(adapter, config, (host) => adapter.getDatabases!(config as any, host));
                 }
 
                 expect(Array.isArray(dbs)).toBe(true);

@@ -1,141 +1,97 @@
-import { execFile } from "child_process";
-import util from "util";
+import { transportSuffix, type ExecutionHost } from "@/lib/transport";
 import { PostgresConfig } from "@/lib/adapters/definitions";
-import {
-    SshClient,
-    isSSHMode,
-    extractSshConfig,
-    buildPsqlArgs,
-    remoteEnv,
-    remoteBinaryCheck,
-    shellEscape,
-} from "@/lib/ssh";
-
-export const execFileAsync = util.promisify(execFile);
-
-export async function test(config: PostgresConfig): Promise<{ success: boolean; message: string; version?: string }> {
-    if (isSSHMode(config)) {
-        const sshConfig = extractSshConfig(config)!;
-        const ssh = new SshClient();
-        try {
-            await ssh.connect(sshConfig);
-            await remoteBinaryCheck(ssh, "psql");
-            const args = buildPsqlArgs(config);
-            const env: Record<string, string | undefined> = {};
-            if (config.password) env.PGPASSWORD = config.password;
-
-            const dbsToTry = ['postgres', 'template1'];
-            if (typeof config.database === 'string' && config.database) dbsToTry.push(config.database);
-
-            for (const db of dbsToTry) {
-                const cmd = remoteEnv(env, `psql ${args.join(" ")} -d ${shellEscape(db)} -t -c 'SELECT version()'`);
-                const result = await ssh.exec(cmd);
-                if (result.code === 0) {
-                    const rawVersion = result.stdout.trim();
-                    const versionMatch = rawVersion.match(/PostgreSQL\s+([\d.]+)/);
-                    const version = versionMatch ? versionMatch[1] : rawVersion;
-                    return { success: true, message: "Connection successful (via SSH)", version };
-                }
-            }
-            return { success: false, message: "SSH connection to PostgreSQL failed" };
-        } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            return { success: false, message: `SSH connection failed: ${msg}` };
-        } finally {
-            ssh.end();
-        }
-    }
-
-    const dbsToTry = ['postgres', 'template1'];
-    if (typeof config.database === 'string' && config.database) dbsToTry.push(config.database);
-
-    const env = { ...process.env, PGPASSWORD: config.password };
-    let lastError: unknown;
-
-    for (const db of dbsToTry) {
-        try {
-            const args = ['-h', config.host, '-p', String(config.port), '-U', config.user, '-d', db, '-t', '-c', 'SELECT version()'];
-            const { stdout } = await execFileAsync('psql', args, { env });
-
-            // Extract version number only (e.g. "PostgreSQL 16.1 on ..." → "16.1")
-            const rawVersion = stdout.trim();
-            const versionMatch = rawVersion.match(/PostgreSQL\s+([\d.]+)/);
-            const version = versionMatch ? versionMatch[1] : rawVersion;
-
-            return { success: true, message: "Connection successful", version };
-        } catch (error: unknown) {
-            lastError = error;
-        }
-    }
-    const errMsg = lastError instanceof Error
-        ? (lastError as { stderr?: string }).stderr || lastError.message
-        : String(lastError);
-    return { success: false, message: "Connection failed: " + errMsg };
-}
-
-export async function getDatabases(config: PostgresConfig): Promise<string[]> {
-    if (isSSHMode(config)) {
-        const sshConfig = extractSshConfig(config)!;
-        const ssh = new SshClient();
-        try {
-            await ssh.connect(sshConfig);
-            const args = buildPsqlArgs(config);
-            const env: Record<string, string | undefined> = {};
-            if (config.password) env.PGPASSWORD = config.password;
-
-            const dbsToTry = ['postgres', 'template1'];
-            if (typeof config.database === 'string' && config.database) dbsToTry.push(config.database);
-
-            for (const db of dbsToTry) {
-                const cmd = remoteEnv(env, `psql ${args.join(" ")} -d ${shellEscape(db)} -t -A -c 'SELECT datname FROM pg_database WHERE datistemplate = false;'`);
-                const result = await ssh.exec(cmd);
-                if (result.code === 0) {
-                    return result.stdout.split('\n').map(s => s.trim()).filter(s => s);
-                }
-            }
-            throw new Error("Failed to list databases via SSH");
-        } finally {
-            ssh.end();
-        }
-    }
-
-    const dbsToTry = ['postgres', 'template1'];
-    if (typeof config.database === 'string' && config.database) dbsToTry.push(config.database);
-
-    const env = { ...process.env, PGPASSWORD: config.password };
-    let lastError: unknown;
-
-    for (const db of dbsToTry) {
-        try {
-            // -t = tuples only (no header/footer), -A = unaligned
-            const args = ['-h', config.host, '-p', String(config.port), '-U', config.user, '-d', db, '-t', '-A', '-c', 'SELECT datname FROM pg_database WHERE datistemplate = false;'];
-            const { stdout } = await execFileAsync('psql', args, { env });
-            return stdout.split('\n').map(s => s.trim()).filter(s => s);
-        } catch (error: unknown) {
-            lastError = error;
-        }
-    }
-    throw lastError;
-}
-
 import { DatabaseInfo } from "@/lib/core/interfaces";
+import { PSQL, buildConnectionArgs, firstReachableDatabase, pgEnv } from "./args";
+
+/**
+ * A database adapter cannot fall back to a default transport: guessing "direct"
+ * for a source configured for SSH would talk to a different machine and report
+ * it healthy. Callers reach these functions through withHost or
+ * runConnectivityCheck, both of which always supply one.
+ */
+function requireHost(host: ExecutionHost | undefined): ExecutionHost {
+    if (!host) {
+        throw new Error("PostgreSQL adapter requires an execution host. Call it through withHost().");
+    }
+    return host;
+}
+
+export async function test(
+    config: PostgresConfig,
+    hostArg?: ExecutionHost,
+): Promise<{ success: boolean; message: string; version?: string }> {
+    let host: ExecutionHost;
+    try {
+        host = requireHost(hostArg);
+    } catch (e: unknown) {
+        return { success: false, message: e instanceof Error ? e.message : String(e) };
+    }
+
+    const via = transportSuffix(host);
+
+    try {
+        const psql = await host.which(...PSQL);
+        const outcome = await firstReachableDatabase(
+            host,
+            config,
+            (database) => [
+                psql, ...buildConnectionArgs(config), "-d", database, "-t", "-c", "SELECT version()",
+            ],
+            (result) => {
+                // "PostgreSQL 16.1 on x86_64-pc-linux-gnu ..." -> "16.1"
+                const raw = result.stdout.trim();
+                return raw.match(/PostgreSQL\s+([\d.]+)/)?.[1] ?? raw;
+            },
+        );
+
+        if (!outcome.ok) {
+            return { success: false, message: `Connection failed: ${outcome.stderr}` };
+        }
+        return { success: true, message: `Connection successful${via}`, version: outcome.value };
+    } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { success: false, message: `Connection failed: ${message}` };
+    }
+}
+
+export async function getDatabases(config: PostgresConfig, hostArg: ExecutionHost): Promise<string[]> {
+    const host = requireHost(hostArg);
+    const psql = await host.which(...PSQL);
+
+    const outcome = await firstReachableDatabase(
+        host,
+        config,
+        (database) => [
+            psql, ...buildConnectionArgs(config), "-d", database,
+            // -t = tuples only, -A = unaligned
+            "-t", "-A", "-c", "SELECT datname FROM pg_database WHERE datistemplate = false;",
+        ],
+        (result) => result.stdout.split("\n").map(s => s.trim()).filter(s => s),
+    );
+
+    if (!outcome.ok) {
+        throw new Error(`Failed to list databases: ${outcome.stderr}`);
+    }
+    return outcome.value;
+}
 
 // NOTE: PostgreSQL's information_schema.tables is scoped to the currently connected
 // database, so a single-query cross-database table count is not possible.
-// We fetch sizes in one query, then run a separate per-database query for table counts.
+// Sizes come from one query, then a separate per-database query counts tables.
 const pgStatsQuery = `
     SELECT d.datname, pg_database_size(d.datname) AS size_bytes FROM pg_database d WHERE d.datistemplate = false ORDER BY d.datname;
 `.trim();
 
-const pgTableCountQuery = `SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema');`;
+const pgTableCountQuery =
+    `SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema');`;
 
 function parseStatsOutput(stdout: string): DatabaseInfo[] {
     return stdout
-        .split('\n')
+        .split("\n")
         .map(line => line.trim())
         .filter(line => line)
         .map(line => {
-            const parts = line.split('\t');
+            const parts = line.split("\t");
             return {
                 name: parts[0],
                 sizeInBytes: parseInt(parts[1], 10) || 0,
@@ -143,85 +99,47 @@ function parseStatsOutput(stdout: string): DatabaseInfo[] {
         });
 }
 
-async function countTablesInDatabase(config: PostgresConfig, dbName: string): Promise<number | undefined> {
-    const env = { ...process.env, PGPASSWORD: config.password };
-    const args = ['-h', config.host, '-p', String(config.port), '-U', config.user, '-d', dbName, '-t', '-A', '-c', pgTableCountQuery];
-    try {
-        const { stdout } = await execFileAsync('psql', args, { env });
-        const count = parseInt(stdout.trim(), 10);
-        return isNaN(count) ? undefined : count;
-    } catch {
-        return undefined;
-    }
-}
-
-async function countTablesViaSsh(
-    ssh: SshClient,
-    args: string[],
-    env: Record<string, string | undefined>,
+async function countTables(
+    host: ExecutionHost,
+    config: PostgresConfig,
+    psql: string,
     dbName: string,
 ): Promise<number | undefined> {
-    const cmd = remoteEnv(env, `psql ${args.join(" ")} -d ${shellEscape(dbName)} -t -A -c ${shellEscape(pgTableCountQuery)}`);
-    const result = await ssh.exec(cmd);
+    const result = await host.exec(
+        [psql, ...buildConnectionArgs(config), "-d", dbName, "-t", "-A", "-c", pgTableCountQuery],
+        { env: pgEnv(config.password) },
+    );
     if (result.code !== 0) return undefined;
     const count = parseInt(result.stdout.trim(), 10);
     return isNaN(count) ? undefined : count;
 }
 
-export async function getDatabasesWithStats(config: PostgresConfig): Promise<DatabaseInfo[]> {
-    if (isSSHMode(config)) {
-        const sshConfig = extractSshConfig(config)!;
-        const ssh = new SshClient();
-        try {
-            await ssh.connect(sshConfig);
-            const args = buildPsqlArgs(config);
-            const env: Record<string, string | undefined> = {};
-            if (config.password) env.PGPASSWORD = config.password;
+export async function getDatabasesWithStats(config: PostgresConfig, hostArg: ExecutionHost): Promise<DatabaseInfo[]> {
+    const host = requireHost(hostArg);
+    const psql = await host.which(...PSQL);
 
-            const dbsToTry = ['postgres', 'template1'];
-            if (typeof config.database === 'string' && config.database) dbsToTry.push(config.database);
-
-            for (const db of dbsToTry) {
-                const cmd = remoteEnv(env, `psql ${args.join(" ")} -d ${shellEscape(db)} -t -A -F '\t' -c ${shellEscape(pgStatsQuery)}`);
-                const result = await ssh.exec(cmd);
-                if (result.code === 0) {
-                    const statsResults = parseStatsOutput(result.stdout);
-                    const withTableCounts = await Promise.all(
-                        statsResults.map(async (dbEntry) => {
-                            const tableCount = await countTablesViaSsh(ssh, args, env, dbEntry.name);
-                            return tableCount !== undefined ? { ...dbEntry, tableCount } : dbEntry;
-                        })
-                    );
-                    return withTableCounts;
-                }
-            }
-            throw new Error("Failed to get database stats via SSH");
-        } finally {
-            ssh.end();
-        }
-    }
-
-    const dbsToTry = ['postgres', 'template1'];
-    if (typeof config.database === 'string' && config.database) dbsToTry.push(config.database);
-
-    const env = { ...process.env, PGPASSWORD: config.password };
-    let lastError: unknown;
-
-    for (const db of dbsToTry) {
-        try {
-            const args = ['-h', config.host, '-p', String(config.port), '-U', config.user, '-d', db, '-t', '-A', '-F', '\t', '-c', pgStatsQuery];
-            const { stdout } = await execFileAsync('psql', args, { env });
-            const statsResults = parseStatsOutput(stdout);
-            const withTableCounts = await Promise.all(
-                statsResults.map(async (dbEntry) => {
-                    const tableCount = await countTablesInDatabase(config, dbEntry.name);
-                    return tableCount !== undefined ? { ...dbEntry, tableCount } : dbEntry;
-                })
+    const outcome = await firstReachableDatabase(
+        host,
+        config,
+        (database) => [
+            psql, ...buildConnectionArgs(config), "-d", database,
+            "-t", "-A", "-F", "\t", "-c", pgStatsQuery,
+        ],
+        async (result) => {
+            const stats = parseStatsOutput(result.stdout);
+            // One query per database. Over SSH each is a channel, which the
+            // transport caps so a wide fan-out cannot exhaust the session limit.
+            return Promise.all(
+                stats.map(async (entry) => {
+                    const tableCount = await countTables(host, config, psql, entry.name);
+                    return tableCount !== undefined ? { ...entry, tableCount } : entry;
+                }),
             );
-            return withTableCounts;
-        } catch (error: unknown) {
-            lastError = error;
-        }
+        },
+    );
+
+    if (!outcome.ok) {
+        throw new Error(`Failed to get database stats: ${outcome.stderr}`);
     }
-    throw lastError;
+    return outcome.value;
 }

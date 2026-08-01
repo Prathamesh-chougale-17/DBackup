@@ -1,3 +1,9 @@
+import { execFile } from "child_process";
+import util from "util";
+
+/** Promisified execFile for work that always runs on the DBackup host itself. */
+export const execFileAsync = util.promisify(execFile);
+
 import { ChildProcess } from "child_process";
 
 /**

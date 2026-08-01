@@ -1,18 +1,15 @@
-import { execFile } from "child_process";
-import util from "util";
+import type { ExecutionHost } from "@/lib/transport";
 
-const execFileAsync = util.promisify(execFile);
+/**
+ * Locating Firebird's command line tools on whichever machine will run them.
+ *
+ * This is more than a PATH lookup, which is why it does not simply call
+ * `host.which()`: several distributions ship an unrelated `isql` from unixODBC
+ * with a completely different CLI and no Firebird connectivity at all. Every
+ * candidate is therefore verified before it is accepted.
+ */
 
-// Cache detection results to avoid spawning processes repeatedly
-let cachedGbakCmd: string | null = null;
-let cachedIsqlCmd: string | null = null;
-
-// Initialization promise to detect commands once asynchronously
-let initPromise: Promise<void> | null = null;
-
-// Well-known install locations to fall back to when PATH isn't configured
-// (e.g. a dev machine that ran the setup script but hasn't restarted its
-// shell/dev server since, so the new directory never made it onto PATH).
+/** Well-known install locations for when the tools are not on PATH. */
 const FALLBACK_DIRS = [
     "/opt/firebird/bin", // Linux (Docker image, manual client extraction)
     "/opt/homebrew/firebird-client/bin", // macOS, Apple Silicon (setup-dev-macos.sh)
@@ -20,80 +17,90 @@ const FALLBACK_DIRS = [
     "/Library/Frameworks/Firebird.framework/Resources/bin", // macOS, official installer
 ];
 
+/** Some distributions rename Firebird's isql to avoid the unixODBC clash. */
+const ISQL_NAMES = ["isql", "isql-fb"];
+const GBAK_NAMES = ["gbak"];
+
+const VERIFY_TIMEOUT_MS = 3_000;
+
+/** Resolved binaries per host, so the probing runs once per connection scope. */
+const cache = new WeakMap<ExecutionHost, Map<string, Promise<string>>>();
+
 /**
- * Verify a resolved path is actually Firebird's binary, not a same-named tool
- * from an unrelated package - most notably unixODBC, which also ships an
- * "isql" with a completely different CLI and no Firebird connectivity at all.
- * "-z" (version) always prints a "... Firebird X.Y" banner, even when the
- * process exits non-zero for lacking other required arguments (gbak's case).
+ * Check that a path really is a Firebird tool.
  *
- * Firebird's own isql prints that banner and then drops into its interactive
- * prompt waiting on stdin - which never gets an EOF from execFile's pipe, so
- * this would hang forever without a timeout. The `timeout` option kills it
- * after the version line is already buffered, which is all we need.
+ * `-z` prints a "... Firebird X.Y" banner even when the process then exits
+ * non-zero for missing arguments, which is gbak's case. Firebird's isql prints
+ * the banner and then waits for input on stdin, so stdin is closed immediately
+ * and the process is killed after a short grace period. Whatever was already
+ * buffered is what gets inspected, which is all this needs.
  */
-async function isFirebirdBinary(path: string): Promise<boolean> {
+async function isFirebirdBinary(host: ExecutionHost, path: string): Promise<boolean> {
     try {
-        const { stdout, stderr } = await execFileAsync(path, ["-z"], { timeout: 3000 });
-        return /firebird/i.test(stdout + stderr);
-    } catch (err: unknown) {
-        const { stdout = "", stderr = "" } = err as { stdout?: string; stderr?: string };
-        return /firebird/i.test(stdout + stderr);
+        const proc = await host.spawn([path, "-z"], { stdin: true });
+        proc.stdin?.end();
+
+        let output = "";
+        proc.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+        proc.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+
+        const timer = setTimeout(() => proc.kill(), VERIFY_TIMEOUT_MS);
+        try {
+            await proc.exit();
+        } finally {
+            clearTimeout(timer);
+        }
+
+        return /firebird/i.test(output);
+    } catch {
+        return false;
     }
 }
 
-async function resolveCommand(names: string[]): Promise<string> {
-    // 1. Check each candidate name on PATH, but only accept it once verified.
+async function resolve(host: ExecutionHost, names: string[]): Promise<string> {
+    // 1. Names on PATH, but only once verified as Firebird's own.
     for (const name of names) {
-        try {
-            const { stdout } = await execFileAsync("which", [name]);
-            const resolvedPath = stdout.trim();
-            if (resolvedPath && (await isFirebirdBinary(resolvedPath))) {
-                return name;
-            }
-        } catch {
-            continue;
+        const found = await host.which(name).catch(() => null);
+        if (found && (await isFirebirdBinary(host, found))) {
+            return name;
         }
     }
 
-    // 2. Not found (or the wrong tool) on PATH - try well-known absolute locations.
+    // 2. Well-known absolute locations, for hosts where PATH is not set up.
     for (const dir of FALLBACK_DIRS) {
         for (const name of names) {
             const fullPath = `${dir}/${name}`;
-            if (await isFirebirdBinary(fullPath)) {
+            if (await isFirebirdBinary(host, fullPath)) {
                 return fullPath;
             }
         }
     }
 
-    // 3. Nothing verified - fall back to the first candidate name and let it
-    // fail later with a clear "command not found" error.
+    // 3. Nothing verified. Return the first candidate and let the actual command
+    //    fail with a readable "command not found".
     return names[0];
 }
 
-async function initCommands(): Promise<void> {
-    if (!initPromise) {
-        initPromise = (async () => {
-            const [gbak, isql] = await Promise.all([
-                resolveCommand(["gbak"]),
-                // Some distros ship Firebird's isql as isql-fb to avoid a clash with unixODBC's isql
-                resolveCommand(["isql", "isql-fb"]),
-            ]);
-            cachedGbakCmd = gbak;
-            cachedIsqlCmd = isql;
-        })();
+function memoized(host: ExecutionHost, key: string, names: string[]): Promise<string> {
+    let perHost = cache.get(host);
+    if (!perHost) {
+        perHost = new Map();
+        cache.set(host, perHost);
     }
-    return initPromise;
+
+    let pending = perHost.get(key);
+    if (!pending) {
+        pending = resolve(host, names);
+        perHost.set(key, pending);
+        pending.catch(() => perHost.delete(key));
+    }
+    return pending;
 }
 
-export function getGbakCommand(): string {
-    // Return cached value or fallback - initCommands() should be called before first use
-    return cachedGbakCmd ?? "gbak";
+export function getGbakCommand(host: ExecutionHost): Promise<string> {
+    return memoized(host, "gbak", GBAK_NAMES);
 }
 
-export function getIsqlCommand(): string {
-    return cachedIsqlCmd ?? "isql";
+export function getIsqlCommand(host: ExecutionHost): Promise<string> {
+    return memoized(host, "isql", ISQL_NAMES);
 }
-
-/** Call once during startup or before first adapter use to detect available commands */
-export { initCommands as initFirebirdTools };

@@ -134,7 +134,7 @@ Then open [https://localhost:3000](https://localhost:3000) and create your first
 | **Redis** | 2.8+ | Direct, SSH | Guided |
 | **Valkey** | 7.2+ | Direct, SSH | Guided |
 | **SQLite** | 3.x | Local, SSH | Yes |
-| **Microsoft SQL Server** | 2017, 2019, 2022, Azure SQL Edge | Direct (+ SSH file transfer) | Yes |
+| **Microsoft SQL Server** | 2017, 2019, 2022, Azure SQL Edge | Direct, SSH | Yes |
 | **Firebird** (Beta) | 3.x, 4.x, 5.x | Direct, SSH | Yes (pre-configured aliases) |
 
 == 📁 Directory Sources

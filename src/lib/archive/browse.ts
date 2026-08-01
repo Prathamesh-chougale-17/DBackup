@@ -7,20 +7,8 @@
  * database.
  */
 
+import { stripSlashes } from "@/lib/paths";
 import { ArchiveIndex, IndexFileLine } from "./types";
-
-/**
- * Strips leading and trailing "/" characters without regex backtracking, since the
- * previous `/^\/+/` / `/\/+$/` pair ran in polynomial time on attacker-controlled paths
- * (an unanchored trailing quantifier re-tries backtracking at every start position).
- */
-function stripSlashes(value: string): string {
-    let start = 0;
-    while (start < value.length && value.charCodeAt(start) === 47) start++;
-    let end = value.length;
-    while (end > start && value.charCodeAt(end - 1) === 47) end--;
-    return value.slice(start, end);
-}
 
 export interface BrowseEntry {
     name: string;

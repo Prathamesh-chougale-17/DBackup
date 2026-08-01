@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { generateKeyPairSync, createPrivateKey } from "crypto";
-import { normalizeSshPrivateKey } from "@/lib/ssh/pkcs8-compat";
+import { normalizeSshPrivateKey } from "@/lib/transport/pkcs8-compat";
 
 const PASSPHRASE = "testpass";
 const WRONG_PASSPHRASE = "wrongpass";

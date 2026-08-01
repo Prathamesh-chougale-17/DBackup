@@ -1,5 +1,7 @@
 import prisma from "@/lib/prisma";
 import { registry } from "@/lib/core/registry";
+import { withHost } from "@/lib/transport";
+import { runAdapterTest } from "@/lib/transport/adapter-invoke";
 import { StorageAdapter, DatabaseAdapter, BackupMetadata } from "@/lib/core/interfaces";
 import { resolveAdapterConfig } from "@/lib/adapters/config-resolver";
 import { compareVersions } from "@/lib/utils";
@@ -49,7 +51,8 @@ export async function preflightRestore(input: RestoreInput): Promise<void> {
                 const dbConf = await resolveAdapterConfig(targetConfig) as any;
                 if (privilegedAuth) dbConf.privilegedAuth = privilegedAuth;
 
-                await targetAdapter.prepareRestore(dbConf, dbsToCheck);
+                const prepare = targetAdapter.prepareRestore;
+                await withHost(targetAdapter, dbConf, (host) => prepare(dbConf, dbsToCheck, host));
             }
         }
     }
@@ -75,7 +78,7 @@ export async function preflightRestore(input: RestoreInput): Promise<void> {
             }
             if (dirTargetAdapter.test) {
                 const conf = await resolveAdapterConfig(dirTargetConfig) as any;
-                const testResult = await dirTargetAdapter.test(conf);
+                const testResult = (await runAdapterTest(dirTargetAdapter, conf))!;
                 if (!testResult.success) {
                     throw new Error(`Restore target '${dirTargetConfig.name}' is not writable: ${testResult.message}`);
                 }
@@ -107,7 +110,7 @@ export async function preflightRestore(input: RestoreInput): Promise<void> {
                         const dbConf = await resolveAdapterConfig(targetConfig) as any;
                         if (privilegedAuth) dbConf.privilegedAuth = privilegedAuth;
 
-                        const testResult = await targetAdapter.test(dbConf) as { success: boolean; version?: string; edition?: string };
+                        const testResult = (await runAdapterTest(targetAdapter, dbConf)) as { success: boolean; version?: string; edition?: string };
                         if (testResult.success && testResult.version) {
                             // Check if Source (Backup) > Target (Current Server)
                             if (compareVersions(metadata.engineVersion, testResult.version) > 0) {

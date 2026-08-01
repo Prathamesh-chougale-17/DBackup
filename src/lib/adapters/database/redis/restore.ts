@@ -1,12 +1,10 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
-import { buildConnectionArgs } from "./connection";
-import { execFile } from "child_process";
-import util from "util";
+import { REDIS_CLI, buildConnectionArgs } from "./args";
 import { logger } from "@/lib/logging/logger";
 import { RedisConfig } from "@/lib/adapters/definitions";
 
-const execFileAsync = util.promisify(execFile);
 const log = logger.child({ adapter: "redis", module: "restore" });
 
 /**
@@ -31,34 +29,32 @@ type RedisRestoreConfig = RedisConfig & {
  * - RDB files must be placed in the Redis data directory
  * - Server restart is required to load the new RDB
  */
-export async function prepareRestore(config: RedisRestoreConfig, _databases: string[]): Promise<void> {
+export async function prepareRestore(
+    config: RedisRestoreConfig,
+    _databases: string[],
+    host: ExecutionHost,
+): Promise<void> {
+    const redisCli = await host.which(...REDIS_CLI);
     const args = buildConnectionArgs(config);
 
-    // Test basic connectivity
-    try {
-        await execFileAsync("redis-cli", [...args, "PING"]);
-    } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`Cannot connect to Redis/Valkey: ${message}`);
+    const ping = await host.exec([redisCli, ...args, "PING"]);
+    if (ping.code !== 0 || !ping.stdout.includes("PONG")) {
+        const detail = ping.stderr.trim() || ping.stdout.trim();
+        throw new Error(`Cannot connect to Redis/Valkey: ${detail}`);
     }
 
-    // Check if we have admin permissions (needed for potential FLUSHALL)
-    try {
-        const { stdout } = await execFileAsync("redis-cli", [...args, "ACL", "WHOAMI"]);
-        const user = stdout.trim();
+    // Best effort permission probe. ACL commands do not exist before Redis 6,
+    // so a failure here is not a reason to stop.
+    const whoami = await host.exec([redisCli, ...args, "ACL", "WHOAMI"]);
+    if (whoami.code !== 0) return;
 
-        // If not default user, check permissions
-        if (user !== "default") {
-            // Try to verify we have necessary permissions
-            const { stdout: aclList } = await execFileAsync("redis-cli", [...args, "ACL", "LIST"]);
+    const user = whoami.stdout.trim();
+    if (user === "default") return;
 
-            // This is a basic check - in production you'd want more thorough validation
-            if (!aclList.includes("allcommands") && !aclList.includes("+flushall")) {
-                log.warn("User may not have FLUSHALL permission", { user });
-            }
-        }
-    } catch {
-        // ACL commands might not be available (Redis < 6) - continue anyway
+    const aclList = await host.exec([redisCli, ...args, "ACL", "LIST"]);
+    if (aclList.code !== 0) return;
+    if (!aclList.stdout.includes("allcommands") && !aclList.stdout.includes("+flushall")) {
+        log.warn("User may not have FLUSHALL permission", { user });
     }
 }
 
@@ -81,6 +77,7 @@ export async function prepareRestore(config: RedisRestoreConfig, _databases: str
 export async function restore(
     config: RedisRestoreConfig,
     sourcePath: string,
+    host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     _onProgress?: (percentage: number) => void
 ): Promise<BackupResult> {
@@ -94,13 +91,12 @@ export async function restore(
 
     try {
         // Detect whether the target server is Redis or Valkey (both share this restore flow)
+        const redisCli = await host.which(...REDIS_CLI);
         const args = buildConnectionArgs(config);
         let engineName = "Redis";
-        try {
-            const { stdout: serverInfo } = await execFileAsync("redis-cli", [...args, "INFO", "server"]);
-            if (/valkey_version:/.test(serverInfo)) engineName = "Valkey";
-        } catch {
-            // Fall back to "Redis" if INFO server can't be queried
+        const serverInfo = await host.exec([redisCli, ...args, "INFO", "server"]);
+        if (serverInfo.code === 0 && /valkey_version:/.test(serverInfo.stdout)) {
+            engineName = "Valkey";
         }
         const engineLower = engineName.toLowerCase();
 
@@ -111,15 +107,12 @@ export async function restore(
         const stats = await fs.stat(sourcePath);
         log(`Backup file size: ${stats.size} bytes`, "info");
 
-        // Get server info to provide instructions
-        const { stdout: infoResult } = await execFileAsync("redis-cli", [...args, "CONFIG", "GET", "dir"]);
+        // Where the server keeps its RDB, so the instructions name a real path.
+        const dirResult = await host.exec([redisCli, ...args, "CONFIG", "GET", "dir"]);
+        const dataDir = dirResult.stdout.trim().split("\n")[1] || `/var/lib/${engineLower}`;
 
-        const lines = infoResult.trim().split("\n");
-        const dataDir = lines[1] || `/var/lib/${engineLower}`;
-
-        const { stdout: dbFilename } = await execFileAsync("redis-cli", [...args, "CONFIG", "GET", "dbfilename"]);
-        const dbLines = dbFilename.trim().split("\n");
-        const rdbFilename = dbLines[1] || "dump.rdb";
+        const nameResult = await host.exec([redisCli, ...args, "CONFIG", "GET", "dbfilename"]);
+        const rdbFilename = nameResult.stdout.trim().split("\n")[1] || "dump.rdb";
 
         log("", "info");
         log("═══════════════════════════════════════════════════════════", "info");

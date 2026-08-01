@@ -1,6 +1,6 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
-import { spawn } from "child_process";
 import fs from "fs/promises";
 import { createWriteStream } from "fs";
 import path from "path";
@@ -12,15 +12,7 @@ import {
 import { TarFileEntry, TarManifest } from "../common/types";
 import { PostgresConfig } from "@/lib/adapters/definitions";
 import { getDatabases } from "./connection";
-import {
-    SshClient,
-    isSSHMode,
-    extractSshConfig,
-    buildPsqlArgs,
-    remoteEnv,
-    remoteBinaryCheck,
-    shellEscape,
-} from "@/lib/ssh";
+import { PG_DUMP, buildConnectionArgs, pgEnv } from "./args";
 
 /**
  * Extended PostgreSQL config for dump operations with runtime fields
@@ -67,50 +59,41 @@ function buildCompressionArgs(pgCompression: string | undefined): string[] {
 }
 
 /**
- * Dump a single PostgreSQL database using pg_dump with custom format (-Fc)
+ * Dump a single PostgreSQL database using pg_dump with custom format (-Fc).
  */
 async function dumpSingleDatabase(
     dbName: string,
     outputPath: string,
     config: PostgresDumpConfig,
-    env: NodeJS.ProcessEnv,
+    host: ExecutionHost,
     log: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<void> {
-    if (isSSHMode(config)) {
-        return dumpSingleDatabaseSSH(dbName, outputPath, config, log);
-    }
+    const pgDump = await host.which(...PG_DUMP);
 
     const args = [
-        '-h', config.host,
-        '-p', String(config.port),
-        '-U', config.user,
-        '-F', 'c', // Custom format (compressed, binary)
+        ...buildConnectionArgs(config),
+        "-F", "c", // Custom format (compressed, binary)
         ...buildCompressionArgs(config.pgCompression),
-        '-d', dbName,
+        "-d", dbName,
     ];
 
-    // Add custom options if provided
     if (config.options) {
-        const parts = config.options.match(/[^\s"']+|"([^"]*)"|'([^']*)'/g) || [];
-        for (const part of parts) {
-            if (part.startsWith('"') && part.endsWith('"')) {
-                args.push(part.slice(1, -1));
-            } else if (part.startsWith("'") && part.endsWith("'")) {
-                args.push(part.slice(1, -1));
-            } else {
-                args.push(part);
-            }
-        }
+        args.push(...parseOptionString(config.options));
     }
 
-    log(`Dumping database: ${dbName}`, 'info', 'command', `pg_dump ${args.join(' ')}`);
+    log(`Dumping database: ${dbName}`, 'info', 'command', `${pgDump} ${args.join(' ')}`);
 
-    const dumpProcess = spawn('pg_dump', args, { env });
+    // pg_dump writes to stdout, and a host process delivers stdout to this
+    // machine whatever the transport is. The bytes are already local, so they
+    // are written straight to the destination. captureOutput would name a path
+    // on the remote host and then write it with the local fs, which happens to
+    // work in direct mode because the two are the same path, and fails over
+    // SSH with "No such file" on the download.
+    const proc = await host.spawn([pgDump, ...args], { env: pgEnv(config.password) });
     const writeStream = createWriteStream(outputPath);
 
-    dumpProcess.stdout.pipe(writeStream);
-
-    dumpProcess.stderr.on('data', (data) => {
+    proc.stdout.pipe(writeStream);
+    proc.stderr.on('data', (data: Buffer) => {
         const msg = data.toString().trim();
         if (msg && !msg.includes('NOTICE:')) {
             log(msg, 'info');
@@ -118,85 +101,30 @@ async function dumpSingleDatabase(
     });
 
     await new Promise<void>((resolve, reject) => {
-        dumpProcess.on('close', (code) => {
-            if (code === 0) resolve();
-            else reject(new Error(`pg_dump for ${dbName} exited with code ${code}`));
-        });
-        dumpProcess.on('error', (err) => reject(err));
-        writeStream.on('error', (err) => reject(err));
+        writeStream.on('error', reject);
+        writeStream.on('finish', resolve);
+        proc.exit().then(
+            ({ code, signal }) => {
+                if (code !== 0) {
+                    writeStream.destroy();
+                    reject(new Error(
+                        `pg_dump for ${dbName} exited with code ${code ?? 'null'}${signal ? ` (signal: ${signal})` : ''}`,
+                    ));
+                }
+            },
+            reject,
+        );
     });
 }
 
-/**
- * SSH variant: run pg_dump on the remote server and stream custom-format output to a local file.
- */
-async function dumpSingleDatabaseSSH(
-    dbName: string,
-    outputPath: string,
-    config: PostgresDumpConfig,
-    log: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
-): Promise<void> {
-    const sshConfig = extractSshConfig(config)!;
-    const ssh = new SshClient();
-    await ssh.connect(sshConfig);
-
-    try {
-        const pgDumpBin = await remoteBinaryCheck(ssh, "pg_dump");
-        const args = buildPsqlArgs(config);
-
-        const dumpArgs = [
-            ...args,
-            "-F", "c",
-            ...buildCompressionArgs(config.pgCompression),
-            "-d", shellEscape(dbName),
-        ];
-
-        if (config.options) {
-            const parts = config.options.match(/[^\s"']+|"([^"]*)"|'([^']*)'/g) || [];
-            for (const part of parts) {
-                if (part.startsWith('"') && part.endsWith('"')) {
-                    dumpArgs.push(part.slice(1, -1));
-                } else if (part.startsWith("'") && part.endsWith("'")) {
-                    dumpArgs.push(part.slice(1, -1));
-                } else {
-                    dumpArgs.push(part);
-                }
-            }
-        }
-
-        const env: Record<string, string | undefined> = {};
-        if (config.password) env.PGPASSWORD = config.password;
-
-        const cmd = remoteEnv(env, `${pgDumpBin} ${dumpArgs.join(" ")}`);
-        log(`Dumping database (SSH): ${dbName}`, 'info', 'command', `pg_dump ${dumpArgs.join(' ')}`);
-
-        const writeStream = createWriteStream(outputPath);
-
-        await new Promise<void>((resolve, reject) => {
-            ssh.execStream(cmd, (err, stream) => {
-                if (err) return reject(err);
-
-                stream.pipe(writeStream);
-
-                stream.stderr.on('data', (data: any) => {
-                    const msg = data.toString().trim();
-                    if (msg && !msg.includes('NOTICE:')) {
-                        log(msg, 'info');
-                    }
-                });
-
-                stream.on('exit', (code: number | null, signal?: string) => {
-                    if (code === 0) resolve();
-                    else reject(new Error(`Remote pg_dump for ${dbName} exited with code ${code ?? 'null'}${signal ? ` (signal: ${signal})` : ''}`));
-                });
-
-                stream.on('error', (err: Error) => reject(err));
-                writeStream.on('error', (err: Error) => reject(err));
-            });
-        });
-    } finally {
-        ssh.end();
-    }
+/** Split a user-supplied option string, honouring single and double quotes. */
+function parseOptionString(options: string): string[] {
+    const parts = options.match(/[^\s"']+|"([^"]*)"|'([^']*)'/g) || [];
+    return parts.map((part) => {
+        if (part.startsWith('"') && part.endsWith('"')) return part.slice(1, -1);
+        if (part.startsWith("'") && part.endsWith("'")) return part.slice(1, -1);
+        return part;
+    });
 }
 
 /**
@@ -208,11 +136,10 @@ export async function dumpOne(
     config: PostgresDumpConfig,
     dbName: string,
     destinationPath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<{ size: number }> {
-    const env = { ...process.env };
-    if (config.password) env.PGPASSWORD = config.password;
-    await dumpSingleDatabase(dbName, destinationPath, config, env, onLog ?? (() => {}));
+    await dumpSingleDatabase(dbName, destinationPath, config, _host, onLog ?? (() => {}));
     const stats = await fs.stat(destinationPath);
     return { size: stats.size };
 }
@@ -220,6 +147,7 @@ export async function dumpOne(
 export async function dump(
     config: PostgresDumpConfig,
     destinationPath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     _onProgress?: (percentage: number) => void
 ): Promise<BackupResult> {
@@ -234,11 +162,6 @@ export async function dump(
     let tempDir: string | null = null;
 
     try {
-        const env = { ...process.env };
-        if (config.password) {
-            env.PGPASSWORD = config.password;
-        }
-
         // Determine databases
         let dbs: string[] = [];
         if (Array.isArray(config.database)) {
@@ -255,7 +178,7 @@ export async function dump(
         // Auto-discover all databases if none specified
         if (dbs.length === 0) {
             log("No DB selected - auto-discovering all databases…", "info");
-            dbs = await getDatabases(config);
+            dbs = await getDatabases(config, _host);
             log(`Discovered ${dbs.length} database(s): ${dbs.join(", ")}`, "info");
             if (dbs.length === 0) {
                 throw new Error("No databases found on the server");
@@ -265,7 +188,7 @@ export async function dump(
         // Case 1: Single Database - Direct dump with custom format
         if (dbs.length <= 1) {
             log(`Starting single-database dump (custom format)`, 'info');
-            await dumpSingleDatabase(dbs[0], destinationPath, config, env, log);
+            await dumpSingleDatabase(dbs[0], destinationPath, config, _host, log);
         }
         // Case 2: Multiple Databases - TAR archive with individual pg_dump per DB
         else {
@@ -282,7 +205,7 @@ export async function dump(
                 const dumpFilename = `${dbName}.dump`;
                 const dumpPath = path.join(tempDir, dumpFilename);
 
-                await dumpSingleDatabase(dbName, dumpPath, config, env, log);
+                await dumpSingleDatabase(dbName, dumpPath, config, _host, log);
                 log(`Database ${dbName} dumped successfully`, 'success');
 
                 tarFiles.push({
@@ -317,7 +240,10 @@ export async function dump(
 
     } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
-        log(`Dump failed: ${message}`, 'error');
+        // Not logged here: the caller turns this into a thrown
+        // `Dump failed: <message>` that the runner reports. Logging it
+        // too put the same failure in the run log twice, which the
+        // other database adapters never did.
         return {
             success: false,
             logs,

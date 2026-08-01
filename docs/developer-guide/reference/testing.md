@@ -153,6 +153,16 @@ Test adapters against real database instances.
 pnpm test:integration
 ```
 
+#### SSH mode
+
+`ssh-mode.test.ts` runs the same operations through the `ssh-host` container, a Debian image with sshd and the database client tools. Each source addresses its database by **compose service name**, which resolves only from inside that container - so a passing test proves the command really ran on the remote host. Those tests need no local CLI tools at all, since the tools live on the target.
+
+The key pair is generated into `.ssh-test/` by `scripts/ensure-ssh-test-key.sh`, which both `pnpm test:integration` and `pnpm test:env:up` call. It is gitignored, so no private key enters the repository. The file skips cleanly when the container is not reachable.
+
+Two engines are covered by an older version than the direct tests use, because a client cannot read a server newer than itself: MySQL 5.7 (MySQL 9 dropped `mysql_native_password`) and PostgreSQL 12 (Debian ships `pg_dump` 15). MongoDB and Firebird are not covered, their tools are not in Debian's repositories.
+
+For those, and for testing against a real distribution's package set, use the Multipass VM (`pnpm test:vm:up`). The container proves the transport mechanics; the VM proves it works on a real system.
+
 **Example**:
 ```typescript
 // tests/integration/adapters/mysql.test.ts

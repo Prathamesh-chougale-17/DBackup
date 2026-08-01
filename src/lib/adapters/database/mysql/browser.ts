@@ -1,17 +1,7 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { MySQLConfig } from "@/lib/adapters/definitions";
 import { TableInfo, ColumnInfo, TableDataOptions, TableDataResult } from "@/lib/core/interfaces";
-import {
-    SshClient,
-    isSSHMode,
-    extractSshConfig,
-    buildMysqlArgs,
-    withLocalMyCnf,
-    withRemoteMyCnf,
-    remoteBinaryCheck,
-    shellEscape,
-} from "@/lib/ssh";
-import { getMysqlCommand } from "./tools";
-import { execFileAsync } from "./connection";
+import { MYSQL_CLIENT, buildConnectionArgs, withAuthArgs } from "./args";
 
 /** Sanitize a MySQL identifier (database/table/column name) for use in backtick-quoted SQL. */
 function escapeMysqlIdentifier(name: string): string {
@@ -91,44 +81,27 @@ function parseDataRows(
         });
 }
 
-export async function getTables(config: MySQLConfig, database: string): Promise<TableInfo[]> {
+export async function getTables(config: MySQLConfig, database: string, host: ExecutionHost): Promise<TableInfo[]> {
     const query = tablesQuery(database);
+    const mysqlBin = await host.which(...MYSQL_CLIENT);
+    const connArgs = buildConnectionArgs(config, host);
 
-    if (isSSHMode(config)) {
-        const ssh = new SshClient();
-        try {
-            await ssh.connect(extractSshConfig(config)!);
-            const mysqlBin = await remoteBinaryCheck(ssh, "mariadb", "mysql");
-            const args = buildMysqlArgs(config);
-
-            return await withRemoteMyCnf(ssh, config.password, async (cnfPath) => {
-                const prefix = cnfPath ? `--defaults-file=${shellEscape(cnfPath)} ` : "";
-                const cmd = `${mysqlBin} ${prefix}${args.join(" ")} -e ${shellEscape(query)} --skip-column-names --batch`;
-                const result = await ssh.exec(cmd);
-                if (result.code !== 0) {
-                    throw new Error(`Failed to list tables: ${result.stderr}`);
-                }
-                return parseTablesOutput(result.stdout);
-            });
-        } finally {
-            ssh.end();
+    return withAuthArgs(host, config.password, async (authArgs) => {
+        const result = await host.exec([
+            mysqlBin, ...authArgs, ...connArgs,
+            "-e", query, "--skip-column-names", "--batch",
+        ]);
+        if (result.code !== 0) {
+            throw new Error(`Failed to list tables: ${result.stderr.trim()}`);
         }
-    }
-
-    const baseArgs = ["-h", config.host, "-P", String(config.port), "-u", config.user, "--protocol=tcp"];
-    if (config.disableSsl) baseArgs.push("--skip-ssl");
-    baseArgs.push("-e", query, "--skip-column-names", "--batch");
-
-    return withLocalMyCnf(config.password, async (cnfPath) => {
-        const args = cnfPath ? [`--defaults-file=${cnfPath}`, ...baseArgs] : baseArgs;
-        const { stdout } = await execFileAsync(getMysqlCommand(), args);
-        return parseTablesOutput(stdout);
+        return parseTablesOutput(result.stdout);
     });
 }
 
 export async function getTableData(
     config: MySQLConfig,
-    options: TableDataOptions
+    options: TableDataOptions,
+    host: ExecutionHost,
 ): Promise<TableDataResult> {
     const { database, table, page, pageSize, sortBy, sortDir, search, searchColumn, matchMode } = options;
     const offset = (page - 1) * pageSize;
@@ -150,54 +123,27 @@ export async function getTableData(
     const dataQuery = `SELECT * FROM \`${dbId}\`.\`${tblId}\`${whereClause}${sortClause} LIMIT ${pageSize} OFFSET ${offset}`;
     const colQuery = columnsQuery(database, table);
 
-    if (isSSHMode(config)) {
-        const ssh = new SshClient();
-        try {
-            await ssh.connect(extractSshConfig(config)!);
-            const mysqlBin = await remoteBinaryCheck(ssh, "mariadb", "mysql");
-            const args = buildMysqlArgs(config);
+    const mysqlBin = await host.which(...MYSQL_CLIENT);
+    const connArgs = buildConnectionArgs(config, host);
 
-            return await withRemoteMyCnf(ssh, config.password, async (cnfPath) => {
-                const prefix = cnfPath ? `--defaults-file=${shellEscape(cnfPath)} ` : "";
-                const base = `${mysqlBin} ${prefix}${args.join(" ")} --skip-column-names --batch`;
+    return withAuthArgs(host, config.password, async (authArgs) => {
+        const base = [mysqlBin, ...authArgs, ...connArgs, "--skip-column-names", "--batch"];
 
-                const [colResult, countResult, dataResult] = await Promise.all([
-                    ssh.exec(`${base} -e ${shellEscape(colQuery)}`),
-                    ssh.exec(`${base} -e ${shellEscape(countQuery)}`),
-                    ssh.exec(`${base} -e ${shellEscape(dataQuery)}`),
-                ]);
-
-                if (colResult.code !== 0) throw new Error(`Column query failed: ${colResult.stderr}`);
-                if (countResult.code !== 0) throw new Error(`Count query failed: ${countResult.stderr}`);
-                if (dataResult.code !== 0) throw new Error(`Data query failed: ${dataResult.stderr}`);
-
-                const columns = parseColumnsOutput(colResult.stdout);
-                const totalCount = parseInt(countResult.stdout.trim(), 10) || 0;
-                const rows = parseDataRows(dataResult.stdout, columns);
-
-                return { rows, totalCount, columns };
-            });
-        } finally {
-            ssh.end();
-        }
-    }
-
-    const baseArgs = ["-h", config.host, "-P", String(config.port), "-u", config.user, "--protocol=tcp"];
-    if (config.disableSsl) baseArgs.push("--skip-ssl");
-
-    return withLocalMyCnf(config.password, async (cnfPath) => {
-        const cnfPrefix = cnfPath ? [`--defaults-file=${cnfPath}`] : [];
-        const base = [...cnfPrefix, ...baseArgs, "--skip-column-names", "--batch"];
-
-        const [colOut, countOut, dataOut] = await Promise.all([
-            execFileAsync(getMysqlCommand(), [...base, "-e", colQuery]),
-            execFileAsync(getMysqlCommand(), [...base, "-e", countQuery]),
-            execFileAsync(getMysqlCommand(), [...base, "-e", dataQuery]),
+        // Three concurrent queries. Over SSH each one is a separate channel, which
+        // the transport caps so a wide fan-out cannot exhaust the server session limit.
+        const [colResult, countResult, dataResult] = await Promise.all([
+            host.exec([...base, "-e", colQuery]),
+            host.exec([...base, "-e", countQuery]),
+            host.exec([...base, "-e", dataQuery]),
         ]);
 
-        const columns = parseColumnsOutput(colOut.stdout);
-        const totalCount = parseInt(countOut.stdout.trim(), 10) || 0;
-        const rows = parseDataRows(dataOut.stdout, columns);
+        if (colResult.code !== 0) throw new Error(`Column query failed: ${colResult.stderr.trim()}`);
+        if (countResult.code !== 0) throw new Error(`Count query failed: ${countResult.stderr.trim()}`);
+        if (dataResult.code !== 0) throw new Error(`Data query failed: ${dataResult.stderr.trim()}`);
+
+        const columns = parseColumnsOutput(colResult.stdout);
+        const totalCount = parseInt(countResult.stdout.trim(), 10) || 0;
+        const rows = parseDataRows(dataResult.stdout, columns);
 
         return { rows, totalCount, columns };
     });

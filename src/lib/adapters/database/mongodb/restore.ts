@@ -1,13 +1,11 @@
+import type { ExecutionHost } from "@/lib/transport";
+import { MONGORESTORE, buildConnectionArgs } from "./args";
+import { maskSecrets } from "../redis/args";
+import { withMongoMeta } from "./meta";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
-import { MongoClient } from "mongodb";
 import { MongoDBConfig } from "@/lib/adapters/definitions";
-import { spawn } from "child_process";
-import { createReadStream } from "fs";
-import fs from "fs/promises";
-import { waitForProcess } from "@/lib/adapters/process";
 import path from "path";
-import { randomUUID } from "crypto";
 import {
     isMultiDbTar,
     extractSelectedDatabases,
@@ -16,14 +14,6 @@ import {
     shouldRestoreDatabase,
     getTargetDatabaseName,
 } from "../common/tar-utils";
-import {
-    SshClient,
-    isSSHMode,
-    extractSshConfig,
-    buildMongoArgs,
-    remoteBinaryCheck,
-    shellEscape,
-} from "@/lib/ssh";
 
 /** Extended config with optional privileged auth for restore operations */
 type MongoDBRestoreConfig = MongoDBConfig & {
@@ -43,64 +33,30 @@ type MongoDBRestoreConfig = MongoDBConfig & {
 /**
  * Build MongoDB connection URI from config
  */
-function buildConnectionUri(config: MongoDBConfig): string {
-    if (config.uri) {
-        return config.uri;
-    }
 
-    const auth = config.user && config.password
-        ? `${encodeURIComponent(config.user)}:${encodeURIComponent(config.password)}@`
-        : "";
-    const authDb = config.authenticationDatabase || "admin";
-    const authParam = config.user ? `?authSource=${authDb}` : "";
+export async function prepareRestore(
+    config: MongoDBRestoreConfig,
+    databases: string[],
+    host: ExecutionHost,
+): Promise<void> {
+    if (!host) throw new Error("MongoDB adapter requires an execution host. Call it through withHost().");
 
-    return `mongodb://${auth}${config.host}:${config.port}/${authParam}`;
-}
-
-export async function prepareRestore(config: MongoDBRestoreConfig, databases: string[]): Promise<void> {
-    if (isSSHMode(config)) {
-        // In SSH mode, we trust mongorestore to create databases. Skip the permission check.
-        return;
-    }
-
-    // Determine credentials (privileged or standard)
+    // Probe with the privileged credentials when they are configured, since
+    // those are the ones the restore itself will use.
     const usageConfig: MongoDBConfig = { ...config };
     if (config.privilegedAuth) {
         usageConfig.user = config.privilegedAuth.user;
         usageConfig.password = config.privilegedAuth.password;
     }
 
-    let client: MongoClient | null = null;
-
-    try {
-        const uri = buildConnectionUri(usageConfig);
-        client = new MongoClient(uri, {
-            connectTimeoutMS: 10000,
-            serverSelectionTimeoutMS: 10000,
-        });
-
-        await client.connect();
-
+    await withMongoMeta(usageConfig, host, async (meta) => {
         for (const dbName of databases) {
-            try {
-                // Test write permission by creating and dropping a temporary collection
-                const targetDb = client.db(dbName);
-                await targetDb.createCollection("__perm_check_tmp");
-                await targetDb.collection("__perm_check_tmp").drop();
-            } catch (e: unknown) {
-                const err = e as { message?: string; codeName?: string };
-                const msg = err.message || err.codeName || "";
-                if (msg.includes("not authorized") || msg.includes("Authorization") || msg.includes("requires authentication") || msg.includes("command create requires")) {
-                    throw new Error(`Access denied to database '${dbName}'. Permissions?`);
-                }
-                throw e;
-            }
+            // Null means this transport cannot probe, in which case mongorestore
+            // reports any permission problem itself.
+            const probe = meta.checkWritable(dbName);
+            if (probe) await probe;
         }
-    } finally {
-        if (client) {
-            await client.close().catch(() => {});
-        }
-    }
+    });
 }
 
 /**
@@ -111,153 +67,45 @@ async function restoreSingleDatabase(
     targetDb: string | undefined,
     sourceDb: string | undefined,
     config: MongoDBRestoreConfig,
+    host: ExecutionHost,
     log: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
-    fromStdin: boolean = false
 ): Promise<void> {
-    if (isSSHMode(config)) {
-        return restoreSingleDatabaseSSH(sourcePath, targetDb, sourceDb, config, log);
-    }
+    const mongorestore = await host.which(...MONGORESTORE);
 
-    const args: string[] = [];
-
-    if (config.uri) {
-        args.push(`--uri=${config.uri}`);
-    } else {
-        args.push('--host', config.host);
-        args.push('--port', String(config.port));
-
-        if (config.user && config.password) {
-            args.push('--username', config.user);
-            args.push('--password', config.password);
-            args.push('--authenticationDatabase', config.authenticationDatabase || 'admin');
-        }
-    }
-
-    if (fromStdin) {
-        args.push('--archive');
-    } else {
-        args.push(`--archive=${sourcePath}`);
-    }
-    args.push('--gzip');
-    args.push('--drop'); // Drop collections before restoring (like MySQL --clean)
-
-    // Handle database renaming with nsFrom/nsTo
-    if (sourceDb && targetDb && sourceDb !== targetDb) {
-        args.push('--nsFrom', `${sourceDb}.*`);
-        args.push('--nsTo', `${targetDb}.*`);
-        log(`Remapping database: ${sourceDb} -> ${targetDb}`, 'info');
-    } else if (targetDb) {
-        // If only targetDb specified (single DB archive), just restore
-        args.push('--nsInclude', `${targetDb}.*`);
-    }
-
-    // Mask password in logs
-    const logArgs = args.map(arg => {
-        if (arg.startsWith('--password')) return '--password=******';
-        if (arg.startsWith('mongodb')) return 'mongodb://...';
-        return arg;
-    });
-
-    log(`Restoring database`, 'info', 'command', `mongorestore ${logArgs.join(' ')}`);
-
-    const restoreProcess = spawn('mongorestore', args);
-
-    if (fromStdin) {
-        const readStream = createReadStream(sourcePath);
-        readStream.pipe(restoreProcess.stdin);
-
-        readStream.on('error', (err) => {
-            log(`Read stream error: ${err.message}`, 'error');
-            restoreProcess.kill();
-        });
-    }
-
-    restoreProcess.stderr.on('data', (data) => {
-        const msg = data.toString().trim();
-        if (msg) log(`[mongorestore] ${msg}`, 'info');
-    });
-
-    await waitForProcess(restoreProcess, 'mongorestore');
-}
-
-/**
- * SSH variant: upload archive via SFTP, then run mongorestore on the remote server.
- * Uses SFTP protocol which guarantees data integrity (unlike piping through exec stdin).
- */
-async function restoreSingleDatabaseSSH(
-    sourcePath: string,
-    targetDb: string | undefined,
-    sourceDb: string | undefined,
-    config: MongoDBRestoreConfig,
-    log: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
-): Promise<void> {
-    const sshConfig = extractSshConfig(config)!;
-    const ssh = new SshClient();
-    await ssh.connect(sshConfig);
-
-    const remoteTempFile = `/tmp/dbackup_mongorestore_${randomUUID()}.archive`;
-
-    try {
-        const mongorestoreBin = await remoteBinaryCheck(ssh, "mongorestore");
-        const args = buildMongoArgs(config);
-
-        args.push(`--archive=${shellEscape(remoteTempFile)}`);
-        args.push("--gzip");
-        args.push("--drop");
+    // mongorestore reads the archive from a path, so it is staged onto the
+    // execution host. On a direct host that is the original file with no copy.
+    await host.stageInput(sourcePath, {}, async (stagedPath) => {
+        const args = [
+            ...buildConnectionArgs(config),
+            `--archive=${stagedPath}`,
+            "--gzip",
+            "--drop", // Drop collections before restoring, mirroring MySQL's --clean
+        ];
 
         if (sourceDb && targetDb && sourceDb !== targetDb) {
-            args.push("--nsFrom", shellEscape(`${sourceDb}.*`));
-            args.push("--nsTo", shellEscape(`${targetDb}.*`));
-            log(`Remapping database: ${sourceDb} -> ${targetDb}`, 'info');
+            args.push("--nsFrom", `${sourceDb}.*`);
+            args.push("--nsTo", `${targetDb}.*`);
+            log(`Remapping database: ${sourceDb} -> ${targetDb}`, "info");
         } else if (targetDb) {
-            args.push("--nsInclude", shellEscape(`${targetDb}.*`));
+            args.push("--nsInclude", `${targetDb}.*`);
         }
 
-        // 1. Upload archive to remote via SFTP
-        const totalSize = (await fs.stat(sourcePath)).size;
-        log(`Uploading archive to remote server via SFTP (${(totalSize / 1024 / 1024).toFixed(1)} MB)...`, 'info');
-        await ssh.uploadFile(sourcePath, remoteTempFile);
+        log("Restoring database", "info", "command", `${mongorestore} ${maskSecrets(args, config.password)}`);
 
-        // Verify upload integrity
-        try {
-            const sizeCheck = await ssh.exec(`stat -c '%s' ${shellEscape(remoteTempFile)} 2>/dev/null || stat -f '%z' ${shellEscape(remoteTempFile)}`);
-            const remoteSize = parseInt(sizeCheck.stdout.trim(), 10);
-            if (remoteSize !== totalSize) {
-                throw new Error(`Upload size mismatch! Local: ${totalSize}, Remote: ${remoteSize}`);
-            }
-            log(`Upload verified: ${(remoteSize / 1024 / 1024).toFixed(1)} MB`);
-        } catch (e) {
-            if (e instanceof Error && e.message.includes('mismatch')) throw e;
-        }
-
-        // 2. Run mongorestore on the remote server
-        const cmd = `${mongorestoreBin} ${args.join(" ")}`;
-        log(`Restoring database (SSH)`, 'info', 'command', `mongorestore ${args.join(' ').replace(config.password || '___NONE___', '******')}`);
-
-        await new Promise<void>((resolve, reject) => {
-            ssh.execStream(cmd, (err, stream) => {
-                if (err) return reject(err);
-
-                stream.on('data', () => {});
-
-                stream.stderr.on('data', (data: any) => {
-                    const msg = data.toString().trim();
-                    if (msg) log(`[mongorestore] ${msg}`, 'info');
-                });
-
-                stream.on('exit', (code: number | null, signal?: string) => {
-                    if (code === 0) resolve();
-                    else reject(new Error(`Remote mongorestore exited with code ${code ?? 'null'}${signal ? ` (signal: ${signal})` : ''}`));
-                });
-
-                stream.on('error', (err: Error) => reject(err));
-            });
+        const proc = await host.spawn([mongorestore, ...args]);
+        proc.stdout.on("data", () => { /* mongorestore writes progress to stderr */ });
+        proc.stderr.on("data", (data: Buffer) => {
+            const msg = data.toString().trim();
+            if (msg) log(`[mongorestore] ${msg}`, "info");
         });
-    } finally {
-        // Cleanup remote temp file
-        await ssh.exec(`rm -f ${shellEscape(remoteTempFile)}`).catch(() => {});
-        ssh.end();
-    }
+
+        const { code, signal } = await proc.exit();
+        if (code !== 0) {
+            throw new Error(
+                `mongorestore exited with code ${code ?? "null"}${signal ? ` (signal: ${signal})` : ""}`,
+            );
+        }
+    });
 }
 
 /**
@@ -271,16 +119,18 @@ export async function restoreOne(
     config: MongoDBRestoreConfig,
     filePath: string,
     targetDbName: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     _onProgress?: (percentage: number, detail?: string) => void,
     originalDbName?: string
 ): Promise<void> {
-    await restoreSingleDatabase(filePath, targetDbName, originalDbName, config, onLog ?? (() => {}), false);
+    await restoreSingleDatabase(filePath, targetDbName, originalDbName, config, _host, onLog ?? (() => {}));
 }
 
 export async function restore(
     config: MongoDBRestoreConfig,
     sourcePath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     onProgress?: (percentage: number) => void
 ): Promise<BackupResult> {
@@ -337,10 +187,10 @@ export async function restore(
                 log(`Restoring database: ${dbEntry.name} -> ${targetDb}`, 'info');
 
                 // Prepare restore (permission check)
-                await prepareRestore(config, [targetDb]);
+                await prepareRestore(config, [targetDb], _host);
 
                 // Restore using mongorestore with nsFrom/nsTo for renaming
-                await restoreSingleDatabase(archivePath, targetDb, dbEntry.name, config, log, false);
+                await restoreSingleDatabase(archivePath, targetDb, dbEntry.name, config, _host, log);
                 log(`Database ${targetDb} restored successfully`, 'success');
 
                 processed++;
@@ -380,64 +230,7 @@ export async function restore(
             }
 
             // Build restore arguments
-            const args: string[] = [];
-
-            if (config.uri) {
-                args.push(`--uri=${config.uri}`);
-            } else {
-                args.push('--host', config.host);
-                args.push('--port', String(config.port));
-
-                if (config.user && config.password) {
-                    args.push('--username', config.user);
-                    args.push('--password', config.password);
-                    args.push('--authenticationDatabase', config.authenticationDatabase || 'admin');
-                }
-            }
-
-            args.push('--archive');
-            args.push('--gzip');
-            args.push('--drop');
-
-            // Handle database renaming with nsFrom/nsTo
-            if (sourceDb && targetDb && sourceDb !== targetDb) {
-                args.push('--nsFrom', `${sourceDb}.*`);
-                args.push('--nsTo', `${targetDb}.*`);
-                log(`Restoring database: ${sourceDb} -> ${targetDb}`, 'info');
-            } else if (sourceDb) {
-                log(`Restoring database: ${sourceDb}`, 'info');
-            }
-
-            // Masking for logs
-            const logArgs = args.map(arg => {
-                if (arg.startsWith('--password')) return '--password=******';
-                if (arg.startsWith('mongodb')) return 'mongodb://...';
-                return arg;
-            });
-
-            log(`Restoring database`, 'info', 'command', `mongorestore ${logArgs.join(' ')}`);
-
-            // Spawn process
-            const restoreProcess = spawn('mongorestore', args);
-            const readStream = createReadStream(sourcePath);
-
-            readStream.pipe(restoreProcess.stdin);
-
-            restoreProcess.stderr.on('data', (data) => {
-                const msg = data.toString().trim();
-                if (msg) {
-                    // mongorestore writes progress to stderr - log as info, not error
-                    log(`[mongorestore] ${msg}`, 'info');
-                }
-            });
-
-            // Handle stream errors
-            readStream.on('error', (err) => {
-                log(`Read stream error: ${err.message}`, 'error');
-                restoreProcess.kill();
-            });
-
-            await waitForProcess(restoreProcess, 'mongorestore');
+            await restoreSingleDatabase(sourcePath, targetDb, sourceDb, config, _host, log);
         }
 
         return {

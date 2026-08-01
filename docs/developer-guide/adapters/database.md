@@ -11,7 +11,7 @@ Database adapters handle the dump and restore operations for different database 
 | PostgreSQL | `postgres` | `psql`, `pg_dump`, `pg_restore` | ✅ | `.sql` |
 | MongoDB | `mongodb` | `mongodump`, `mongorestore` | ✅ | `.archive` |
 | SQLite | `sqlite` | None (file copy) | ✅ | `.db` |
-| MSSQL | `mssql` | None (TDS protocol) | ❌ (uses SFTP) | `.bak` |
+| MSSQL | `mssql` | None (TDS protocol) | ✅ (TDS tunnelled) | `.bak` |
 | Redis | `redis` | `redis-cli` | ✅ | `.rdb` |
 | Firebird | `firebird` | `gbak`, `isql` | ✅ | `.fbk` |
 
@@ -70,10 +70,15 @@ interface DatabaseAdapter {
   type: "database";
   name: string;
 
+  // Optional: builds a TransportSpec from the config.
+  // Omit for the standard `connectionMode` convention.
+  transport?: TransportResolver;
+
   // Core operations
   dump(
     config: unknown,
     destinationPath: string,
+    host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     onProgress?: (percentage: number) => void
   ): Promise<BackupResult>;
@@ -81,30 +86,35 @@ interface DatabaseAdapter {
   restore(
     config: unknown,
     sourcePath: string,
+    host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     onProgress?: (percentage: number) => void
   ): Promise<BackupResult>;
 
   // Connection tests
-  test?(config: unknown): Promise<TestResult>;  // Full write/delete test (~15 s timeout)
-  ping?(config: unknown): Promise<TestResult>;  // Lightweight connectivity check (no test file written)
+  test?(config: unknown, host: ExecutionHost): Promise<TestResult>;  // Full write/delete test (~15 s timeout)
+  ping?(config: unknown, host: ExecutionHost): Promise<TestResult>;  // Lightweight connectivity check
 
   // Optional: database discovery
-  getDatabases?(config: unknown): Promise<string[]>;
-  getDatabasesWithStats?(config: unknown): Promise<DatabaseInfo[]>;
+  getDatabases?(config: unknown, host: ExecutionHost): Promise<string[]>;
+  getDatabasesWithStats?(config: unknown, host: ExecutionHost): Promise<DatabaseInfo[]>;
 
   // Optional: restore helpers
-  prepareRestore?(config: unknown, databases: string[]): Promise<void>;
-  analyzeDump?(sourcePath: string): Promise<string[]>;
+  prepareRestore?(config: unknown, databases: string[], host: ExecutionHost): Promise<void>;
+  analyzeDump?(sourcePath: string): Promise<string[]>;  // Reads a local file, needs no host
 
   // Optional: table/data inspection (Database Explorer UI)
-  getTables?(config: unknown, database: string): Promise<TableInfo[]>;
-  getTableData?(config: unknown, options: TableDataOptions): Promise<TableDataResult>;
+  getTables?(config: unknown, database: string, host: ExecutionHost): Promise<TableInfo[]>;
+  getTableData?(config: unknown, options: TableDataOptions, host: ExecutionHost): Promise<TableDataResult>;
 }
 ```
 
 ::: info No `configSchema` on the adapter
 The Zod schema for an adapter's configuration lives in `src/lib/adapters/definitions/database.ts` (or `storage.ts` / `notification.ts`), registered in `ADAPTER_DEFINITIONS`. It is not a property on the adapter instance itself.
+:::
+
+::: warning `host` is required and positional
+It sits after the mandatory arguments and before the optional callbacks. That position is deliberate: `AdapterConfig` is `any`, so a misplaced argument next to it would be swallowed silently. Next to a typed parameter, forgetting the host is an arity error the compiler cannot suppress.
 :::
 
 ## Database Stats (`getDatabasesWithStats`)
@@ -150,134 +160,159 @@ Returns:
 
 If `getDatabasesWithStats()` is not implemented, falls back to `getDatabases()` and returns names only (without size/table count).
 
-## SSH Mode Architecture
+## Transport Architecture (`src/lib/transport/`)
 
-Most database adapters support an SSH remote execution mode. Instead of running CLI tools locally and connecting to the database over TCP, DBackup connects via SSH to the target server and runs database tools **remotely**. This is **not** an SSH tunnel - the dump/restore commands execute on the remote host.
+An adapter describes **what** runs. An `ExecutionHost` decides **how** and **where** it runs. Adapters have exactly one code path, and `direct`, `ssh` (and later an agent) are interchangeable implementations behind it.
 
-### Shared SSH Infrastructure (`src/lib/ssh/`)
+In SSH mode this is **not** a tunnel for the database protocol: `mysqldump` and friends execute on the remote host and their stdout is streamed back. The one exception is MSSQL, described below.
 
-```
-src/lib/ssh/
-├── index.ts           # Re-exports
-├── ssh-client.ts      # SshClient class (connect, exec, execStream, end)
-└── utils.ts           # shellEscape, remoteEnv, remoteBinaryCheck, extractSshConfig, arg builders
-```
-
-#### `SshClient`
-
-Generic SSH2 client used by all adapters:
+### The `ExecutionHost` interface
 
 ```typescript
-import { SshClient, SshConnectionConfig } from "@/lib/ssh";
+interface ExecutionHost {
+  readonly kind: "direct" | "ssh";
+  readonly label: string;   // loggable target, never contains secrets
+  readonly tmpDir: string;
 
-const client = new SshClient();
-await client.connect(sshConfig);
+  exec(argv: string[], options?: ExecOptions): Promise<ExecResult>;
+  spawn(argv: string[], options?: SpawnOptions): Promise<HostProcess>;
+  which(...candidates: string[]): Promise<string>;   // first match in this host's PATH, memoized
 
-// Simple command execution (buffered)
-const result = await client.exec("mysqldump --version");
-// { stdout: "...", stderr: "...", code: 0 }
+  withTempFile<T>(options: TempFileOptions, fn: (path: string) => Promise<T>): Promise<T>;
+  stageInput<T>(localPath: string, options, fn: (hostPath: string) => Promise<T>): Promise<T>;
+  captureOutput<T>(localPath: string, options, fn: (hostPath: string) => Promise<T>): Promise<T>;
 
-// Streaming execution (for dumps - pipes stdout to a writable stream)
-const stream = await client.execStream("pg_dump -F c mydb");
-stream.pipe(outputFile);
+  putFile(localPath: string, hostPath: string, options?): Promise<void>;
+  getFile(hostPath: string, localPath: string, options?): Promise<void>;
+  removeFile(hostPath: string): Promise<void>;
+  stat(hostPath: string): Promise<{ size: number; isDirectory: boolean } | null>;
 
-client.end();
+  connect(remoteHost: string, remotePort: number): Promise<Duplex>;    // TCP as seen by this host
+  forwardPort(remoteHost: string, remotePort: number): Promise<PortForward>;
+
+  dispose(): Promise<void>;   // idempotent
+}
 ```
 
-Configuration: `readyTimeout: 20000ms`, `keepaliveInterval: 10000ms`, `keepaliveCountMax: 3`.
+Two rules carry the whole design:
 
-#### Shared Utilities
+- **`exec` never throws on a non-zero exit.** It returns `code`. Several adapters treat specific non-zero exits as success (`pg_restore` warnings) or probe a list of candidate databases until one answers. Throwing would break both, so always check `result.code !== 0` explicitly.
+- **`argv: string[]`, never a shell string.** `shellEscape` is an implementation detail of `SshHost` with one test suite, instead of an injection surface at every call site.
 
-| Function | Purpose |
+`exec()` is implemented once in `BaseHost` on top of `spawn()`, so a new transport only needs `spawn`, `which`, the file operations and `connect`.
+
+### Resolving the transport
+
+```typescript
+type TransportSpec =
+  | { kind: "direct" }
+  | { kind: "ssh"; ssh: SshConnectionConfig }
+  | { kind: "composite"; exec: TransportSpec; files: TransportSpec };
+
+type TransportResolver = (config: Record<string, unknown>) => TransportSpec;
+```
+
+Most adapters need no resolver. `standardTransport` reads `connectionMode` plus the prefixed `sshHost` / `sshUsername` fields from `sshFields`. Adapters that deviate declare their own `transport` and keep the knowledge next to the adapter:
+
+| Adapter | Why it needs a resolver |
 | :--- | :--- |
-| `shellEscape(value)` | Wraps value in single quotes, escapes embedded quotes |
-| `remoteEnv(vars, cmd)` | Exports env vars before a command (e.g., `export MYSQL_PWD='...'; mysqldump`) - uses `export` to prevent password leaking in OOM kill reports |
-| `remoteBinaryCheck(client, ...candidates)` | Checks if binary exists on remote host, returns resolved path |
-| `isSSHMode(config)` | Returns `true` if `config.connectionMode === "ssh"` |
-| `extractSshConfig(config)` | Extracts `SshConnectionConfig` from adapter config with `sshHost` prefix |
-| `extractSqliteSshConfig(config)` | Same for SQLite (uses `host` instead of `sshHost`) |
-| `buildMysqlArgs(config)` | Builds MySQL CLI args from adapter config |
-| `buildPsqlArgs(config)` | Builds PostgreSQL CLI args |
-| `buildMongoArgs(config)` | Builds MongoDB CLI args |
-| `buildRedisArgs(config)` | Builds Redis CLI args |
+| `sqlite` | Uses `mode` and unprefixed `host` / `username`, because its credential slot has no primary and `config-resolver.ts` writes unprefixed keys. |
+| `mssql` | Combines `connectionMode` with the legacy `fileTransferMode`, see the truth table below. |
 
-#### Shared SSH Config Fields (`sshFields`)
+::: danger Zod defaults do not apply at runtime
+`resolveAdapterConfig` returns decrypted JSON without ever running the schema, so `z.enum([...]).default("direct")` never fires. A resolver must default `undefined` to direct **in code**. Stored rows predating a new field have no value for it.
+:::
 
-All SSH-capable schemas spread the shared `sshFields` object from `definitions.ts`:
+Resolution is per adapter on purpose. `RedisSchema` already has an unrelated `mode` field (`standalone` / `sentinel`), so a generic reader sniffing for `config.mode === "ssh"` would be one careless edit away from misfiring.
+
+### Lifecycle
+
+Creating a host is synchronous and does no I/O. `SshHost` memoizes a `Promise<Client>` and connects on first use. Lazy connection is not an optimization: `test()` must keep returning `{ success: false, message }` when a handshake fails, rather than throwing out of the wrapper and turning a HTTP 200 into a 500.
+
+Use the scope helper, which always disposes:
 
 ```typescript
-const sshFields = {
-  connectionMode: z.enum(["direct", "ssh"]).default("direct"),
-  sshHost: z.string().optional(),
-  sshPort: z.coerce.number().default(22).optional(),
-  sshUsername: z.string().optional(),
-  sshAuthType: z.enum(["password", "privateKey", "agent"]).default("password").optional(),
-  sshPassword: z.string().optional(),
-  sshPrivateKey: z.string().optional(),
-  sshPassphrase: z.string().optional(),
-};
+import { withHost } from "@/lib/transport";
 
-// Usage in schema:
-export const MySQLSchema = z.object({
-  host: z.string().default("localhost"),
-  // ... database fields ...
-  ...sshFields,
+const databases = await withHost(adapter, config, async (host) => {
+  return adapter.getDatabases!(config, host);
 });
 ```
 
-### Adding SSH Mode to an Adapter
+**One connection per job run.** The scope wraps several adapter calls, so a combined backup of N databases performs one handshake instead of N+2. Scopes live in `runner/steps/02-dump.ts`, `runner/steps/combined-dump.ts`, and the restore pipeline. The dump scope ends **before** the upload step, so no SSH connection hangs open during a multi-hour upload.
 
-Each adapter operation (`dump`, `restore`, `test`, `getDatabases`) checks for SSH mode and branches:
-
-```typescript
-import { isSSHMode, extractSshConfig } from "@/lib/ssh";
-
-async dump(config, destinationPath, onLog) {
-  const sshConfig = extractSshConfig(config);
-
-  if (sshConfig) {
-    return dumpViaSSH(config, sshConfig, destinationPath, onLog);
-  }
-  return dumpDirect(config, destinationPath, onLog);
-}
-```
-
-#### SSH Dump Pattern
+For code holding a `BaseAdapter` from the registry (health checks, connection-test routes), use the helpers in `transport/adapter-invoke.ts`:
 
 ```typescript
-async function dumpViaSSH(config, sshConfig, destPath, onLog) {
-  const client = new SshClient();
-  try {
-    await client.connect(sshConfig);
+import { runConnectivityCheck } from "@/lib/transport";
 
-    // 1. Check binary availability
-    const binary = await remoteBinaryCheck(client, "mysqldump", "mariadb-dump");
-
-    // 2. Build command with argument builder
-    const args = buildMysqlArgs(config);
-    const cmd = remoteEnv(
-      { MYSQL_PWD: config.password },
-      `${binary} ${args.join(" ")} --single-transaction ${shellEscape(config.database)}`
-    );
-
-    // 3. Stream output to local file
-    const stream = await client.execStream(cmd);
-    const output = createWriteStream(destPath);
-    stream.pipe(output);
-
-    await new Promise((resolve, reject) => {
-      stream.on("exit", (code) => code === 0 ? resolve() : reject());
-      stream.on("error", reject);
-    });
-  } finally {
-    client.end();
-  }
-}
+const result = await runConnectivityCheck(adapter, config, { timeoutMs: 15_000 });
 ```
 
-::: warning Event Handler
-Always use `stream.on("exit", ...)` instead of `stream.on("close", ...)` for SSH2 exec streams. The `close` event does not fire reliably when piping stdin/stdout through SSH channels.
+::: warning Timeouts belong inside the scope
+`runConnectivityCheck` applies its timeout **inside** `withHost`. Wrapping from outside means a timeout that fires mid-handshake skips the `finally` and leaks the socket, once per minute per offline source.
 :::
+
+There is no pooling. Two parallel jobs against the same server open two connections.
+
+### Adding a new adapter
+
+1. Take `host: ExecutionHost` as the parameter after your mandatory arguments.
+2. Call `host.which("mysqldump", "mariadb-dump")` instead of probing a binary yourself.
+3. Build **raw argv arrays**. Never escape anything.
+4. Pass secrets through `options.env`, never in argv. `SshHost` renders them into an `export` prefix so they stay out of the process table and out of OOM kill reports.
+5. Spread `...sshFields` into the schema, or declare a `transport` resolver if the field layout differs.
+6. Add the credential requirement entry with `ssh: "SSH_KEY"`.
+
+```typescript
+export async function dump(config: MySQLConfig, destPath: string, host: ExecutionHost, onLog?) {
+  const binary = await host.which("mysqldump", "mariadb-dump");
+  const argv = [binary, ...buildConnectionArgs(config, host), "--single-transaction", config.database];
+
+  return host.captureOutput(destPath, {}, async () => {
+    const proc = await host.spawn(argv, { env: { MYSQL_PWD: config.password } });
+    // ... pipe proc.stdout, await proc.exit()
+  });
+}
+```
+
+The same function serves both transports. There is no SSH branch to write.
+
+### MSSQL: TDS through an SSH tunnel
+
+MSSQL is the exception, because a `.bak` file must live on the SQL Server host. Its `dump` and `restore` still contain no transport branches, but its resolver encodes three cases:
+
+| `connectionMode` | `fileTransferMode` | TDS / exec | File transfer |
+| :--- | :--- | :--- | :--- |
+| `"ssh"` | *ignored* | SSH, TDS via `forwardPort` | Same SSH connection |
+| `undefined` / `"direct"` | `"ssh"` | direct | SSH |
+| `undefined` / `"direct"` | `"local"` | direct | direct (shared mount) |
+
+Row 2 is served by `CompositeHost`, a decorator that delegates execution to a `DirectHost` and file operations to an `SshHost`. Row 1 opens a local TCP listener on port 0 and pipes it through `forwardOut`. All connection pools go through `withPool()`, which sets `options.serverName` to the real hostname so certificate validation still passes through the tunnel, and caps `pool.max` because every pooled TDS connection is its own SSH channel.
+
+### Testing
+
+Use `createFakeHost` from `src/lib/testing/fake-host.ts`. It is structurally typed as `ExecutionHost`, so extending the interface breaks every fake at compile time.
+
+```typescript
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+describe.each(["direct", "ssh"] as const)("dump (%s)", (kind) => {
+  it("passes --single-transaction", async () => {
+    const host = createFakeHost(kind, { onWhich: () => "/usr/bin/mysqldump" });
+    await dump(config, "/tmp/out.sql", host);
+    expect(host.calls.exec[0]).toContain("--single-transaction");
+  });
+});
+```
+
+Assert on **argv arrays**, not on substrings of a rendered command. Most adapter suites collapse to a single `describe.each` with identical expectations for both transports, which is the point.
+
+### Lint guard
+
+`tests/unit/lint-guards/adapter-transport.test.ts` rejects the patterns this architecture exists to remove: `isSSHMode`, `connectionMode ===` outside a resolver, `host.kind ===`, `shellEscape`, raw `spawn` / `execFile` in a database adapter, a `new sql.ConnectionPool` bypassing `withPool`, and a hardcoded `DirectHost` where a resolved one belongs.
+
+Exceptions live in a per-rule allow list and each carries a written justification. A structural check additionally asserts that every adapter offering an SSH credential resolves a transport, which catches a half-wired adapter that a regex cannot see.
 
 ### Test SSH Endpoint
 
@@ -296,7 +331,7 @@ Always use `stream.on("exit", ...)` instead of `stream.on("close", ...)` for SSH
 }
 ```
 
-For non-MSSQL adapters, runs `echo "SSH connection test"`. For MSSQL, tests SFTP access to the backup path.
+For most adapters it runs a trivial command over the resolved host. For MSSQL it additionally verifies that the backup path is readable and writable, since a problem there otherwise only surfaces as a missing `.bak` halfway through a backup.
 
 ## MySQL Adapter
 

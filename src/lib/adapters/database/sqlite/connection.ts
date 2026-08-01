@@ -1,136 +1,75 @@
+import { transportSuffix } from "@/lib/transport";
 import { DatabaseAdapter } from "@/lib/core/interfaces";
-import fs from "fs/promises";
-import { constants } from "fs";
-import { execFile } from "child_process";
-import { promisify } from "util";
-import { SshClient, shellEscape, extractSqliteSshConfig, remoteBinaryCheck } from "@/lib/ssh";
 
-const execFileAsync = promisify(execFile);
+const NO_HOST_MESSAGE = "SQLite adapter requires an execution host. Call it through withHost().";
 
-export const test: NonNullable<DatabaseAdapter["test"]> = async (config) => {
+/** The sqlite3 binary, honouring an explicitly configured path. */
+function binaryOf(config: Record<string, unknown>): string {
+    return (config.sqliteBinaryPath as string) || "sqlite3";
+}
+
+const TABLE_COUNT_QUERY =
+    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
+
+export const test: NonNullable<DatabaseAdapter["test"]> = async (config, host) => {
+    if (!host) {
+        return { success: false, message: NO_HOST_MESSAGE };
+    }
+
+    const dbPath = config.path as string;
+    const via = transportSuffix(host);
+
     try {
-        const mode = config.mode || "local";
-        const dbPath = config.path;
-        const binaryPath = config.sqliteBinaryPath || "sqlite3";
+        const binary = await host.which(binaryOf(config));
 
-        if (mode === "local") {
-            // 1. Check if sqlite3 binary exists locally
-            try {
-                const { stdout } = await execFileAsync(binaryPath, ['--version']);
-                // Parse version: "3.37.0 2021..." -> "3.37.0"
-                const version = stdout.split(' ')[0].trim();
+        const versionResult = await host.exec([binary, "--version"]);
+        if (versionResult.code !== 0) {
+            return { success: false, message: versionResult.stderr.trim() || "sqlite3 is not available" };
+        }
+        // "3.37.0 2021-11-27 ..." -> "3.37.0"
+        const version = versionResult.stdout.split(" ")[0].trim();
 
-                 // 2. Check if database file exists and is readable
-                await fs.access(dbPath, constants.R_OK);
-
-                return { success: true, message: "Local SQLite connection successful.", version };
-            } catch (e: unknown) {
-                const message = e instanceof Error ? e.message : String(e);
-                return { success: false, message: message || "Connection failed" };
-            }
-
-        } else if (mode === "ssh") {
-            const sshConfig = extractSqliteSshConfig(config);
-            if (!sshConfig) return { success: false, message: "SSH host and username are required" };
-
-            const client = new SshClient();
-            try {
-                await client.connect(sshConfig);
-
-                // 1. Check if sqlite3 binary exists on remote
-                const resolvedBinary = await remoteBinaryCheck(client, binaryPath);
-                const versionResult = await client.exec(`${shellEscape(resolvedBinary)} --version`);
-                const version = versionResult.stdout.split(' ')[0].trim();
-
-                // 2. Check if database file exists on remote
-                const fileCheck = await client.exec(`test -f ${shellEscape(dbPath)} && echo "exists"`);
-                if (!fileCheck.stdout.includes("exists")) {
-                    return { success: false, message: `Remote database file at '${dbPath}' not found.` };
-                }
-
-                return { success: true, message: "Remote SSH SQLite connection successful.", version };
-            } catch (err: unknown) {
-                const message = err instanceof Error ? err.message : String(err);
-                return { success: false, message: `SSH Connection failed: ${message}` };
-            } finally {
-                client.end();
-            }
+        // The transport reports file metadata the same way on both sides, so
+        // this replaces the fs.access / `test -f` pair.
+        const stats = await host.stat(dbPath);
+        if (!stats) {
+            return { success: false, message: `Database file at '${dbPath}' not found.` };
         }
 
-        return { success: false, message: "Invalid mode selected" };
+        return { success: true, message: `SQLite connection successful${via}.`, version };
     } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
-        return { success: false, message };
+        return { success: false, message: `Connection failed: ${message}` };
     }
 };
 
 export const getDatabases: NonNullable<DatabaseAdapter["getDatabases"]> = async (config) => {
-     // For SQLite, the path itself is the database. We can return the filename.
-     const path = config.path as string;
-     const name = path.split(/[\\/]/).pop() || "database.sqlite";
-     return [name];
+    // For SQLite the path itself is the database, so its filename is the name.
+    const path = config.path as string;
+    return [path.split(/[\\/]/).pop() || "database.sqlite"];
 };
 
-export const getDatabasesWithStats: NonNullable<DatabaseAdapter["getDatabasesWithStats"]> = async (config) => {
+export const getDatabasesWithStats: NonNullable<DatabaseAdapter["getDatabasesWithStats"]> = async (config, host) => {
     const dbPath = config.path as string;
     const name = dbPath.split(/[\\/]/).pop() || "database.sqlite";
-    const mode = config.mode || "local";
-    const binaryPath = (config.sqliteBinaryPath as string) || "sqlite3";
+
+    if (!host) return [{ name }];
 
     let sizeInBytes: number | undefined;
     let tableCount: number | undefined;
 
     try {
-        if (mode === "local") {
-            // Get file size
-            const stat = await fs.stat(dbPath);
-            sizeInBytes = stat.size;
+        const stats = await host.stat(dbPath);
+        sizeInBytes = stats?.size;
 
-            // Get table count
-            try {
-                const { stdout } = await execFileAsync(
-                    binaryPath, [dbPath, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"]
-                );
-                const count = parseInt(stdout.trim(), 10);
-                if (!isNaN(count)) tableCount = count;
-            } catch {
-                // Table count is optional, ignore errors
-            }
-        } else if (mode === "ssh") {
-            const sshConfig = extractSqliteSshConfig(config);
-            if (!sshConfig) return [{ name, sizeInBytes: undefined, tableCount: undefined }];
-
-            const client = new SshClient();
-            try {
-                await client.connect(sshConfig);
-
-                // Get file size via stat
-                const sizeResult = await client.exec(`stat -c %s ${shellEscape(dbPath)} 2>/dev/null || stat -f %z ${shellEscape(dbPath)} 2>/dev/null`);
-                if (sizeResult.code === 0) {
-                    const size = parseInt(sizeResult.stdout.trim(), 10);
-                    if (!isNaN(size)) sizeInBytes = size;
-                }
-
-                // Get table count
-                try {
-                    const tableResult = await client.exec(
-                        `${shellEscape(binaryPath)} ${shellEscape(dbPath)} "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"`
-                    );
-                    if (tableResult.code === 0) {
-                        const count = parseInt(tableResult.stdout.trim(), 10);
-                        if (!isNaN(count)) tableCount = count;
-                    }
-                } catch {
-                    // Table count is optional
-                }
-            } catch {
-                // If stats fail, return name only
-            } finally {
-                client.end();
-            }
+        const binary = await host.which(binaryOf(config));
+        const result = await host.exec([binary, dbPath, TABLE_COUNT_QUERY]);
+        if (result.code === 0) {
+            const count = parseInt(result.stdout.trim(), 10);
+            if (!Number.isNaN(count)) tableCount = count;
         }
     } catch {
-        // If stats fail, return name only
+        // Size and table count are both optional, the name alone is still useful.
     }
 
     return [{ name, sizeInBytes, tableCount }];

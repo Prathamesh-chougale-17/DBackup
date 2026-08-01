@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ---------------------------------------------------------------------------
@@ -54,7 +58,7 @@ describe("MSSQL browser - getTables", () => {
             ],
         });
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result).toHaveLength(1);
         expect(result[0]).toMatchObject({
@@ -72,7 +76,7 @@ describe("MSSQL browser - getTables", () => {
             ],
         });
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result).toHaveLength(1);
         expect(result[0].name).toBe("hr.Employees");
@@ -87,7 +91,7 @@ describe("MSSQL browser - getTables", () => {
             ],
         });
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(typeof result[0].sizeInBytes).toBe("number");
         expect(result[0].sizeInBytes).toBe(49631498240);
@@ -98,7 +102,7 @@ describe("MSSQL browser - getTables", () => {
             recordset: [{ schema_name: "dbo", name: "v_active", table_type: "VIEW", row_count: 0, size_bytes: 0 }],
         });
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result[0].type).toBe("view");
     });
@@ -106,7 +110,7 @@ describe("MSSQL browser - getTables", () => {
     it("returns empty list when recordset is empty", async () => {
         mockQuery.mockResolvedValue({ recordset: [] });
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result).toEqual([]);
     });
@@ -135,7 +139,7 @@ describe("MSSQL browser - getTableData", () => {
             return Promise.resolve({ recordset: [{ id: 1, name: "Widget" }] });
         });
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(result.totalCount).toBe(5);
         expect(result.columns).toHaveLength(2);
@@ -151,7 +155,7 @@ describe("MSSQL browser - getTableData", () => {
             search: "wid",
             searchColumn: "name",
             matchMode: "contains",
-        } as any);
+        } as any, fakeHost);
 
         expect(mockInput).toHaveBeenCalledWith("searchTerm", expect.anything(), "%wid%");
     });
@@ -162,7 +166,7 @@ describe("MSSQL browser - getTableData", () => {
         await getTableData(baseConfig as any, {
             ...options,
             table: "hr.Employees",
-        } as any);
+        } as any, fakeHost);
 
         // All three queries should reference [hr].[Employees] not [dbo].[Employees]
         const calls: string[] = mockQuery.mock.calls.map(c => c[0] as string);

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { registry } from "@/lib/core/registry";
+import { withHost } from "@/lib/transport";
 import { registerAdapters } from "@/lib/adapters";
 import { headers } from "next/headers";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
@@ -82,11 +83,13 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ success: false, message: "Adapter not found" }, { status: 404 });
         }
 
-        if (!adapter.getTableData) {
+        const readTableData = adapter.getTableData;
+        if (!readTableData) {
             return NextResponse.json({ success: false, message: "This adapter does not support reading table data." });
         }
 
-        const result = await adapter.getTableData(resolvedConfig, {
+        const config = resolvedConfig;
+        const result = await withHost(adapter, config, (host) => readTableData(config, {
             database: body.database,
             table: body.table,
             page: body.page,
@@ -96,7 +99,7 @@ export async function POST(req: NextRequest) {
             matchMode: body.matchMode,
             sortBy: body.sortBy,
             sortDir: body.sortDir,
-        });
+        }, host));
 
         return NextResponse.json({ success: true, ...result });
 

@@ -19,10 +19,17 @@ src/lib/adapters/
 ├── notification/      # Discord, Email, etc.
 └── oidc/              # SSO providers (Authentik, PocketID, Generic)
 
-src/lib/ssh/            # Shared SSH infrastructure
-├── ssh-client.ts      # Generic SSH2 client
-├── utils.ts           # Shell escaping, binary checks, arg builders
-└── index.ts           # Re-exports
+src/lib/transport/      # Execution hosts: direct, SSH, composite
+├── types.ts           # ExecutionHost, TransportSpec, TransportResolver
+├── base-host.ts       # exec() over spawn(), temp files, staging
+├── direct-host.ts     # Local execution
+├── ssh-host.ts        # ssh2 client, SFTP session, channel limiter
+├── composite-host.ts  # Local exec with remote file operations (MSSQL legacy)
+├── ssh-escape.ts      # The only place that builds a remote shell command
+├── port-forward.ts    # Local listener onto a forwarded TCP port
+├── spec.ts            # Config to TransportSpec
+├── factory.ts         # createHost(), withHost()
+└── adapter-invoke.ts  # runConnectivityCheck() for registry-typed adapters
 ```
 
 ## Adapter Types
@@ -43,9 +50,14 @@ interface DatabaseAdapter {
   type: "database";
   name: string;                  // Display name
 
+  // Optional: config to TransportSpec. Omit for the standard
+  // `connectionMode` convention.
+  transport?: TransportResolver;
+
   dump(
     config: unknown,
     destinationPath: string,
+    host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     onProgress?: (percentage: number) => void
   ): Promise<BackupResult>;
@@ -53,17 +65,20 @@ interface DatabaseAdapter {
   restore(
     config: unknown,
     sourcePath: string,
+    host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     onProgress?: (percentage: number) => void
   ): Promise<BackupResult>;
 
-  test(config: unknown): Promise<TestResult>;
-  getDatabases?(config: unknown): Promise<string[]>;
-  getDatabasesWithStats?(config: unknown): Promise<DatabaseInfo[]>;
-  prepareRestore?(config: unknown, databases: string[]): Promise<void>;
-  analyzeDump?(sourcePath: string): Promise<string[]>;
+  test(config: unknown, host: ExecutionHost): Promise<TestResult>;
+  getDatabases?(config: unknown, host: ExecutionHost): Promise<string[]>;
+  getDatabasesWithStats?(config: unknown, host: ExecutionHost): Promise<DatabaseInfo[]>;
+  prepareRestore?(config: unknown, databases: string[], host: ExecutionHost): Promise<void>;
+  analyzeDump?(sourcePath: string): Promise<string[]>;   // Local file, needs no host
 }
 ```
+
+Every database operation takes an `ExecutionHost` after its mandatory arguments. Callers get one from `withHost(adapter, config, fn)`, which resolves the transport from the config and disposes the host afterwards. See [Database Adapters](/developer-guide/adapters/database#transport-architecture-src-lib-transport).
 
 ### StorageAdapter
 

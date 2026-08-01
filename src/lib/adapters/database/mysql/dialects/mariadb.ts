@@ -1,4 +1,5 @@
 import { MySQLBaseDialect } from "./mysql-base";
+import type { ExecutionHost } from "@/lib/transport";
 import { MariaDBConfig } from "@/lib/adapters/definitions";
 
 export class MariaDBDialect extends MySQLBaseDialect {
@@ -13,8 +14,8 @@ export class MariaDBDialect extends MySQLBaseDialect {
         }
     }
 
-    getDumpArgs(config: MariaDBConfig, databases: string[]): string[] {
-        const args = super.getDumpArgs(config, databases);
+    getDumpArgs(config: MariaDBConfig, databases: string[], host?: ExecutionHost): string[] {
+        const args = super.getDumpArgs(config, databases, host);
 
         // MariaDB specific dump flags could be added here.
         // For example --sandbox or specific locking behavior.

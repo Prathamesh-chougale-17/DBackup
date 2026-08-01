@@ -12,8 +12,9 @@ const {
     mockReadTarManifest: vi.fn(),
 }));
 
-// analyze.ts imports execFileAsync from ./connection
-vi.mock("@/lib/adapters/database/mysql/connection", () => ({
+// analyzeDump greps a dump file that always sits on the DBackup host, so it
+// runs a plain local exec rather than going through the transport.
+vi.mock("@/lib/adapters/process", () => ({
     execFileAsync: (...args: any[]) => mockExecFileAsync(...args),
 }));
 

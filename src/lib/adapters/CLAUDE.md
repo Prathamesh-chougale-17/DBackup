@@ -11,13 +11,15 @@ registry.register(MySQLAdapter);
 registry.get("mysql");
 ```
 
+Every database adapter method takes an `ExecutionHost` after its mandatory arguments. See [Transport](#transport-execution-host).
+
 Run `ls src/lib/adapters/{database,storage,notification}/` for the current adapter list. Never rely on a list written in a doc.
 
 ## Adding an adapter - the full checklist
 
 A complete adapter touches 8 to 11 files. Missing one produces a "half-registered adapter" that looks fine in code review and breaks at runtime or renders with a fallback icon. Work through every line:
 
-1. **`{database|storage|notification}/<name>.ts`** - implement the interface. Use `<name>/index.ts` if the adapter needs sub-modules.
+1. **`{database|storage|notification}/<name>.ts`** - implement the interface. Use `<name>/index.ts` if the adapter needs sub-modules. Database adapters take `host: ExecutionHost` and run everything through it - see [Transport](#transport-execution-host).
 2. **`definitions/{database|storage|notification}.ts`** - the Zod config schema (`NewAdapterSchema`).
 3. **`definitions/index.ts`** - an entry in `ADAPTER_DEFINITIONS` with `id`, `type`, `name`, `configSchema`, and `group` for storage.
 4. **`index.ts`** - import the class and call `registry.register(...)` inside `registerAdapters()`.
@@ -28,6 +30,35 @@ A complete adapter touches 8 to 11 files. Missing one produces a "half-registere
 9. **Tests**, if the adapter is testable in CI: a service in `docker-compose.test.yml` and entries in `tests/integration/test-configs.ts` (`testDatabases`, `CLI_REQUIREMENTS`).
 10. **Docs**: a page under `docs/user-guide/{sources|destinations|notifications}/<name>.md` following the template in [docs/CLAUDE.md](../../../docs/CLAUDE.md), plus a row in the matching `docs/developer-guide/adapters/*.md` table.
 11. **Changelog**: one `### ✨ Features` entry, component prefix is the adapter name.
+
+## Transport (execution host)
+
+A database adapter describes **what** runs. An `ExecutionHost` from `@/lib/transport` decides **how** and **where**. There is one code path, and `direct` / `ssh` are interchangeable implementations behind it. Never branch on the transport yourself.
+
+```typescript
+export async function dump(config: MySQLConfig, destPath: string, host: ExecutionHost, onLog?) {
+    const binary = await host.which("mysqldump", "mariadb-dump");   // resolves in THIS host's PATH
+    const argv = [binary, ...buildConnectionArgs(config, host), config.database];
+
+    const result = await host.exec(argv, { env: { MYSQL_PWD: config.password } });
+    if (result.code !== 0) throw new AdapterError(...);             // exec never throws on non-zero
+}
+```
+
+Rules:
+
+- **Build raw argv arrays. Never escape anything.** `shellEscape` is internal to `SshHost`. An adapter that escapes produces a double-escaped argument that fails only over SSH, only at runtime.
+- **`exec` returns a `code`, it does not throw on non-zero.** Check `result.code !== 0` explicitly. Code relying on a rejected promise silently stops iterating instead.
+- **Secrets go in `options.env`, never in argv.** `SshHost` renders them into an `export` prefix, which keeps them out of the process table and out of OOM kill reports.
+- **Never call `spawn` / `execFile` directly**, and never open your own connection. Use `host.spawn`, `host.exec`, `host.connect`, `host.forwardPort`.
+- **File movement uses host primitives**: `withTempFile`, `stageInput`, `captureOutput`, `putFile`, `getFile`. They are no-ops in direct mode and SFTP transfers over SSH, so one call covers both.
+- Spread `...sshFields` into the config schema. If the field layout differs, declare a `transport` resolver on the adapter instead of reading `connectionMode` in adapter code. **Zod defaults do not run at runtime** (`resolveAdapterConfig` returns decrypted JSON), so default `undefined` to direct in code.
+
+Callers get a host from `withHost(adapter, config, fn)`, which disposes it, or from `runConnectivityCheck()` for registry-typed values. One host is shared across a whole job run.
+
+Tests use `createFakeHost` from `@/lib/testing/fake-host` and assert on argv arrays. Most suites collapse to `describe.each(["direct", "ssh"])` with identical expectations.
+
+`tests/unit/lint-guards/adapter-transport.test.ts` enforces all of this. Full reference: [docs/developer-guide/adapters/database.md](../../../docs/developer-guide/adapters/database.md).
 
 ## Connectivity methods
 

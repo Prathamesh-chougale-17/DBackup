@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ---------------------------------------------------------------------------
@@ -11,7 +15,6 @@ const {
     mockCountDocuments,
     mockFindToArray,
     mockSort,
-    mockIsSSHMode,
 } = vi.hoisted(() => ({
     mockConnect: vi.fn().mockResolvedValue(undefined),
     mockClose: vi.fn().mockResolvedValue(undefined),
@@ -20,7 +23,6 @@ const {
     mockCountDocuments: vi.fn().mockResolvedValue(0),
     mockFindToArray: vi.fn().mockResolvedValue([]),
     mockSort: vi.fn(),
-    mockIsSSHMode: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("mongodb", () => {
@@ -47,17 +49,6 @@ vi.mock("mongodb", () => {
     return { MongoClient: MockMongoClient };
 });
 
-vi.mock("@/lib/ssh", () => ({
-    SshClient: class {
-        connect = vi.fn();
-        exec = vi.fn();
-        end = vi.fn();
-    },
-    isSSHMode: (...args: unknown[]) => mockIsSSHMode(...args),
-    extractSshConfig: vi.fn(),
-    buildMongoArgs: vi.fn(() => []),
-    remoteBinaryCheck: vi.fn(),
-}));
 
 import { getTables, getTableData } from "@/lib/adapters/database/mongodb/browser";
 
@@ -72,7 +63,7 @@ describe("MongoDB browser - getTables", () => {
     it("returns empty list when no collections exist", async () => {
         mockListCollectionsToArray.mockResolvedValue([]);
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result).toEqual([]);
     });
@@ -84,7 +75,7 @@ describe("MongoDB browser - getTables", () => {
         ]);
         mockEstimatedCount.mockResolvedValue(42);
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result).toHaveLength(2);
         expect(result[0]).toMatchObject({ name: "users", type: "collection", rowCount: 42 });
@@ -109,7 +100,7 @@ describe("MongoDB browser - getTableData", () => {
         mockCountDocuments.mockResolvedValue(2);
         mockFindToArray.mockResolvedValue(docs);
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(result.totalCount).toBe(2);
         expect(result.rows).toHaveLength(2);
@@ -122,7 +113,7 @@ describe("MongoDB browser - getTableData", () => {
         mockCountDocuments.mockResolvedValue(1);
         mockFindToArray.mockResolvedValue(docs);
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(typeof result.rows[0].meta).toBe("string");
     });
@@ -131,7 +122,7 @@ describe("MongoDB browser - getTableData", () => {
         mockCountDocuments.mockResolvedValue(0);
         mockFindToArray.mockResolvedValue([]);
 
-        await getTableData(baseConfig as any, { ...options, sortBy: "name", sortDir: "asc" } as any);
+        await getTableData(baseConfig as any, { ...options, sortBy: "name", sortDir: "asc" } as any, fakeHost);
 
         expect(mockSort).toHaveBeenCalledWith({ name: 1 });
     });

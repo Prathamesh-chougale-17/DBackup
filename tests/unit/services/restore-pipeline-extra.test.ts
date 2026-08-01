@@ -483,7 +483,7 @@ describe('runRestorePipeline (extra coverage)', () => {
 
         let _capturedCallback: ((...args: any[]) => void) | null = null;
         const dbAdapter = {
-            restore: vi.fn().mockImplementation((_cfg: any, _file: any, onMsg: (...args: any[]) => void) => {
+            restore: vi.fn().mockImplementation((_cfg: any, _file: any, _host: any, onMsg: (...args: any[]) => void) => {
                 _capturedCallback = onMsg;
                 // Emit a message that should be classified as error level.
                 onMsg('SQL error: unknown column', undefined, undefined, undefined);
@@ -510,7 +510,7 @@ describe('runRestorePipeline (extra coverage)', () => {
     it('classifies adapter callback message as warning when it contains "warn"', async () => {
         const storageAdapter = makeStorageAdapter();
         const dbAdapter = {
-            restore: vi.fn().mockImplementation((_cfg: any, _file: any, onMsg: (...args: any[]) => void) => {
+            restore: vi.fn().mockImplementation((_cfg: any, _file: any, _host: any, onMsg: (...args: any[]) => void) => {
                 onMsg('Warning: deprecated feature used', undefined, undefined, undefined);
                 return Promise.resolve({ success: true });
             }),
@@ -534,7 +534,7 @@ describe('runRestorePipeline (extra coverage)', () => {
     it('does not classify "0 errors" as an error level message', async () => {
         const storageAdapter = makeStorageAdapter();
         const dbAdapter = {
-            restore: vi.fn().mockImplementation((_cfg: any, _file: any, onMsg: (...args: any[]) => void) => {
+            restore: vi.fn().mockImplementation((_cfg: any, _file: any, _host: any, onMsg: (...args: any[]) => void) => {
                 // "0 errors" pattern - should NOT be classified as error.
                 onMsg('Restore finished: 0 errors', undefined, undefined, undefined);
                 return Promise.resolve({ success: true });
@@ -559,7 +559,7 @@ describe('runRestorePipeline (extra coverage)', () => {
     it('classifies adapter callback message with explicit level parameter correctly', async () => {
         const storageAdapter = makeStorageAdapter();
         const dbAdapter = {
-            restore: vi.fn().mockImplementation((_cfg: any, _file: any, onMsg: (...args: any[]) => void) => {
+            restore: vi.fn().mockImplementation((_cfg: any, _file: any, _host: any, onMsg: (...args: any[]) => void) => {
                 // Level explicitly passed - must not be overridden.
                 onMsg('Custom warning message', 'warning', 'general', undefined);
                 return Promise.resolve({ success: true });

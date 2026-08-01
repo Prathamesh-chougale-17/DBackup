@@ -1,5 +1,6 @@
 import prisma from "@/lib/prisma";
 import { registry } from "@/lib/core/registry";
+import { runConnectivityCheck } from "@/lib/transport/adapter-invoke";
 import { resolveAdapterConfig } from "@/lib/adapters/config-resolver";
 import { logger } from "@/lib/logging/logger";
 import { wrapError, getErrorMessage } from "@/lib/logging/errors";
@@ -27,16 +28,6 @@ interface OfflineNotificationState {
 
 /** Map of adapter config ID → notification state */
 type OfflineStateMap = Record<string, OfflineNotificationState>;
-
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`Health check timed out after ${ms}ms for ${label}`)), ms);
-        promise.then(
-            (val) => { clearTimeout(timer); resolve(val); },
-            (err) => { clearTimeout(timer); reject(err); }
-        );
-    });
-}
 
 async function loadOfflineStates(): Promise<OfflineStateMap> {
     const row = await prisma.systemSetting.findUnique({ where: { key: OFFLINE_STATE_KEY } });
@@ -167,11 +158,10 @@ export class HealthCheckService {
             }
 
             const start = Date.now();
-            const result = await withTimeout(
-                checkFn.call(adapter, config),
-                ADAPTER_CHECK_TIMEOUT_MS,
-                configRow.name || configRow.id
-            );
+            const result = (await runConnectivityCheck(adapter, config, {
+                timeoutMs: ADAPTER_CHECK_TIMEOUT_MS,
+                label: configRow.name || configRow.id,
+            }))!;
             const end = Date.now();
             latency = end - start;
 
