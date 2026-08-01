@@ -27,7 +27,6 @@ import { NtfyAdapter } from "./notification/ntfy";
 import { TelegramAdapter } from "./notification/telegram";
 import { TwilioSmsAdapter } from "./notification/twilio-sms";
 import { EmailAdapter } from "./notification/email";
-import { initFirebirdTools } from "./database/firebird/tools";
 import { logger } from "@/lib/logging/logger";
 
 const log = logger.child({ module: "Adapters" });
@@ -39,7 +38,6 @@ export function registerAdapters() {
     if (initialized) return;
 
     // Pre-detect binary commands asynchronously (non-blocking)
-    initFirebirdTools().catch(() => { /* fallback to defaults */ });
 
     registry.register(MySQLAdapter);
     registry.register(MariaDBAdapter);

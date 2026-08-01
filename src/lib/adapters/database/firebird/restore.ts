@@ -4,11 +4,8 @@ import { LogLevel, LogType } from "@/lib/core/logs";
 import { FirebirdConfig } from "@/lib/adapters/definitions";
 import { getGbakCommand } from "./tools";
 import { resolveAliasPath, buildConnectionString } from "./connection";
-import { spawn } from "child_process";
 import fs from "fs/promises";
-import { randomUUID } from "crypto";
 import path from "path";
-import { waitForProcess } from "@/lib/adapters/process";
 import {
     isMultiDbTar,
     extractSelectedDatabases,
@@ -18,14 +15,6 @@ import {
     getTargetDatabaseName,
 } from "../common/tar-utils";
 import { formatBytes } from "@/lib/utils";
-import {
-    SshClient,
-    isSSHMode,
-    extractSshConfig,
-    remoteEnv,
-    remoteBinaryCheck,
-    shellEscape,
-} from "@/lib/ssh";
 
 /** Extended config with runtime fields for restore operations */
 type FirebirdRestoreConfig = FirebirdConfig & {
@@ -47,102 +36,50 @@ async function restoreSingleFile(
     config: FirebirdRestoreConfig,
     sourcePath: string,
     targetPath: string,
+    host: ExecutionHost,
     onLog: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     onProgress?: (percentage: number, detail?: string) => void
 ): Promise<void> {
-    if (isSSHMode(config)) {
-        return restoreSingleFileSSH(config, sourcePath, targetPath, onLog, onProgress);
-    }
-
+    const gbak = await getGbakCommand(host);
     const connStr = buildConnectionString(config, targetPath);
+    const { size: totalSize } = await fs.stat(sourcePath);
+    const transferStart = Date.now();
 
-    const args = ["-rep"];
-    if (config.options) args.push(...config.options.split(" ").filter((s) => s.trim().length > 0));
-    args.push("-user", config.user, sourcePath, connStr);
-
-    onLog(`Restoring to: ${targetPath}`, "info", "command", `${getGbakCommand()} ${args.join(" ")}`);
-
-    const env = { ...process.env, ISC_PASSWORD: config.password };
-    const proc = spawn(getGbakCommand(), args, { env });
-    await waitForProcess(proc, "gbak", (msg) => {
-        const trimmed = msg.trim();
-        if (trimmed) onLog(trimmed);
-    });
-    onProgress?.(100);
-}
-
-/**
- * SSH variant: upload the .fbk file to a remote temp location, then run gbak
- * on the target itself to restore into the local alias path.
- */
-async function restoreSingleFileSSH(
-    config: FirebirdRestoreConfig,
-    sourcePath: string,
-    targetPath: string,
-    onLog: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
-    onProgress?: (percentage: number, detail?: string) => void
-): Promise<void> {
-    const stats = await fs.stat(sourcePath);
-    const totalSize = stats.size;
-
-    const sshConfig = extractSshConfig(config)!;
-    const ssh = new SshClient();
-    await ssh.connect(sshConfig);
-
-    const remoteTempFile = `/tmp/dbackup_restore_${randomUUID()}.fbk`;
-
-    try {
-        const gbakBin = await remoteBinaryCheck(ssh, "gbak");
-        const connStr = buildConnectionString(config, targetPath);
-
-        onLog(`Uploading dump to remote server via SFTP (${(totalSize / 1024 / 1024).toFixed(1)} MB)...`, "info");
-        const uploadStart = Date.now();
-        await ssh.uploadFile(sourcePath, remoteTempFile, (transferred, total) => {
-            if (onProgress && total > 0) {
-                // Upload = 0-90% of total progress
-                const uploadPercent = Math.round((transferred / total) * 90);
-                const elapsed = (Date.now() - uploadStart) / 1000;
+    // gbak reads the backup from a path, so it is staged onto the execution
+    // host. On a direct host that is the original file with no copy at all.
+    await host.stageInput(
+        sourcePath,
+        {
+            onProgress: (transferred) => {
+                if (!onProgress || totalSize <= 0) return;
+                // Staging occupies the first 90% of the reported progress.
+                const percent = Math.min(90, Math.round((transferred / totalSize) * 90));
+                const elapsed = (Date.now() - transferStart) / 1000;
                 const speed = elapsed > 0 ? transferred / elapsed : 0;
-                onProgress(uploadPercent, `${formatBytes(transferred)} / ${formatBytes(total)} - ${formatBytes(speed)}/s`);
-            }
-        });
-        onProgress?.(90);
+                onProgress(percent, `${formatBytes(transferred)} / ${formatBytes(totalSize)} - ${formatBytes(speed)}/s`);
+            },
+        },
+        async (stagedPath) => {
+            const args = ["-rep"];
+            if (config.options) args.push(...config.options.split(" ").filter((s) => s.trim().length > 0));
+            args.push("-user", config.user, stagedPath, connStr);
 
-        const argParts = ["-rep"];
-        if (config.options) argParts.push(...config.options.split(" ").filter((s) => s.trim().length > 0));
-        argParts.push("-user", shellEscape(config.user), shellEscape(remoteTempFile), shellEscape(connStr));
+            onLog(`Restoring to: ${targetPath}`, "info", "command", `${gbak} ${args.join(" ")}`);
+            onProgress?.(95, "Executing restore command...");
 
-        const cmd = remoteEnv({ ISC_PASSWORD: config.password }, `${gbakBin} ${argParts.join(" ")}`);
-        onLog(`Restoring to (SSH): ${targetPath}`, "info", "command", `${gbakBin} ${argParts.join(" ")}`);
-        onProgress?.(95, "Executing restore command...");
-
-        await new Promise<void>((resolve, reject) => {
-            ssh.execStream(cmd, (err, stream) => {
-                if (err) return reject(err);
-
-                stream.on("data", () => {});
-
-                stream.stderr.on("data", (data: any) => {
-                    const msg = data.toString().trim();
-                    if (msg) onLog(msg);
-                });
-
-                stream.on("exit", (code: number | null, signal?: string) => {
-                    if (code === 0) {
-                        onProgress?.(100);
-                        resolve();
-                    } else {
-                        reject(new Error(`Remote gbak exited with code ${code ?? "null"}${signal ? ` (signal: ${signal})` : ""}`));
-                    }
-                });
-
-                stream.on("error", (err: Error) => reject(err));
+            const proc = await host.spawn([gbak, ...args], { env: { ISC_PASSWORD: config.password } });
+            proc.stderr.on("data", (data: Buffer) => {
+                const msg = data.toString().trim();
+                if (msg) onLog(msg);
             });
-        });
-    } finally {
-        await ssh.exec(`rm -f ${shellEscape(remoteTempFile)}`).catch(() => {});
-        ssh.end();
-    }
+
+            const { code, signal } = await proc.exit();
+            if (code !== 0) {
+                throw new Error(`gbak exited with code ${code ?? "null"}${signal ? ` (signal: ${signal})` : ""}`);
+            }
+            onProgress?.(100);
+        },
+    );
 }
 
 /**
@@ -158,7 +95,7 @@ export async function restoreOne(
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     onProgress?: (percentage: number, detail?: string) => void
 ): Promise<void> {
-    await restoreSingleFile(config, filePath, targetDbName, onLog ?? (() => {}), onProgress);
+    await restoreSingleFile(config, filePath, targetDbName, _host, onLog ?? (() => {}), onProgress);
 }
 
 export async function restore(
@@ -212,7 +149,7 @@ export async function restore(
                         throw new Error(`Database file not found in archive: ${dbEntry.filename}`);
                     }
 
-                    await restoreSingleFile(config, dbFile, targetPath, log, onProgress);
+                    await restoreSingleFile(config, dbFile, targetPath, _host, log, onProgress);
                     log(`Restored database: ${dbEntry.name} → ${targetPath}`);
                     restoredCount++;
                 }
@@ -246,7 +183,7 @@ export async function restore(
             throw new Error("No target database specified for restore");
         }
 
-        await restoreSingleFile(config, sourcePath, targetPath, log, onProgress);
+        await restoreSingleFile(config, sourcePath, targetPath, _host, log, onProgress);
 
         return { success: true, logs, startedAt, completedAt: new Date() };
     } catch (error: unknown) {

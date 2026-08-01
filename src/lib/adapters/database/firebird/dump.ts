@@ -6,22 +6,12 @@ import { getGbakCommand } from "./tools";
 import { resolveAliasPath, buildConnectionString } from "./connection";
 import fs from "fs/promises";
 import path from "path";
-import { spawn } from "child_process";
-import { createWriteStream } from "fs";
 import {
     createMultiDbTar,
     createTempDir,
     cleanupTempDir,
 } from "../common/tar-utils";
 import { TarFileEntry } from "../common/types";
-import {
-    SshClient,
-    isSSHMode,
-    extractSshConfig,
-    remoteEnv,
-    remoteBinaryCheck,
-    shellEscape,
-} from "@/lib/ssh";
 
 /** Extended config with runtime fields */
 type FirebirdDumpConfig = FirebirdConfig & {
@@ -30,39 +20,40 @@ type FirebirdDumpConfig = FirebirdConfig & {
 
 /**
  * Dump a single database alias to a file.
+ *
+ * gbak writes to a path rather than to stdout, so the destination is requested
+ * from the transport: on a direct host that is the final path, over SSH it is a
+ * remote temp file whose bytes are fetched and cleaned up afterwards. The SSH
+ * path used to ask gbak for "stdout" instead, which is a different gbak mode.
  */
 async function dumpSingleDatabase(
     config: FirebirdDumpConfig,
     aliasName: string,
     destinationPath: string,
+    host: ExecutionHost,
     onLog: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<{ success: boolean; size: number }> {
-    if (isSSHMode(config)) {
-        return dumpSingleDatabaseSSH(config, aliasName, destinationPath, onLog);
-    }
-
+    const gbak = await getGbakCommand(host);
     const dbPath = resolveAliasPath(config, aliasName);
     const connStr = buildConnectionString(config, dbPath);
 
-    const args = ["-b"];
-    if (config.options) args.push(...config.options.split(" ").filter((s) => s.trim().length > 0));
-    args.push("-user", config.user, connStr, destinationPath);
+    await host.captureOutput(destinationPath, {}, async (hostPath) => {
+        const args = ["-b"];
+        if (config.options) args.push(...config.options.split(" ").filter((s) => s.trim().length > 0));
+        args.push("-user", config.user, connStr, hostPath);
 
-    onLog(`Dumping database: ${aliasName}`, "info", "command", `${getGbakCommand()} ${args.join(" ")}`);
+        onLog(`Dumping database: ${aliasName}`, "info", "command", `${gbak} ${args.join(" ")}`);
 
-    const env = { ...process.env, ISC_PASSWORD: config.password };
-
-    await new Promise<void>((resolve, reject) => {
-        const proc = spawn(getGbakCommand(), args, { env });
-        proc.stderr.on("data", (data) => {
+        const proc = await host.spawn([gbak, ...args], { env: { ISC_PASSWORD: config.password } });
+        proc.stderr.on("data", (data: Buffer) => {
             const msg = data.toString().trim();
             if (msg) onLog(msg);
         });
-        proc.on("close", (code) => {
-            if (code === 0) resolve();
-            else reject(new Error(`gbak exited with code ${code}`));
-        });
-        proc.on("error", (err) => reject(err));
+
+        const { code, signal } = await proc.exit();
+        if (code !== 0) {
+            throw new Error(`gbak exited with code ${code ?? "null"}${signal ? ` (signal: ${signal})` : ""}`);
+        }
     });
 
     const stats = await fs.stat(destinationPath);
@@ -71,65 +62,6 @@ async function dumpSingleDatabase(
     }
 
     return { success: true, size: stats.size };
-}
-
-/**
- * SSH variant: run gbak on the remote server and stream output (via stdout) to a local file.
- */
-async function dumpSingleDatabaseSSH(
-    config: FirebirdDumpConfig,
-    aliasName: string,
-    destinationPath: string,
-    onLog: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
-): Promise<{ success: boolean; size: number }> {
-    const sshConfig = extractSshConfig(config)!;
-    const ssh = new SshClient();
-    await ssh.connect(sshConfig);
-
-    try {
-        const gbakBin = await remoteBinaryCheck(ssh, "gbak");
-        const dbPath = resolveAliasPath(config, aliasName);
-        const connStr = buildConnectionString(config, dbPath); // host/port as reachable from the SSH target
-
-        const argParts = ["-b"];
-        if (config.options) argParts.push(...config.options.split(" ").filter((s) => s.trim().length > 0));
-        argParts.push("-user", shellEscape(config.user), shellEscape(connStr), "stdout");
-
-        const cmd = remoteEnv({ ISC_PASSWORD: config.password }, `${gbakBin} ${argParts.join(" ")}`);
-        onLog(`Dumping database (SSH): ${aliasName}`, "info", "command", `${gbakBin} ${argParts.join(" ")}`);
-
-        const writeStream = createWriteStream(destinationPath);
-
-        await new Promise<void>((resolve, reject) => {
-            ssh.execStream(cmd, (err, stream) => {
-                if (err) return reject(err);
-
-                stream.pipe(writeStream);
-
-                stream.stderr.on("data", (data: any) => {
-                    const msg = data.toString().trim();
-                    if (msg) onLog(msg);
-                });
-
-                stream.on("exit", (code: number | null, signal?: string) => {
-                    if (code === 0) resolve();
-                    else reject(new Error(`Remote gbak exited with code ${code ?? "null"}${signal ? ` (signal: ${signal})` : ""}`));
-                });
-
-                stream.on("error", (err: Error) => reject(err));
-                writeStream.on("error", (err: Error) => reject(err));
-            });
-        });
-
-        const stats = await fs.stat(destinationPath);
-        if (stats.size === 0) {
-            throw new Error(`Dump file for ${aliasName} is empty. Check logs/permissions.`);
-        }
-
-        return { success: true, size: stats.size };
-    } finally {
-        ssh.end();
-    }
 }
 
 /**
@@ -144,7 +76,7 @@ export async function dumpOne(
     _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<{ size: number }> {
-    const result = await dumpSingleDatabase(config, dbName, destinationPath, onLog ?? (() => {}));
+    const result = await dumpSingleDatabase(config, dbName, destinationPath, _host, onLog ?? (() => {}));
     return { size: result.size };
 }
 
@@ -180,7 +112,7 @@ export async function dump(
 
         // Single alias: direct .fbk dump (no TAR needed)
         if (aliases.length === 1) {
-            const result = await dumpSingleDatabase(config, aliases[0], destinationPath, log);
+            const result = await dumpSingleDatabase(config, aliases[0], destinationPath, _host, log);
 
             const sizeMB = (result.size / 1024 / 1024).toFixed(2);
             log(`Dump finished successfully. Size: ${sizeMB} MB`);
@@ -206,7 +138,7 @@ export async function dump(
                 const dbFileName = `${aliasName}.fbk`;
                 const dbFilePath = path.join(tempDir, dbFileName);
 
-                await dumpSingleDatabase(config, aliasName, dbFilePath, log);
+                await dumpSingleDatabase(config, aliasName, dbFilePath, _host, log);
 
                 dbFiles.push({
                     name: dbFileName,

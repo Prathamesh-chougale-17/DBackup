@@ -132,12 +132,12 @@ function parseListRows(stdout: string, columnNames: string[]): Record<string, un
     return rows;
 }
 
-export async function getTables(config: FirebirdConfig, database: string, _host: ExecutionHost): Promise<TableInfo[]> {
-    const stdout = await runQuery(config, database, TABLES_QUERY);
+export async function getTables(config: FirebirdConfig, database: string, host: ExecutionHost): Promise<TableInfo[]> {
+    const stdout = await runQuery(config, database, TABLES_QUERY, host);
     return parseTablesOutput(stdout);
 }
 
-export async function getTableData(config: FirebirdConfig, options: TableDataOptions, _host: ExecutionHost): Promise<TableDataResult> {
+export async function getTableData(config: FirebirdConfig, options: TableDataOptions, host: ExecutionHost): Promise<TableDataResult> {
     const { database, table, page, pageSize, sortBy, sortDir, search, searchColumn, matchMode } = options;
     const offset = (page - 1) * pageSize;
     const tblId = `"${escapeFirebirdIdentifier(table)}"`;
@@ -160,9 +160,9 @@ export async function getTableData(config: FirebirdConfig, options: TableDataOpt
     const colQuery = columnsQuery(table);
 
     const [colOut, countOut, dataOut] = await Promise.all([
-        runQuery(config, database, colQuery),
-        runQuery(config, database, countQuery),
-        runQuery(config, database, dataQuery),
+        runQuery(config, database, colQuery, host),
+        runQuery(config, database, countQuery, host),
+        runQuery(config, database, dataQuery, host),
     ]);
 
     const columns = parseColumnsOutput(colOut);
