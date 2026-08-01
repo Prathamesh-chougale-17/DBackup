@@ -1,16 +1,7 @@
 import type { ExecutionHost } from "@/lib/transport";
 import { PostgresConfig } from "@/lib/adapters/definitions";
 import { TableInfo, ColumnInfo, TableDataOptions, TableDataResult } from "@/lib/core/interfaces";
-import {
-    SshClient,
-    isSSHMode,
-    extractSshConfig,
-    buildPsqlArgs,
-    remoteEnv,
-    remoteBinaryCheck,
-    shellEscape,
-} from "@/lib/ssh";
-import { execFileAsync } from "./connection";
+import { PSQL, buildConnectionArgs, pgEnv } from "./args";
 
 /** Sanitize a PostgreSQL identifier for double-quote quoting. */
 function escapePgIdentifier(name: string): string {
@@ -101,38 +92,23 @@ function parseDataRows(
         });
 }
 
-export async function getTables(config: PostgresConfig, database: string, _host: ExecutionHost): Promise<TableInfo[]> {
-    const query = tablesQuery(database);
-    const connectDb = database;
-    const env: Record<string, string | undefined> = {};
-    if (config.password) env.PGPASSWORD = config.password;
-
-    if (isSSHMode(config)) {
-        const ssh = new SshClient();
-        try {
-            await ssh.connect(extractSshConfig(config)!);
-            await remoteBinaryCheck(ssh, "psql");
-            const args = buildPsqlArgs(config);
-            const cmd = remoteEnv(env, `psql ${args.join(" ")} -d ${shellEscape(connectDb)} -t -A -F '\t' -c ${shellEscape(query)}`);
-            const result = await ssh.exec(cmd);
-            if (result.code !== 0) throw new Error(`Failed to list tables: ${result.stderr}`);
-            return parseTablesOutput(result.stdout);
-        } finally {
-            ssh.end();
-        }
+export async function getTables(config: PostgresConfig, database: string, host: ExecutionHost): Promise<TableInfo[]> {
+    const psql = await host.which(...PSQL);
+    const result = await host.exec(
+        [psql, ...buildConnectionArgs(config), "-d", database, "-t", "-A", "-F", "\t", "-c", tablesQuery(database)],
+        { env: pgEnv(config.password) },
+    );
+    if (result.code !== 0) {
+        throw new Error(`Failed to list tables: ${result.stderr.trim()}`);
     }
-
-    const psqlEnv = { ...process.env, PGPASSWORD: config.password };
-    const args = ["-h", config.host, "-p", String(config.port), "-U", config.user, "-d", connectDb, "-t", "-A", "-F", "\t", "-c", query];
-    const { stdout } = await execFileAsync("psql", args, { env: psqlEnv });
-    return parseTablesOutput(stdout);
+    return parseTablesOutput(result.stdout);
 }
 
 export async function getTableData(
     config: PostgresConfig,
-    options: TableDataOptions
-,
-    _host: ExecutionHost): Promise<TableDataResult> {
+    options: TableDataOptions,
+    host: ExecutionHost,
+): Promise<TableDataResult> {
     const { database, table, page, pageSize, sortBy, sortDir, search, searchColumn, matchMode } = options;
     const offset = (page - 1) * pageSize;
     const tblId = `"${escapePgIdentifier(table)}"`;
@@ -148,50 +124,29 @@ export async function getTableData(
     const sortClause = sortBy
         ? ` ORDER BY "${escapePgIdentifier(sortBy)}" ${sortDir === "desc" ? "DESC" : "ASC"} NULLS LAST`
         : "";
+
     const colQuery = columnsQuery(database, table);
     const countQuery = `SELECT COUNT(*) FROM ${tblId}${whereClause}`;
     const dataQuery = `SELECT * FROM ${tblId}${whereClause}${sortClause} LIMIT ${pageSize} OFFSET ${offset}`;
-    const pgEnv = { ...process.env, PGPASSWORD: config.password };
-    const envMap: Record<string, string | undefined> = {};
-    if (config.password) envMap.PGPASSWORD = config.password;
 
-    if (isSSHMode(config)) {
-        const ssh = new SshClient();
-        try {
-            await ssh.connect(extractSshConfig(config)!);
-            await remoteBinaryCheck(ssh, "psql");
-            const args = buildPsqlArgs(config);
-            const baseCmd = `psql ${args.join(" ")} -d ${shellEscape(database)} -t -A -F '\t'`;
+    const psql = await host.which(...PSQL);
+    const base = [psql, ...buildConnectionArgs(config), "-d", database, "-t", "-A", "-F", "\t"];
+    const env = pgEnv(config.password);
 
-            const [colResult, countResult, dataResult] = await Promise.all([
-                ssh.exec(remoteEnv(envMap, `${baseCmd} -c ${shellEscape(colQuery)}`)),
-                ssh.exec(remoteEnv(envMap, `${baseCmd} -c ${shellEscape(countQuery)}`)),
-                ssh.exec(remoteEnv(envMap, `${baseCmd} -c ${shellEscape(dataQuery)}`)),
-            ]);
-
-            if (colResult.code !== 0) throw new Error(`Column query failed: ${colResult.stderr}`);
-            if (countResult.code !== 0) throw new Error(`Count query failed: ${countResult.stderr}`);
-            if (dataResult.code !== 0) throw new Error(`Data query failed: ${dataResult.stderr}`);
-
-            const columns = parseColumnsOutput(colResult.stdout);
-            const totalCount = parseInt(countResult.stdout.trim(), 10) || 0;
-            const rows = parseDataRows(dataResult.stdout, columns);
-            return { rows, totalCount, columns };
-        } finally {
-            ssh.end();
-        }
-    }
-
-    const baseArgs = ["-h", config.host, "-p", String(config.port), "-U", config.user, "-d", database, "-t", "-A", "-F", "\t"];
-
-    const [colOut, countOut, dataOut] = await Promise.all([
-        execFileAsync("psql", [...baseArgs, "-c", colQuery], { env: pgEnv }),
-        execFileAsync("psql", [...baseArgs, "-c", countQuery], { env: pgEnv }),
-        execFileAsync("psql", [...baseArgs, "-c", dataQuery], { env: pgEnv }),
+    // Three concurrent queries. Over SSH each one is a separate channel, which
+    // the transport caps so a wide fan-out cannot exhaust the server session limit.
+    const [colResult, countResult, dataResult] = await Promise.all([
+        host.exec([...base, "-c", colQuery], { env }),
+        host.exec([...base, "-c", countQuery], { env }),
+        host.exec([...base, "-c", dataQuery], { env }),
     ]);
 
-    const columns = parseColumnsOutput(colOut.stdout);
-    const totalCount = parseInt(countOut.stdout.trim(), 10) || 0;
-    const rows = parseDataRows(dataOut.stdout, columns);
+    if (colResult.code !== 0) throw new Error(`Column query failed: ${colResult.stderr.trim()}`);
+    if (countResult.code !== 0) throw new Error(`Count query failed: ${countResult.stderr.trim()}`);
+    if (dataResult.code !== 0) throw new Error(`Data query failed: ${dataResult.stderr.trim()}`);
+
+    const columns = parseColumnsOutput(colResult.stdout);
+    const totalCount = parseInt(countResult.stdout.trim(), 10) || 0;
+    const rows = parseDataRows(dataResult.stdout, columns);
     return { rows, totalCount, columns };
 }

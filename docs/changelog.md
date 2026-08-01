@@ -17,6 +17,7 @@ All notable changes to DBackup are documented here.
 - **health check**: The per-adapter timeout now runs inside the connection scope. Previously a check that timed out while still connecting left its socket open, once a minute for every unreachable source.
 - **mysql**: SSH-mode dumps now use the same version-aware options as direct dumps. Previously the SSH path built a smaller set of arguments by hand and missed them, so a MySQL 8 dump taken over SSH did not get `--default-character-set=utf8mb4`.
 - **mysql**: Listing databases with sizes now falls back to a plain listing when `information_schema` is unreadable. A least-privilege backup user previously saw an error instead of the database list in direct mode.
+- **postgres**: Connecting, listing databases and reading sizes now run through one code path for both connection modes, so the two no longer differ in which errors they report or how they fall back between the `postgres`, `template1` and configured databases.
 
 ### 🐛 Bug Fixes
 

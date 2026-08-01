@@ -12,7 +12,9 @@ const {
     mockReadTarManifest: vi.fn(),
 }));
 
-vi.mock("@/lib/adapters/database/postgres/connection", () => ({
+// analyzeDump greps a dump file that always sits on the DBackup host, so it
+// runs a plain local exec rather than going through the transport.
+vi.mock("@/lib/adapters/process", () => ({
     execFileAsync: (...args: any[]) => mockExecFileAsync(...args),
 }));
 
