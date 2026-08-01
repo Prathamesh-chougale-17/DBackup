@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { execFile } from "child_process";
 import util from "util";
 import { getMysqlCommand, getMysqladminCommand } from "./tools";
@@ -76,7 +77,7 @@ export async function ensureDatabase(config: MySQLConfig, dbName: string, user: 
     }
 }
 
-export async function test(config: MySQLConfig): Promise<{ success: boolean; message: string; version?: string }> {
+export async function test(config: MySQLConfig, _host?: ExecutionHost): Promise<{ success: boolean; message: string; version?: string }> {
     if (isSSHMode(config)) {
         const sshConfig = extractSshConfig(config)!;
         const ssh = new SshClient();
@@ -162,7 +163,7 @@ export async function test(config: MySQLConfig): Promise<{ success: boolean; mes
     }
 }
 
-export async function getDatabases(config: MySQLConfig): Promise<string[]> {
+export async function getDatabases(config: MySQLConfig, _host: ExecutionHost): Promise<string[]> {
     const sysDbs = ['information_schema', 'mysql', 'performance_schema', 'sys'];
 
     if (isSSHMode(config)) {
@@ -227,7 +228,7 @@ function parseStatsOutput(stdout: string): DatabaseInfo[] {
         });
 }
 
-export async function getDatabasesWithStats(config: MySQLConfig): Promise<DatabaseInfo[]> {
+export async function getDatabasesWithStats(config: MySQLConfig, _host: ExecutionHost): Promise<DatabaseInfo[]> {
     if (isSSHMode(config)) {
         const sshConfig = extractSshConfig(config)!;
         const ssh = new SshClient();

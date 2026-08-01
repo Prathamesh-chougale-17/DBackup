@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PostgresConfig } from "@/lib/adapters/definitions";
 
@@ -144,7 +148,7 @@ describe("PostgreSQL Dump - single database", () => {
     });
 
     it("dumps a single database and returns success", async () => {
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump", fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.size).toBe(1024 * 100);
@@ -156,7 +160,7 @@ describe("PostgreSQL Dump - single database", () => {
     });
 
     it("uses custom format flag (-F c) in pg_dump args", async () => {
-        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump");
+        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_dump",
@@ -169,7 +173,7 @@ describe("PostgreSQL Dump - single database", () => {
         const result = await dump(
             buildConfig({ database: ["appdb"] as any }),
             "/tmp/appdb.dump"
-        );
+        , fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledWith(
@@ -184,7 +188,7 @@ describe("PostgreSQL Dump - single database", () => {
         const result = await dump(
             buildConfig({ database: "   " }),
             "/tmp/fallback.dump"
-        );
+        , fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalled();
@@ -193,7 +197,7 @@ describe("PostgreSQL Dump - single database", () => {
     it("returns failure when pg_dump exits with non-zero code", async () => {
         mockSpawnProcess.mockImplementation(() => makeSpawnProcess(1));
 
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/exited with code 1/i);
@@ -204,7 +208,7 @@ describe("PostgreSQL Dump - single database", () => {
             makeSpawnProcessWithError("spawn pg_dump ENOENT")
         );
 
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("spawn pg_dump ENOENT");
@@ -216,7 +220,7 @@ describe("PostgreSQL Dump - single database", () => {
         );
         const logs: string[] = [];
 
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump", (msg) => {
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump", fakeHost, (msg) => {
             logs.push(msg);
         });
 
@@ -230,7 +234,7 @@ describe("PostgreSQL Dump - single database", () => {
         );
         const logs: string[] = [];
 
-        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump", (msg) => {
+        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump", fakeHost, (msg) => {
             logs.push(msg);
         });
 
@@ -242,7 +246,7 @@ describe("PostgreSQL Dump - single database", () => {
     // -------------------------------------------------------------------------
 
     it("uses default compression level 6 when pgCompression is undefined", async () => {
-        await dump(buildConfig({ database: "mydb" }), "/tmp/out.dump");
+        await dump(buildConfig({ database: "mydb" }), "/tmp/out.dump", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_dump",
@@ -252,7 +256,7 @@ describe("PostgreSQL Dump - single database", () => {
     });
 
     it("uses default compression level 6 when pgCompression is empty string", async () => {
-        await dump(buildConfig({ database: "mydb", pgCompression: "" }), "/tmp/out.dump");
+        await dump(buildConfig({ database: "mydb", pgCompression: "" }), "/tmp/out.dump", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_dump",
@@ -262,7 +266,7 @@ describe("PostgreSQL Dump - single database", () => {
     });
 
     it("uses compression level 0 for NONE", async () => {
-        await dump(buildConfig({ database: "mydb", pgCompression: "NONE" }), "/tmp/out.dump");
+        await dump(buildConfig({ database: "mydb", pgCompression: "NONE" }), "/tmp/out.dump", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_dump",
@@ -272,7 +276,7 @@ describe("PostgreSQL Dump - single database", () => {
     });
 
     it("uses numeric syntax for GZIP:5", async () => {
-        await dump(buildConfig({ database: "mydb", pgCompression: "GZIP:5" }), "/tmp/out.dump");
+        await dump(buildConfig({ database: "mydb", pgCompression: "GZIP:5" }), "/tmp/out.dump", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_dump",
@@ -282,7 +286,7 @@ describe("PostgreSQL Dump - single database", () => {
     });
 
     it("uses lz4 syntax for LZ4:1", async () => {
-        await dump(buildConfig({ database: "mydb", pgCompression: "LZ4:1" }), "/tmp/out.dump");
+        await dump(buildConfig({ database: "mydb", pgCompression: "LZ4:1" }), "/tmp/out.dump", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_dump",
@@ -292,7 +296,7 @@ describe("PostgreSQL Dump - single database", () => {
     });
 
     it("uses zstd syntax for ZSTD:3", async () => {
-        await dump(buildConfig({ database: "mydb", pgCompression: "ZSTD:3" }), "/tmp/out.dump");
+        await dump(buildConfig({ database: "mydb", pgCompression: "ZSTD:3" }), "/tmp/out.dump", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_dump",
@@ -302,7 +306,7 @@ describe("PostgreSQL Dump - single database", () => {
     });
 
     it("falls back to level 6 for unknown compression algorithm", async () => {
-        await dump(buildConfig({ database: "mydb", pgCompression: "BROTLI:5" }), "/tmp/out.dump");
+        await dump(buildConfig({ database: "mydb", pgCompression: "BROTLI:5" }), "/tmp/out.dump", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_dump",
@@ -312,7 +316,7 @@ describe("PostgreSQL Dump - single database", () => {
     });
 
     it("falls back to level 6 when pgCompression has no colon separator", async () => {
-        await dump(buildConfig({ database: "mydb", pgCompression: "GZIP" }), "/tmp/out.dump");
+        await dump(buildConfig({ database: "mydb", pgCompression: "GZIP" }), "/tmp/out.dump", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_dump",
@@ -325,7 +329,7 @@ describe("PostgreSQL Dump - single database", () => {
         await dump(
             buildConfig({ database: "mydb", options: "--no-privileges --no-owner" }),
             "/tmp/out.dump"
-        );
+        , fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_dump",
@@ -338,7 +342,7 @@ describe("PostgreSQL Dump - single database", () => {
         await dump(
             buildConfig({ database: "mydb", options: '"--schema=public"' }),
             "/tmp/out.dump"
-        );
+        , fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_dump",
@@ -351,7 +355,7 @@ describe("PostgreSQL Dump - single database", () => {
         await dump(
             buildConfig({ database: "mydb", options: "'--schema=public'" }),
             "/tmp/out.dump"
-        );
+        , fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_dump",
@@ -374,7 +378,7 @@ describe("PostgreSQL Dump - dumpOne()", () => {
     });
 
     it("dumps the given database directly, without TAR wrapping", async () => {
-        const result = await dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.dump");
+        const result = await dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.dump", fakeHost);
 
         expect(result).toEqual({ size: 1024 * 100 });
         expect(mockSpawnProcess).toHaveBeenCalledWith(
@@ -386,11 +390,11 @@ describe("PostgreSQL Dump - dumpOne()", () => {
     });
 
     it("works without an onLog callback", async () => {
-        await expect(dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.dump")).resolves.toEqual({ size: 1024 * 100 });
+        await expect(dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.dump", fakeHost)).resolves.toEqual({ size: 1024 * 100 });
     });
 
     it("injects PGPASSWORD into the environment when a password is set", async () => {
-        await dumpOne(buildConfig({ password: "hunter2" }), "otherdb", "/tmp/otherdb.dump");
+        await dumpOne(buildConfig({ password: "hunter2" }), "otherdb", "/tmp/otherdb.dump", fakeHost);
 
         const [, , spawnOptions] = mockSpawnProcess.mock.calls[0] as any[];
         expect(spawnOptions.env.PGPASSWORD).toBe("hunter2");
@@ -419,7 +423,7 @@ describe("PostgreSQL Dump - multi-database TAR archive", () => {
         const result = await dump(
             buildConfig({ database: "db1,db2" }),
             "/tmp/multi.tar"
-        );
+        , fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockCreateTempDir).toHaveBeenCalled();
@@ -427,7 +431,7 @@ describe("PostgreSQL Dump - multi-database TAR archive", () => {
     });
 
     it("passes correct tar entries to createMultiDbTar", async () => {
-        await dump(buildConfig({ database: "db1,db2" }), "/tmp/multi.tar");
+        await dump(buildConfig({ database: "db1,db2" }), "/tmp/multi.tar", fakeHost);
 
         const [tarFiles] = mockCreateMultiDbTar.mock.calls[0] as any[];
         expect(tarFiles).toHaveLength(2);
@@ -436,7 +440,7 @@ describe("PostgreSQL Dump - multi-database TAR archive", () => {
     });
 
     it("cleans up temp directory after successful multi-db dump", async () => {
-        await dump(buildConfig({ database: "db1,db2" }), "/tmp/multi.tar");
+        await dump(buildConfig({ database: "db1,db2" }), "/tmp/multi.tar", fakeHost);
 
         expect(mockCleanupTempDir).toHaveBeenCalledWith("/tmp/pg-multidb-abc");
     });
@@ -444,7 +448,7 @@ describe("PostgreSQL Dump - multi-database TAR archive", () => {
     it("cleans up temp directory even when an individual dump fails", async () => {
         mockSpawnProcess.mockImplementation(() => makeSpawnProcess(1));
 
-        await dump(buildConfig({ database: "db1,db2" }), "/tmp/multi.tar");
+        await dump(buildConfig({ database: "db1,db2" }), "/tmp/multi.tar", fakeHost);
 
         expect(mockCleanupTempDir).toHaveBeenCalledWith("/tmp/pg-multidb-abc");
     });
@@ -453,7 +457,7 @@ describe("PostgreSQL Dump - multi-database TAR archive", () => {
         const result = await dump(
             buildConfig({ database: ["shop", "analytics"] as any }),
             "/tmp/multi.tar"
-        );
+        , fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockCreateMultiDbTar).toHaveBeenCalled();
@@ -481,7 +485,7 @@ describe("PostgreSQL Dump - auto-discovery", () => {
             totalSize: 2048,
         });
 
-        const result = await dump(buildConfig({ database: "" }), "/tmp/auto.tar");
+        const result = await dump(buildConfig({ database: "" }), "/tmp/auto.tar", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockGetDatabases).toHaveBeenCalled();
@@ -494,7 +498,7 @@ describe("PostgreSQL Dump - auto-discovery", () => {
         const result = await dump(
             buildConfig({ database: undefined }),
             "/tmp/single-discovered.dump"
-        );
+        , fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockGetDatabases).toHaveBeenCalled();
@@ -503,7 +507,7 @@ describe("PostgreSQL Dump - auto-discovery", () => {
     it("returns failure when auto-discovery finds no databases", async () => {
         mockGetDatabases.mockResolvedValue([]);
 
-        const result = await dump(buildConfig({ database: "" }), "/tmp/none.dump");
+        const result = await dump(buildConfig({ database: "" }), "/tmp/none.dump", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/No databases found/i);
@@ -537,7 +541,7 @@ describe("PostgreSQL Dump - SSH path", () => {
     });
 
     it("runs pg_dump via SSH and returns success", async () => {
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSshExecStream).toHaveBeenCalled();
@@ -548,7 +552,7 @@ describe("PostgreSQL Dump - SSH path", () => {
             cb(null, makeSshStream(1));
         });
 
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/exited with code 1/i);
@@ -559,7 +563,7 @@ describe("PostgreSQL Dump - SSH path", () => {
             cb(new Error("SSH channel error"), null);
         });
 
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("SSH channel error");
@@ -573,7 +577,7 @@ describe("PostgreSQL Dump - SSH path", () => {
 
         const result = await dump(
             buildConfig({ database: "mydb" }),
-            "/tmp/mydb.dump",
+            "/tmp/mydb.dump", fakeHost,
             (msg) => logs.push(msg)
         );
 
@@ -587,7 +591,7 @@ describe("PostgreSQL Dump - SSH path", () => {
         });
         const logs: string[] = [];
 
-        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump", (msg) => logs.push(msg));
+        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.dump", fakeHost, (msg) => logs.push(msg));
 
         expect(logs.some((l) => l.includes("NOTICE"))).toBe(false);
     });
@@ -596,7 +600,7 @@ describe("PostgreSQL Dump - SSH path", () => {
         const result = await dump(
             buildConfig({ database: "mydb", options: "--no-owner" }),
             "/tmp/mydb.dump"
-        );
+        , fakeHost);
 
         expect(result.success).toBe(true);
     });
@@ -605,7 +609,7 @@ describe("PostgreSQL Dump - SSH path", () => {
         const result = await dump(
             buildConfig({ database: "mydb", options: '"--schema=public" \'--no-acl\' --no-owner' }),
             "/tmp/mydb.dump"
-        );
+        , fakeHost);
 
         expect(result.success).toBe(true);
     });

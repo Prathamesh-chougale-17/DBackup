@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { MySQLConfig, MariaDBConfig } from "@/lib/adapters/definitions";
@@ -158,13 +159,14 @@ export async function dumpOne(
     config: MySQLDumpConfig,
     dbName: string,
     destinationPath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<{ size: number }> {
     const result = await dumpSingleDatabase(config, dbName, destinationPath, onLog ?? (() => {}));
     return { size: result.size };
 }
 
-export async function dump(config: MySQLDumpConfig, destinationPath: string, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void, _onProgress?: (percentage: number) => void): Promise<BackupResult> {
+export async function dump(config: MySQLDumpConfig, destinationPath: string, _host: ExecutionHost, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void, _onProgress?: (percentage: number) => void): Promise<BackupResult> {
     const startedAt = new Date();
     const logs: string[] = [];
     const log = (msg: string, level: LogLevel = 'info', type: LogType = 'general', details?: string) => {
@@ -181,7 +183,7 @@ export async function dump(config: MySQLDumpConfig, destinationPath: string, onL
 
         if (dbs.length === 0) {
             log("No databases selected - backing up all databases");
-            dbs = await getDatabases(config);
+            dbs = await getDatabases(config, _host);
             log(`Found ${dbs.length} database(s): ${dbs.join(', ')}`);
         }
 

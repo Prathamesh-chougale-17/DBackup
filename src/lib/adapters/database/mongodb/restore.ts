@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { MongoClient } from "mongodb";
@@ -57,7 +58,7 @@ function buildConnectionUri(config: MongoDBConfig): string {
     return `mongodb://${auth}${config.host}:${config.port}/${authParam}`;
 }
 
-export async function prepareRestore(config: MongoDBRestoreConfig, databases: string[]): Promise<void> {
+export async function prepareRestore(config: MongoDBRestoreConfig, databases: string[], _host: ExecutionHost): Promise<void> {
     if (isSSHMode(config)) {
         // In SSH mode, we trust mongorestore to create databases. Skip the permission check.
         return;
@@ -271,6 +272,7 @@ export async function restoreOne(
     config: MongoDBRestoreConfig,
     filePath: string,
     targetDbName: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     _onProgress?: (percentage: number, detail?: string) => void,
     originalDbName?: string
@@ -281,6 +283,7 @@ export async function restoreOne(
 export async function restore(
     config: MongoDBRestoreConfig,
     sourcePath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     onProgress?: (percentage: number) => void
 ): Promise<BackupResult> {
@@ -337,7 +340,7 @@ export async function restore(
                 log(`Restoring database: ${dbEntry.name} -> ${targetDb}`, 'info');
 
                 // Prepare restore (permission check)
-                await prepareRestore(config, [targetDb]);
+                await prepareRestore(config, [targetDb], _host);
 
                 // Restore using mongorestore with nsFrom/nsTo for renaming
                 await restoreSingleDatabase(archivePath, targetDb, dbEntry.name, config, log, false);

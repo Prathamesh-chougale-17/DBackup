@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { SQLiteConfig } from "@/lib/adapters/definitions";
 
@@ -125,7 +129,7 @@ function makeSshStream(exitCode = 0, stderrData?: string) {
 
 describe("SQLite prepareRestore()", () => {
     it("resolves without error (no-op)", async () => {
-        await expect(prepareRestore(buildConfig(), [])).resolves.toBeUndefined();
+        await expect(prepareRestore(buildConfig(), [], fakeHost)).resolves.toBeUndefined();
     });
 });
 
@@ -149,7 +153,7 @@ describe("SQLite restore() - local mode", () => {
     it("returns success when sqlite3 exits with code 0", async () => {
         mockSpawnProcess.mockReturnValue(makeSpawnProcess(0));
 
-        const result = await restore(buildConfig(), "/tmp/backup.sql");
+        const result = await restore(buildConfig(), "/tmp/backup.sql", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledWith("sqlite3", ["/data/db.sqlite", ".restore /tmp/backup.sql"]);
@@ -162,7 +166,7 @@ describe("SQLite restore() - local mode", () => {
         mockFsCreateReadStream.mockReturnValue(makeReadStream());
         mockSpawnProcess.mockReturnValue(makeSpawnProcess(0));
 
-        await restore(buildConfig({ path: "/data/db.sqlite" }), "/tmp/backup.sql");
+        await restore(buildConfig({ path: "/data/db.sqlite" }), "/tmp/backup.sql", fakeHost);
 
         expect(mockFsCopyFileSync).toHaveBeenCalledWith(
             "/data/db.sqlite",
@@ -178,7 +182,7 @@ describe("SQLite restore() - local mode", () => {
         mockSpawnProcess.mockReturnValue(makeSpawnProcess(0));
 
         const progressValues: number[] = [];
-        const restorePromise = restore(buildConfig(), "/tmp/backup.sql", undefined, (p) => progressValues.push(p));
+        const restorePromise = restore(buildConfig(), "/tmp/backup.sql", fakeHost, undefined, (p) => progressValues.push(p));
 
         process.nextTick(() => {
             readStream.emit("data", Buffer.alloc(500));
@@ -196,7 +200,7 @@ describe("SQLite restore() - local mode", () => {
         mockFsCreateReadStream.mockReturnValue(makeReadStream());
         mockSpawnProcess.mockReturnValue(makeSpawnProcess(1));
 
-        const result = await restore(buildConfig(), "/tmp/backup.sql");
+        const result = await restore(buildConfig(), "/tmp/backup.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("failed with code 1");
@@ -212,7 +216,7 @@ describe("SQLite restore() - local mode", () => {
         process.nextTick(() => proc.emit("error", new Error("spawn ENOENT")));
         mockSpawnProcess.mockReturnValue(proc);
 
-        const result = await restore(buildConfig(), "/tmp/backup.sql");
+        const result = await restore(buildConfig(), "/tmp/backup.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("spawn ENOENT");
@@ -222,7 +226,7 @@ describe("SQLite restore() - local mode", () => {
         mockFsCreateReadStream.mockReturnValue(makeReadStream());
         mockSpawnProcess.mockReturnValue(makeSpawnProcess(0));
 
-        const result = await restore(buildConfig(), "/tmp/backup.sql");
+        const result = await restore(buildConfig(), "/tmp/backup.sql", fakeHost);
 
         expect(result.startedAt).toBeInstanceOf(Date);
         expect(result.completedAt).toBeInstanceOf(Date);
@@ -239,7 +243,7 @@ describe("SQLite restore() - invalid mode", () => {
         const config = buildConfig();
         (config as any).mode = "ftp";
 
-        const result = await restore(config, "/tmp/backup.sql");
+        const result = await restore(config, "/tmp/backup.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("Invalid mode");
@@ -263,7 +267,7 @@ describe("SQLite restore() - ssh mode", () => {
     it("returns failure when SSH config is missing", async () => {
         mockExtractSqliteSshConfig.mockReturnValue(null);
 
-        const result = await restore(buildSshConfig(), "/tmp/backup.sql");
+        const result = await restore(buildSshConfig(), "/tmp/backup.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("SSH host and username are required");
@@ -281,7 +285,7 @@ describe("SQLite restore() - ssh mode", () => {
         const stream = makeSshStream(0);
         mockSshExecStream.mockImplementation((_cmd: string, cb: any) => cb(null, stream));
 
-        const result = await restore(buildSshConfig(), "/tmp/backup.sql");
+        const result = await restore(buildSshConfig(), "/tmp/backup.sql", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSshEnd).toHaveBeenCalled();
@@ -300,7 +304,7 @@ describe("SQLite restore() - ssh mode", () => {
         mockSshExecStream.mockImplementation((_cmd: string, cb: any) => cb(null, stream));
 
         const progressValues: number[] = [];
-        await restore(buildSshConfig(), "/tmp/backup.sql", undefined, (p) => progressValues.push(p));
+        await restore(buildSshConfig(), "/tmp/backup.sql", fakeHost, undefined, (p) => progressValues.push(p));
 
         expect(progressValues).toContain(50);
         expect(progressValues).toContain(100);
@@ -317,7 +321,7 @@ describe("SQLite restore() - ssh mode", () => {
         // cleanup
         mockSshExec.mockResolvedValue({ stdout: "", code: 0 });
 
-        const result = await restore(buildSshConfig(), "/tmp/backup.sql");
+        const result = await restore(buildSshConfig(), "/tmp/backup.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("mismatch");
@@ -333,7 +337,7 @@ describe("SQLite restore() - ssh mode", () => {
             .mockResolvedValue({ stdout: "", code: 0 }); // cleanup
         mockSshUploadFile.mockResolvedValue(undefined);
 
-        const result = await restore(buildSshConfig(), "/tmp/backup.sql");
+        const result = await restore(buildSshConfig(), "/tmp/backup.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("code 1");
@@ -349,7 +353,7 @@ describe("SQLite restore() - ssh mode", () => {
             .mockResolvedValue({ stdout: "", code: 0 }); // cleanup
         mockSshUploadFile.mockResolvedValue(undefined);
 
-        const result = await restore(buildSshConfig(), "/tmp/backup.sql");
+        const result = await restore(buildSshConfig(), "/tmp/backup.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("SIGTERM");
@@ -368,7 +372,7 @@ describe("SQLite restore() - ssh mode", () => {
             cb(new Error("exec failed"), null),
         );
 
-        await restore(buildSshConfig(), "/tmp/backup.sql");
+        await restore(buildSshConfig(), "/tmp/backup.sql", fakeHost);
 
         // cleanup rm -f should still be called via finally block
         const rmCall = (mockSshExec.mock.calls as any[]).find(

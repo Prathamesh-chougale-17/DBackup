@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/lib/ssh", () => ({
@@ -35,7 +39,7 @@ describe("Postgres browser - getTables", () => {
             stderr: "",
         } as any);
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result).toHaveLength(1);
         expect(result[0]).toMatchObject({
@@ -52,7 +56,7 @@ describe("Postgres browser - getTables", () => {
             stderr: "",
         } as any);
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result[0].type).toBe("view");
     });
@@ -63,7 +67,7 @@ describe("Postgres browser - getTables", () => {
             stderr: "",
         } as any);
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result[0].type).toBe("materialized_view");
     });
@@ -71,7 +75,7 @@ describe("Postgres browser - getTables", () => {
     it("returns empty array when output is blank", async () => {
         vi.mocked(execFileAsync).mockResolvedValue({ stdout: "", stderr: "" } as any);
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result).toEqual([]);
     });
@@ -97,7 +101,7 @@ describe("Postgres browser - getTableData", () => {
             .mockResolvedValueOnce({ stdout: countStdout, stderr: "" } as any)
             .mockResolvedValueOnce({ stdout: dataStdout, stderr: "" } as any);
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(result.totalCount).toBe(2);
         expect(result.columns).toHaveLength(2);
@@ -113,7 +117,7 @@ describe("Postgres browser - getTableData", () => {
             .mockResolvedValueOnce({ stdout: "0\n", stderr: "" } as any)
             .mockResolvedValueOnce({ stdout: "", stderr: "" } as any);
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(result.columns[0].defaultValue).toBeUndefined();
     });
@@ -126,7 +130,7 @@ describe("Postgres browser - getTableData", () => {
             search: "ord",
             searchColumn: "status",
             matchMode: "starts",
-        } as any);
+        } as any, fakeHost);
 
         expect(execFileAsync).toHaveBeenCalled();
     });

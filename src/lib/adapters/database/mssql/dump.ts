@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { executeQueryWithMessages, getDatabases, supportsCompression } from "./connection";
@@ -35,6 +36,7 @@ type MSSQLDumpConfig = MSSQLConfig & {
 export async function dump(
     config: MSSQLDumpConfig,
     destinationPath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     _onProgress?: (percentage: number) => void
 ): Promise<BackupResult> {
@@ -59,7 +61,7 @@ export async function dump(
         // No databases selected: discover all user databases on the server
         if (databases.length === 0) {
             log("No databases selected - discovering all user databases");
-            databases = await getDatabases(config);
+            databases = await getDatabases(config, _host);
             if (databases.length === 0) {
                 throw new Error("No user databases found on server (system DBs are excluded)");
             }

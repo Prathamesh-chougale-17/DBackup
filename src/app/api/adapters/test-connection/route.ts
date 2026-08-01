@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { registry } from "@/lib/core/registry";
+import { runAdapterTest } from "@/lib/transport/adapter-invoke";
 import { registerAdapters } from "@/lib/adapters";
 import { overlayCredentialsOnConfig } from "@/lib/adapters/config-resolver";
 import { headers } from "next/headers";
@@ -58,7 +59,7 @@ export async function POST(req: NextRequest) {
         const TEST_TIMEOUT_MS = 10_000;
 
         const result = await Promise.race([
-            adapter.test(mergedConfig),
+            runAdapterTest(adapter, mergedConfig).then((r) => r!),
             new Promise<{ success: false; message: string }>((resolve) =>
                 setTimeout(
                     () => resolve({ success: false, message: "Connection test timed out after 10s. Check the host and port settings." }),

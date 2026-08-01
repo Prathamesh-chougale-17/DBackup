@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { spawn } from "child_process";
@@ -208,6 +209,7 @@ export async function dumpOne(
     config: PostgresDumpConfig,
     dbName: string,
     destinationPath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<{ size: number }> {
     const env = { ...process.env };
@@ -220,6 +222,7 @@ export async function dumpOne(
 export async function dump(
     config: PostgresDumpConfig,
     destinationPath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     _onProgress?: (percentage: number) => void
 ): Promise<BackupResult> {
@@ -255,7 +258,7 @@ export async function dump(
         // Auto-discover all databases if none specified
         if (dbs.length === 0) {
             log("No DB selected - auto-discovering all databases…", "info");
-            dbs = await getDatabases(config);
+            dbs = await getDatabases(config, _host);
             log(`Discovered ${dbs.length} database(s): ${dbs.join(", ")}`, "info");
             if (dbs.length === 0) {
                 throw new Error("No databases found on the server");

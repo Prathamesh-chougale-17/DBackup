@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { registry } from "@/lib/core/registry";
+import { withHost } from "@/lib/transport";
+import type { DatabaseAdapter } from "@/lib/core/interfaces";
 import { registerAdapters } from "@/lib/adapters";
 import { headers } from "next/headers";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
@@ -51,39 +53,43 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ success: false, message: "Missing adapterId/config or sourceId" }, { status: 400 });
         }
 
-        const adapter = registry.get(resolvedAdapterId);
+        const adapter = registry.get(resolvedAdapterId) as DatabaseAdapter | undefined;
 
         if (!adapter) {
             return NextResponse.json({ success: false, message: "Adapter not found" }, { status: 404 });
         }
 
-        // Prefer getDatabasesWithStats, fall back to getDatabases
-        let databases: DatabaseInfo[];
-
-        if (adapter.getDatabasesWithStats) {
-            databases = await adapter.getDatabasesWithStats(resolvedConfig);
-        } else if (adapter.getDatabases) {
-            const names = await adapter.getDatabases(resolvedConfig);
-            databases = names.map(name => ({ name }));
-        } else {
+        const withStats = adapter.getDatabasesWithStats;
+        const listNames = adapter.getDatabases;
+        if (!withStats && !listNames) {
             return NextResponse.json({ success: false, message: "This adapter does not support listing databases." });
         }
 
-        // Also retrieve server version/edition for compatibility checks
+        const statsConfig = resolvedConfig;
         let serverVersion: string | undefined;
         let serverEdition: string | undefined;
 
-        if (adapter.test) {
-            try {
-                const testResult = await adapter.test(resolvedConfig) as { success: boolean; version?: string; edition?: string };
-                if (testResult.success) {
-                    serverVersion = testResult.version;
-                    serverEdition = testResult.edition;
+        // One host for the whole request: listing databases and probing the
+        // server version used to open two connections against the same machine.
+        const databases: DatabaseInfo[] = await withHost(adapter, statsConfig, async (host) => {
+            const listed = withStats
+                ? await withStats(statsConfig, host)
+                : (await listNames!(statsConfig, host)).map(name => ({ name }));
+
+            if (adapter.test) {
+                try {
+                    const testResult = await adapter.test(statsConfig, host) as { success: boolean; version?: string; edition?: string };
+                    if (testResult.success) {
+                        serverVersion = testResult.version;
+                        serverEdition = testResult.edition;
+                    }
+                } catch {
+                    // Non-critical - version info is optional
                 }
-            } catch {
-                // Non-critical - version info is optional
             }
-        }
+
+            return listed;
+        });
 
         return NextResponse.json({ success: true, databases, serverVersion, serverEdition });
 

@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { FirebirdConfig } from "@/lib/adapters/definitions";
@@ -140,6 +141,7 @@ export async function dumpOne(
     config: FirebirdDumpConfig,
     dbName: string,
     destinationPath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<{ size: number }> {
     const result = await dumpSingleDatabase(config, dbName, destinationPath, onLog ?? (() => {}));
@@ -149,6 +151,7 @@ export async function dumpOne(
 export async function dump(
     config: FirebirdDumpConfig,
     destinationPath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     _onProgress?: (percentage: number) => void
 ): Promise<BackupResult> {

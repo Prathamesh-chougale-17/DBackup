@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { MySQLConfig, MariaDBConfig } from "@/lib/adapters/definitions";
@@ -167,7 +168,7 @@ function createStderrHandler(
     };
 }
 
-export async function prepareRestore(config: MySQLRestoreConfig, databases: string[]): Promise<void> {
+export async function prepareRestore(config: MySQLRestoreConfig, databases: string[], _host: ExecutionHost): Promise<void> {
     const usePrivileged = !!config.privilegedAuth;
     const user = usePrivileged ? config.privilegedAuth!.user : config.user;
     const pass = usePrivileged ? config.privilegedAuth!.password : config.password;
@@ -416,6 +417,7 @@ export async function restoreOne(
     config: MySQLRestoreConfig,
     filePath: string,
     targetDbName: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     onProgress?: (percentage: number, detail?: string) => void,
     originalDbName?: string
@@ -423,7 +425,7 @@ export async function restoreOne(
     await restoreSingleFile(config, filePath, targetDbName, onLog ?? (() => {}), onProgress, originalDbName);
 }
 
-export async function restore(config: MySQLRestoreConfig, sourcePath: string, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void, onProgress?: (percentage: number, detail?: string) => void): Promise<BackupResult> {
+export async function restore(config: MySQLRestoreConfig, sourcePath: string, _host: ExecutionHost, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void, onProgress?: (percentage: number, detail?: string) => void): Promise<BackupResult> {
     const startedAt = new Date();
     const logs: string[] = [];
     const log = (msg: string, level: LogLevel = 'info', type: LogType = 'general', details?: string) => {

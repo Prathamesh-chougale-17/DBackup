@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MongoDBConfig } from "@/lib/adapters/definitions";
 
@@ -134,7 +138,7 @@ describe("MongoDB Dump - dump()", () => {
         const proc = makeSpawnProcess();
         mockSpawnProcess.mockReturnValue(proc);
 
-        const result = await dump(config, "/tmp/output.archive");
+        const result = await dump(config, "/tmp/output.archive", fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.size).toBe(512000);
@@ -149,7 +153,7 @@ describe("MongoDB Dump - dump()", () => {
         const proc = makeSpawnProcess();
         mockSpawnProcess.mockReturnValue(proc);
 
-        const result = await dump(config, "/tmp/output.archive");
+        const result = await dump(config, "/tmp/output.archive", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledWith(
@@ -168,7 +172,7 @@ describe("MongoDB Dump - dump()", () => {
         const proc = makeSpawnProcess();
         mockSpawnProcess.mockReturnValue(proc);
 
-        const result = await dump(config, "/tmp/output.archive");
+        const result = await dump(config, "/tmp/output.archive", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledWith(
@@ -187,7 +191,7 @@ describe("MongoDB Dump - dump()", () => {
         const proc = makeSpawnProcess();
         mockSpawnProcess.mockReturnValue(proc);
 
-        const result = await dump(config, "/tmp/output.archive");
+        const result = await dump(config, "/tmp/output.archive", fakeHost);
 
         expect(mockGetDatabases).toHaveBeenCalled();
         expect(result.success).toBe(true);
@@ -199,7 +203,7 @@ describe("MongoDB Dump - dump()", () => {
         const proc = makeSpawnProcess();
         mockSpawnProcess.mockReturnValue(proc);
 
-        const result = await dump(config, "/tmp/output.archive");
+        const result = await dump(config, "/tmp/output.archive", fakeHost);
 
         // Should still attempt dump (mongodump without --db dumps all)
         expect(result.success).toBe(true);
@@ -217,7 +221,7 @@ describe("MongoDB Dump - dump()", () => {
             .mockReturnValueOnce(proc1)
             .mockReturnValueOnce(proc2);
 
-        const result = await dump(config, "/tmp/multi.tar");
+        const result = await dump(config, "/tmp/multi.tar", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockCreateTempDir).toHaveBeenCalled();
@@ -230,7 +234,7 @@ describe("MongoDB Dump - dump()", () => {
         const proc = makeSpawnProcess();
         mockSpawnProcess.mockReturnValue(proc);
 
-        await dump(config, "/tmp/output.archive");
+        await dump(config, "/tmp/output.archive", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "mongodump",
@@ -243,7 +247,7 @@ describe("MongoDB Dump - dump()", () => {
         const proc = makeSpawnProcess();
         mockSpawnProcess.mockReturnValue(proc);
 
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/output.archive");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/output.archive", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/empty/i);
@@ -254,7 +258,7 @@ describe("MongoDB Dump - dump()", () => {
         const proc = makeSpawnProcess();
         mockSpawnProcess.mockReturnValue(proc);
 
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/output.archive");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/output.archive", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("mongodump exited");
@@ -268,7 +272,7 @@ describe("MongoDB Dump - dump()", () => {
         mockSpawnProcess.mockReturnValue(proc);
         mockCreateMultiDbTar.mockRejectedValue(new Error("tar error"));
 
-        const result = await dump(config, "/tmp/multi.tar");
+        const result = await dump(config, "/tmp/multi.tar", fakeHost);
 
         expect(result.success).toBe(false);
         expect(mockCleanupTempDir).toHaveBeenCalledWith(tempPath);
@@ -282,7 +286,7 @@ describe("MongoDB Dump - dump()", () => {
         const proc = makeSpawnProcess();
         mockSpawnProcess.mockReturnValue(proc);
 
-        const result = await dump(config, "/tmp/multi.tar");
+        const result = await dump(config, "/tmp/multi.tar", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockCreateTempDir).toHaveBeenCalled();
@@ -313,7 +317,7 @@ describe("MongoDB Dump - dump()", () => {
             const result = await dump(
                 buildConfig({ database: "mydb", sshHost: "remote.example.com" } as any),
                 "/tmp/output.archive"
-            );
+            , fakeHost);
 
             expect(result.success).toBe(true);
             expect(mockSshExecStream).toHaveBeenCalled();
@@ -333,7 +337,7 @@ describe("MongoDB Dump - dump()", () => {
             const result = await dump(
                 buildConfig({ database: "mydb", sshHost: "remote.example.com" } as any),
                 "/tmp/output.archive"
-            );
+            , fakeHost);
 
             expect(result.success).toBe(false);
         });
@@ -346,7 +350,7 @@ describe("MongoDB Dump - dump()", () => {
             const result = await dump(
                 buildConfig({ database: "mydb", sshHost: "remote.example.com" } as any),
                 "/tmp/output.archive"
-            );
+            , fakeHost);
 
             expect(result.success).toBe(false);
         });
@@ -367,7 +371,7 @@ describe("MongoDB Dump - dumpOne()", () => {
     });
 
     it("dumps the given database directly, without TAR wrapping", async () => {
-        const result = await dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.archive");
+        const result = await dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.archive", fakeHost);
 
         expect(result).toEqual({ size: 512000 });
         expect(mockSpawnProcess).toHaveBeenCalledWith(
@@ -378,6 +382,6 @@ describe("MongoDB Dump - dumpOne()", () => {
     });
 
     it("works without an onLog callback", async () => {
-        await expect(dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.archive")).resolves.toEqual({ size: 512000 });
+        await expect(dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.archive", fakeHost)).resolves.toEqual({ size: 512000 });
     });
 });

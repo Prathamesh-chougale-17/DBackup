@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { executeQuery, executeParameterizedQuery, executeQueryWithMessages } from "./connection";
@@ -31,7 +32,7 @@ type MSSQLRestoreConfig = MSSQLConfig & {
 /**
  * Prepare restore by validating target databases
  */
-export async function prepareRestore(config: MSSQLRestoreConfig, databases: string[]): Promise<void> {
+export async function prepareRestore(config: MSSQLRestoreConfig, databases: string[], _host: ExecutionHost): Promise<void> {
     // Check if target databases can be created/overwritten
     for (const dbName of databases) {
         // Accept every name SQL Server accepts as a delimited identifier.
@@ -73,6 +74,7 @@ export async function prepareRestore(config: MSSQLRestoreConfig, databases: stri
 export async function restore(
     config: MSSQLRestoreConfig,
     sourcePath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     _onProgress?: (percentage: number) => void
 ): Promise<BackupResult> {

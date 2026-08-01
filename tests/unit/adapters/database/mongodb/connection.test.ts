@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MongoDBConfig } from "@/lib/adapters/definitions";
 
@@ -86,7 +90,7 @@ describe("MongoDB Connection - test()", () => {
                 .mockResolvedValueOnce(undefined) // ping
                 .mockResolvedValueOnce({ version: "7.0.5" }); // buildInfo
 
-            const result = await test(buildConfig());
+            const result = await test(buildConfig(), fakeHost);
 
             expect(result.success).toBe(true);
             expect(result.message).toContain("successful");
@@ -99,7 +103,7 @@ describe("MongoDB Connection - test()", () => {
                 .mockResolvedValueOnce(undefined)
                 .mockResolvedValueOnce({ version: "6.0.0" });
 
-            const result = await test(buildConfig({ uri: "mongodb://user:pass@host:27017/" }));
+            const result = await test(buildConfig({ uri: "mongodb://user:pass@host:27017/" }), fakeHost);
 
             expect(result.success).toBe(true);
             expect(result.version).toBe("6.0.0");
@@ -111,7 +115,7 @@ describe("MongoDB Connection - test()", () => {
                 .mockResolvedValueOnce(undefined)
                 .mockResolvedValueOnce({});
 
-            const result = await test(buildConfig());
+            const result = await test(buildConfig(), fakeHost);
 
             expect(result.success).toBe(true);
             expect(result.version).toBe("Unknown");
@@ -120,7 +124,7 @@ describe("MongoDB Connection - test()", () => {
         it("returns failure when connect throws", async () => {
             mockMongoConnect.mockRejectedValue(new Error("Connection refused"));
 
-            const result = await test(buildConfig());
+            const result = await test(buildConfig(), fakeHost);
 
             expect(result.success).toBe(false);
             expect(result.message).toContain("Connection refused");
@@ -134,7 +138,7 @@ describe("MongoDB Connection - test()", () => {
 
             const result = await test(
                 buildConfig({ user: "admin", password: "secret", authenticationDatabase: "admin" })
-            );
+            , fakeHost);
 
             expect(result.success).toBe(true);
         });
@@ -145,7 +149,7 @@ describe("MongoDB Connection - test()", () => {
                 .mockResolvedValueOnce(undefined)
                 .mockResolvedValueOnce({ version: "7.0.0" });
 
-            const result = await test(buildConfig({ user: undefined, password: undefined }));
+            const result = await test(buildConfig({ user: undefined, password: undefined }), fakeHost);
 
             expect(result.success).toBe(true);
         });
@@ -164,7 +168,7 @@ describe("MongoDB Connection - test()", () => {
         it("returns success when SSH exec succeeds", async () => {
             mockSshExec.mockResolvedValue({ code: 0, stdout: "7.0.5\n", stderr: "" });
 
-            const result = await test(buildConfig({ sshHost: "remote.example.com", sshUsername: "deploy" } as any));
+            const result = await test(buildConfig({ sshHost: "remote.example.com", sshUsername: "deploy" } as any), fakeHost);
 
             expect(result.success).toBe(true);
             expect(result.message).toContain("SSH");
@@ -174,7 +178,7 @@ describe("MongoDB Connection - test()", () => {
         it("returns failure when SSH exec exits with non-zero code", async () => {
             mockSshExec.mockResolvedValue({ code: 1, stdout: "", stderr: "auth failed" });
 
-            const result = await test(buildConfig({ sshHost: "remote.example.com" } as any));
+            const result = await test(buildConfig({ sshHost: "remote.example.com" } as any), fakeHost);
 
             expect(result.success).toBe(false);
             expect(result.message).toContain("auth failed");
@@ -183,7 +187,7 @@ describe("MongoDB Connection - test()", () => {
         it("returns failure when SSH connect throws", async () => {
             mockSshConnect.mockRejectedValue(new Error("SSH timeout"));
 
-            const result = await test(buildConfig({ sshHost: "remote.example.com" } as any));
+            const result = await test(buildConfig({ sshHost: "remote.example.com" } as any), fakeHost);
 
             expect(result.success).toBe(false);
             expect(result.message).toContain("SSH connection failed");
@@ -214,7 +218,7 @@ describe("MongoDB Connection - getDatabases()", () => {
                 ],
             });
 
-            const result = await getDatabases(buildConfig());
+            const result = await getDatabases(buildConfig(), fakeHost);
 
             expect(result).toEqual(["myapp", "analytics"]);
         });
@@ -222,7 +226,7 @@ describe("MongoDB Connection - getDatabases()", () => {
         it("throws on connection failure", async () => {
             mockMongoConnect.mockRejectedValue(new Error("ECONNREFUSED"));
 
-            await expect(getDatabases(buildConfig())).rejects.toThrow("Failed to list databases");
+            await expect(getDatabases(buildConfig(), fakeHost)).rejects.toThrow("Failed to list databases");
         });
     });
 
@@ -243,7 +247,7 @@ describe("MongoDB Connection - getDatabases()", () => {
                 stderr: "",
             });
 
-            const result = await getDatabases(buildConfig({ sshHost: "remote.example.com" } as any));
+            const result = await getDatabases(buildConfig({ sshHost: "remote.example.com" } as any), fakeHost);
 
             expect(result).toEqual(["myapp", "analytics", "reports"]);
         });
@@ -255,7 +259,7 @@ describe("MongoDB Connection - getDatabases()", () => {
                 stderr: "",
             });
 
-            const result = await getDatabases(buildConfig({ sshHost: "remote.example.com" } as any));
+            const result = await getDatabases(buildConfig({ sshHost: "remote.example.com" } as any), fakeHost);
 
             expect(result).toEqual(["myapp"]);
         });
@@ -267,7 +271,7 @@ describe("MongoDB Connection - getDatabases()", () => {
                 stderr: "",
             });
 
-            const result = await getDatabases(buildConfig({ sshHost: "remote.example.com" } as any));
+            const result = await getDatabases(buildConfig({ sshHost: "remote.example.com" } as any), fakeHost);
 
             expect(result).toContain("myapp");
             expect(result).toContain("analytics");
@@ -281,7 +285,7 @@ describe("MongoDB Connection - getDatabases()", () => {
             });
 
             await expect(
-                getDatabases(buildConfig({ sshHost: "remote.example.com" } as any))
+                getDatabases(buildConfig({ sshHost: "remote.example.com" } as any), fakeHost)
             ).rejects.toThrow("Failed to list databases");
         });
     });
@@ -308,7 +312,7 @@ describe("MongoDB Connection - getDatabasesWithStats()", () => {
             });
             mockListCollections.mockResolvedValue([{}, {}, {}]); // 3 collections
 
-            const result = await getDatabasesWithStats(buildConfig());
+            const result = await getDatabasesWithStats(buildConfig(), fakeHost);
 
             expect(result).toHaveLength(1); // admin filtered
             expect(result[0].name).toBe("myapp");
@@ -323,7 +327,7 @@ describe("MongoDB Connection - getDatabasesWithStats()", () => {
             });
             mockListCollections.mockRejectedValue(new Error("no permission"));
 
-            const result = await getDatabasesWithStats(buildConfig());
+            const result = await getDatabasesWithStats(buildConfig(), fakeHost);
 
             expect(result[0].name).toBe("myapp");
             expect(result[0].tableCount).toBeUndefined();
@@ -332,7 +336,7 @@ describe("MongoDB Connection - getDatabasesWithStats()", () => {
         it("throws on connection failure", async () => {
             mockMongoConnect.mockRejectedValue(new Error("timeout"));
 
-            await expect(getDatabasesWithStats(buildConfig())).rejects.toThrow(
+            await expect(getDatabasesWithStats(buildConfig(), fakeHost)).rejects.toThrow(
                 "Failed to list databases with stats"
             );
         });
@@ -344,7 +348,7 @@ describe("MongoDB Connection - getDatabasesWithStats()", () => {
             mockMongoClose.mockRejectedValue(new Error("close failed"));
 
             // Should not throw even though close fails
-            const result = await getDatabasesWithStats(buildConfig());
+            const result = await getDatabasesWithStats(buildConfig(), fakeHost);
             expect(result[0].name).toBe("myapp");
         });
     });
@@ -372,7 +376,7 @@ describe("MongoDB Connection - getDatabasesWithStats()", () => {
 
             const result = await getDatabasesWithStats(
                 buildConfig({ sshHost: "remote.example.com" } as any)
-            );
+            , fakeHost);
 
             // "config" is a system DB and gets filtered
             expect(result).toHaveLength(1);
@@ -385,7 +389,7 @@ describe("MongoDB Connection - getDatabasesWithStats()", () => {
             mockSshExec.mockResolvedValue({ code: 1, stdout: "", stderr: "connection refused" });
 
             await expect(
-                getDatabasesWithStats(buildConfig({ sshHost: "remote.example.com" } as any))
+                getDatabasesWithStats(buildConfig({ sshHost: "remote.example.com" } as any), fakeHost)
             ).rejects.toThrow("Failed to get database stats");
         });
 
@@ -398,7 +402,7 @@ describe("MongoDB Connection - getDatabasesWithStats()", () => {
 
             const result = await getDatabasesWithStats(
                 buildConfig({ sshHost: "remote.example.com" } as any)
-            );
+            , fakeHost);
 
             expect(result[0].name).toBe("myapp");
             expect(result[0].sizeInBytes).toBe(1024);

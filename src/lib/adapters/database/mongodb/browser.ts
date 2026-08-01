@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { MongoClient } from "mongodb";
 import { MongoDBConfig } from "@/lib/adapters/definitions";
 import { TableInfo, ColumnInfo, TableDataOptions, TableDataResult } from "@/lib/core/interfaces";
@@ -69,7 +70,7 @@ function parseJsonLine<T>(stdout: string): T | null {
     }
 }
 
-export async function getTables(config: MongoDBConfig, database: string): Promise<TableInfo[]> {
+export async function getTables(config: MongoDBConfig, database: string, _host: ExecutionHost): Promise<TableInfo[]> {
     const dbNameJs = JSON.stringify(database);
 
     if (isSSHMode(config)) {
@@ -119,7 +120,8 @@ export async function getTables(config: MongoDBConfig, database: string): Promis
 export async function getTableData(
     config: MongoDBConfig,
     options: TableDataOptions
-): Promise<TableDataResult> {
+,
+    _host: ExecutionHost): Promise<TableDataResult> {
     const { database, table, page, pageSize, sortBy, sortDir, search, searchColumn, matchMode } = options;
     const offset = (page - 1) * pageSize;
     const dbNameJs = JSON.stringify(database);

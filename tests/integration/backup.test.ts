@@ -1,3 +1,4 @@
+import { withHost } from "@/lib/transport";
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { registry } from '@/lib/core/registry';
 import { registerAdapters } from '@/lib/adapters';
@@ -39,11 +40,12 @@ describe('Integration Tests: Database Backup', () => {
                 // Ensure clean state
                 if (fs.existsSync(dumpFile)) fs.unlinkSync(dumpFile);
 
-                const result = await adapter.dump(
+                const result = await withHost(adapter, config, (host) => adapter.dump(
                     config as any,
                     dumpFile,
-                    (_) => { /* console.log(progress) */ }
-                );
+                    host,
+                    (_: string) => { /* console.log(progress) */ }
+                ));
 
                 expect(result.success).toBe(true); // Should return true on success
                 expect(fs.existsSync(dumpFile)).toBe(true);

@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { SQLiteConfig } from "@/lib/adapters/definitions";
 
@@ -96,7 +100,7 @@ describe("SQLite Connection - test() local mode", () => {
         execSucceeds("3.39.2 2022-07-21 15:24:47");
         mockFsAccess.mockResolvedValue(undefined);
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.message).toContain("Local SQLite connection successful");
@@ -107,7 +111,7 @@ describe("SQLite Connection - test() local mode", () => {
         execSucceeds("3.40.0 2023-01-01");
         mockFsAccess.mockResolvedValue(undefined);
 
-        const result = await test(buildConfig({ sqliteBinaryPath: undefined }));
+        const result = await test(buildConfig({ sqliteBinaryPath: undefined }), fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockExecFileCb).toHaveBeenCalledWith(
@@ -125,7 +129,7 @@ describe("SQLite Connection - test() local mode", () => {
         });
         mockFsAccess.mockResolvedValue(undefined);
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("ENOENT");
@@ -135,7 +139,7 @@ describe("SQLite Connection - test() local mode", () => {
         execSucceeds("3.39.2 2022-07-21");
         mockFsAccess.mockRejectedValue(new Error("EACCES: permission denied"));
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("EACCES");
@@ -163,7 +167,7 @@ describe("SQLite Connection - test() ssh mode", () => {
     it("returns failure when SSH config is missing host/username", async () => {
         mockExtractSqliteSshConfig.mockReturnValue(null);
 
-        const result = await test(buildSshConfig());
+        const result = await test(buildSshConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("SSH host and username are required");
@@ -177,7 +181,7 @@ describe("SQLite Connection - test() ssh mode", () => {
             .mockResolvedValueOnce({ stdout: "3.39.2 2022-07-21 15:24:47", code: 0 }) // version
             .mockResolvedValueOnce({ stdout: "exists", code: 0 }); // file check
 
-        const result = await test(buildSshConfig());
+        const result = await test(buildSshConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.message).toContain("SSH SQLite connection successful");
@@ -193,7 +197,7 @@ describe("SQLite Connection - test() ssh mode", () => {
             .mockResolvedValueOnce({ stdout: "3.39.2 2022-07-21", code: 0 }) // version
             .mockResolvedValueOnce({ stdout: "", code: 1 }); // file not found
 
-        const result = await test(buildSshConfig());
+        const result = await test(buildSshConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("not found");
@@ -204,7 +208,7 @@ describe("SQLite Connection - test() ssh mode", () => {
         mockExtractSqliteSshConfig.mockReturnValue({ host: "example.com", username: "admin" });
         mockSshConnect.mockRejectedValue(new Error("Connection refused"));
 
-        const result = await test(buildSshConfig());
+        const result = await test(buildSshConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("Connection refused");
@@ -222,7 +226,7 @@ describe("SQLite Connection - test() invalid mode", () => {
         // Override mode to an invalid value bypassing TypeScript
         (config as any).mode = "ftp";
 
-        const result = await test(config);
+        const result = await test(config, fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("Invalid mode");
@@ -235,12 +239,12 @@ describe("SQLite Connection - test() invalid mode", () => {
 
 describe("SQLite Connection - getDatabases()", () => {
     it("returns filename extracted from path", async () => {
-        const result = await getDatabases(buildConfig({ path: "/var/data/myapp.sqlite" }));
+        const result = await getDatabases(buildConfig({ path: "/var/data/myapp.sqlite" }), fakeHost);
         expect(result).toEqual(["myapp.sqlite"]);
     });
 
     it("returns fallback name when path has no separator", async () => {
-        const result = await getDatabases(buildConfig({ path: "database.sqlite" }));
+        const result = await getDatabases(buildConfig({ path: "database.sqlite" }), fakeHost);
         expect(result).toEqual(["database.sqlite"]);
     });
 });
@@ -258,7 +262,7 @@ describe("SQLite Connection - getDatabasesWithStats() local mode", () => {
         mockFsStat.mockResolvedValue({ size: 204800 });
         execSucceeds("5\n");
 
-        const result = await getDatabasesWithStats(buildConfig({ path: "/data/app.sqlite" }));
+        const result = await getDatabasesWithStats(buildConfig({ path: "/data/app.sqlite" }), fakeHost);
 
         expect(result).toHaveLength(1);
         expect(result[0].name).toBe("app.sqlite");
@@ -270,7 +274,7 @@ describe("SQLite Connection - getDatabasesWithStats() local mode", () => {
         mockFsStat.mockResolvedValue({ size: 1024 });
         execFails("no such table");
 
-        const result = await getDatabasesWithStats(buildConfig({ path: "/data/app.sqlite" }));
+        const result = await getDatabasesWithStats(buildConfig({ path: "/data/app.sqlite" }), fakeHost);
 
         expect(result[0].name).toBe("app.sqlite");
         expect(result[0].sizeInBytes).toBe(1024);
@@ -280,7 +284,7 @@ describe("SQLite Connection - getDatabasesWithStats() local mode", () => {
     it("returns name only when stat fails", async () => {
         mockFsStat.mockRejectedValue(new Error("ENOENT"));
 
-        const result = await getDatabasesWithStats(buildConfig({ path: "/data/app.sqlite" }));
+        const result = await getDatabasesWithStats(buildConfig({ path: "/data/app.sqlite" }), fakeHost);
 
         expect(result[0].name).toBe("app.sqlite");
         expect(result[0].sizeInBytes).toBeUndefined();
@@ -303,7 +307,7 @@ describe("SQLite Connection - getDatabasesWithStats() ssh mode", () => {
     it("returns name only when SSH config is missing", async () => {
         mockExtractSqliteSshConfig.mockReturnValue(null);
 
-        const result = await getDatabasesWithStats(buildSshConfig({ path: "/remote/db.sqlite" }));
+        const result = await getDatabasesWithStats(buildSshConfig({ path: "/remote/db.sqlite" }), fakeHost);
 
         expect(result).toHaveLength(1);
         expect(result[0].name).toBe("db.sqlite");
@@ -317,7 +321,7 @@ describe("SQLite Connection - getDatabasesWithStats() ssh mode", () => {
             .mockResolvedValueOnce({ stdout: "204800", code: 0 }) // stat
             .mockResolvedValueOnce({ stdout: "3", code: 0 }); // table count
 
-        const result = await getDatabasesWithStats(buildSshConfig({ path: "/remote/db.sqlite" }));
+        const result = await getDatabasesWithStats(buildSshConfig({ path: "/remote/db.sqlite" }), fakeHost);
 
         expect(result[0].name).toBe("db.sqlite");
         expect(result[0].sizeInBytes).toBe(204800);
@@ -332,7 +336,7 @@ describe("SQLite Connection - getDatabasesWithStats() ssh mode", () => {
             .mockResolvedValueOnce({ stdout: "8192", code: 0 }) // stat
             .mockRejectedValueOnce(new Error("command failed")); // table count error
 
-        const result = await getDatabasesWithStats(buildSshConfig({ path: "/remote/db.sqlite" }));
+        const result = await getDatabasesWithStats(buildSshConfig({ path: "/remote/db.sqlite" }), fakeHost);
 
         expect(result[0].sizeInBytes).toBe(8192);
         expect(result[0].tableCount).toBeUndefined();
@@ -343,7 +347,7 @@ describe("SQLite Connection - getDatabasesWithStats() ssh mode", () => {
         mockExtractSqliteSshConfig.mockReturnValue({ host: "host.example", username: "user" });
         mockSshConnect.mockRejectedValue(new Error("timeout"));
 
-        const result = await getDatabasesWithStats(buildSshConfig({ path: "/remote/db.sqlite" }));
+        const result = await getDatabasesWithStats(buildSshConfig({ path: "/remote/db.sqlite" }), fakeHost);
 
         expect(result[0].name).toBe("db.sqlite");
         expect(result[0].sizeInBytes).toBeUndefined();

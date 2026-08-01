@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { execFile } from "child_process";
 import util from "util";
 import { logger } from "@/lib/logging/logger";
@@ -48,7 +49,7 @@ function buildConnectionArgs(config: RedisConfig): string[] {
 /**
  * Test connection to Redis server
  */
-export async function test(config: RedisConfig): Promise<{ success: boolean; message: string; version?: string }> {
+export async function test(config: RedisConfig, _host?: ExecutionHost): Promise<{ success: boolean; message: string; version?: string }> {
     if (isSSHMode(config)) {
         const sshConfig = extractSshConfig(config)!;
         const ssh = new SshClient();
@@ -130,7 +131,7 @@ export async function test(config: RedisConfig): Promise<{ success: boolean; mes
  * This function returns all configured databases.
  * Note: Redis databases are always available, even if empty.
  */
-export async function getDatabases(config: RedisConfig): Promise<string[]> {
+export async function getDatabases(config: RedisConfig, _host: ExecutionHost): Promise<string[]> {
     if (isSSHMode(config)) {
         const sshConfig = extractSshConfig(config)!;
         const ssh = new SshClient();
@@ -194,8 +195,8 @@ function parseKeyspaceInfo(stdout: string): Record<string, number> {
  * tables, but this is the most useful "how much is in here" signal available in one
  * round trip). Redis doesn't expose per-database memory usage, so sizeInBytes stays undefined.
  */
-export async function getDatabasesWithStats(config: RedisConfig): Promise<DatabaseInfo[]> {
-    const databases = await getDatabases(config);
+export async function getDatabasesWithStats(config: RedisConfig, _host: ExecutionHost): Promise<DatabaseInfo[]> {
+    const databases = await getDatabases(config, _host);
 
     if (isSSHMode(config)) {
         const sshConfig = extractSshConfig(config)!;

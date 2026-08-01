@@ -9,7 +9,7 @@ export const prepareRestore: NonNullable<DatabaseAdapter["prepareRestore"]> = as
      // No major prep needed for SQLite mostly, but could check write permissions here
 };
 
-export const restore: DatabaseAdapter["restore"] = async (config, sourcePath, onLog, onProgress) => {
+export const restore: DatabaseAdapter["restore"] = async (config, sourcePath, _host, onLog, onProgress) => {
     const startedAt = new Date();
     const mode = config.mode || "local";
     const logs: string[] = [];

@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import sql from "mssql";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
@@ -28,7 +29,7 @@ export function buildConnectionConfig(config: MSSQLConfig): sql.config {
 /**
  * Test connection and retrieve version
  */
-export async function test(config: MSSQLConfig): Promise<{ success: boolean; message: string; version?: string; edition?: string }> {
+export async function test(config: MSSQLConfig, _host?: ExecutionHost): Promise<{ success: boolean; message: string; version?: string; edition?: string }> {
     let pool: sql.ConnectionPool | null = null;
 
     try {
@@ -110,7 +111,7 @@ export async function test(config: MSSQLConfig): Promise<{ success: boolean; mes
 /**
  * Get list of user databases (exclude system databases)
  */
-export async function getDatabases(config: MSSQLConfig): Promise<string[]> {
+export async function getDatabases(config: MSSQLConfig, _host: ExecutionHost): Promise<string[]> {
     let pool: sql.ConnectionPool | null = null;
 
     try {
@@ -143,7 +144,7 @@ import { DatabaseInfo } from "@/lib/core/interfaces";
 /**
  * Get user databases with size and table count information
  */
-export async function getDatabasesWithStats(config: MSSQLConfig): Promise<DatabaseInfo[]> {
+export async function getDatabasesWithStats(config: MSSQLConfig, _host: ExecutionHost): Promise<DatabaseInfo[]> {
     let pool: sql.ConnectionPool | null = null;
 
     try {

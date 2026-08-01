@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ---------------------------------------------------------------------------
@@ -63,7 +67,7 @@ describe("SQLite browser - getTables", () => {
             { stdout: "5\n12\n" }                      // row counts
         );
 
-        const result = await getTables(baseConfig as any, "");
+        const result = await getTables(baseConfig as any, "", fakeHost);
 
         expect(result).toHaveLength(2);
         expect(result[0]).toMatchObject({ name: "users", type: "table", rowCount: 5 });
@@ -73,7 +77,7 @@ describe("SQLite browser - getTables", () => {
     it("maps 'view' type correctly", async () => {
         queueExecResponses({ stdout: "v_active|view\n" });
 
-        const result = await getTables(baseConfig as any, "");
+        const result = await getTables(baseConfig as any, "", fakeHost);
 
         expect(result[0].type).toBe("view");
     });
@@ -81,7 +85,7 @@ describe("SQLite browser - getTables", () => {
     it("returns empty array when no tables exist", async () => {
         queueExecResponses({ stdout: "" });
 
-        const result = await getTables(baseConfig as any, "");
+        const result = await getTables(baseConfig as any, "", fakeHost);
 
         expect(result).toEqual([]);
     });
@@ -92,7 +96,7 @@ describe("SQLite browser - getTables", () => {
             { stdout: "7\n" }
         );
 
-        const result = await getTables(baseConfig as any, "");
+        const result = await getTables(baseConfig as any, "", fakeHost);
 
         expect(result).toHaveLength(1);
     });
@@ -118,7 +122,7 @@ describe("SQLite browser - getTableData", () => {
             { stdout: "1\tAlice\n2\tBob\n3\tCarl\n" }                    // SELECT *
         );
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(result.totalCount).toBe(3);
         expect(result.columns).toHaveLength(2);
@@ -139,7 +143,7 @@ describe("SQLite browser - getTableData", () => {
             search: "Alice",
             searchColumn: "name",
             matchMode: "equals",
-        } as any);
+        } as any, fakeHost);
 
         expect(result.rows).toHaveLength(1);
     });

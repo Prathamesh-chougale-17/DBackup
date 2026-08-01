@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { SshClient, shellEscape, extractSqliteSshConfig, remoteBinaryCheck } from "@/lib/ssh";
@@ -51,7 +52,7 @@ function escapeSqliteLiteral(value: string): string {
     return value.replace(/'/g, "''").replace(/\0/g, "");
 }
 
-export async function getTables(config: Record<string, unknown>, _database: string): Promise<TableInfo[]> {
+export async function getTables(config: Record<string, unknown>, _database: string, _host: ExecutionHost): Promise<TableInfo[]> {
     const dbPath = config.path as string;
     const mode = (config.mode as string) || "local";
     const binaryPath = (config.sqliteBinaryPath as string) || "sqlite3";
@@ -134,7 +135,8 @@ async function enrichWithRowCountsSsh(client: SshClient, bin: string, dbPath: st
 
 export async function getTableData(
     config: Record<string, unknown>,
-    options: TableDataOptions
+    options: TableDataOptions,
+    _host: ExecutionHost
 ): Promise<TableDataResult> {
     const { table, page, pageSize, sortBy, sortDir, search, searchColumn, matchMode } = options;
     const offset = (page - 1) * pageSize;

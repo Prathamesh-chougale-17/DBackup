@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { FirebirdConfig } from "@/lib/adapters/definitions";
@@ -153,6 +154,7 @@ export async function restoreOne(
     config: FirebirdRestoreConfig,
     filePath: string,
     targetDbName: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     onProgress?: (percentage: number, detail?: string) => void
 ): Promise<void> {
@@ -162,6 +164,7 @@ export async function restoreOne(
 export async function restore(
     config: FirebirdRestoreConfig,
     sourcePath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     onProgress?: (percentage: number, detail?: string) => void
 ): Promise<BackupResult> {

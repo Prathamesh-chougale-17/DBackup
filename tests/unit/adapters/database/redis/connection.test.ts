@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { RedisConfig } from "@/lib/adapters/definitions";
 
@@ -158,7 +162,7 @@ describe("test() - local", () => {
                 cb(null, { stdout: "# Server\r\nredis_version:7.2.3\r\nredis_mode:standalone\r\n", stderr: "" });
             });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.message).toContain("Connection successful");
@@ -176,7 +180,7 @@ describe("test() - local", () => {
                 cb(null, { stdout: "# Server\r\nno_version_here:true\r\n", stderr: "" });
             });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.version).toBeUndefined();
@@ -185,7 +189,7 @@ describe("test() - local", () => {
     it("returns failure when PING response does not include PONG", async () => {
         execSucceeds("ERR wrong type\n");
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("PONG");
@@ -194,7 +198,7 @@ describe("test() - local", () => {
     it("returns failure with stderr when execFile throws with stderr", async () => {
         execFails("command failed", "Connection refused");
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("Connection refused");
@@ -203,7 +207,7 @@ describe("test() - local", () => {
     it("returns failure with error message when execFile throws without stderr", async () => {
         execFails("connect ECONNREFUSED");
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("connect ECONNREFUSED");
@@ -216,7 +220,7 @@ describe("test() - local", () => {
             cb({});
         });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("Unknown error");
@@ -239,7 +243,7 @@ describe("test() - SSH", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "PONG\n", stderr: "" })
             .mockResolvedValueOnce({ code: 0, stdout: "redis_version:7.0.0\r\n", stderr: "" });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.message).toContain("SSH");
@@ -251,7 +255,7 @@ describe("test() - SSH", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "PONG\n", stderr: "" })
             .mockResolvedValueOnce({ code: 1, stdout: "", stderr: "INFO not allowed" });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.version).toBeUndefined();
@@ -260,7 +264,7 @@ describe("test() - SSH", () => {
     it("returns failure via SSH when PING returns non-zero exit code", async () => {
         mockSshExec.mockResolvedValueOnce({ code: 1, stdout: "", stderr: "AUTH required" });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("SSH Redis PING failed");
@@ -269,7 +273,7 @@ describe("test() - SSH", () => {
     it("returns failure via SSH when PING stdout does not include PONG", async () => {
         mockSshExec.mockResolvedValueOnce({ code: 0, stdout: "NOAUTH Authentication required\n", stderr: "" });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("SSH Redis PING failed");
@@ -278,7 +282,7 @@ describe("test() - SSH", () => {
     it("returns failure when SSH operation throws an Error", async () => {
         mockRemoteBinaryCheck.mockRejectedValue(new Error("SSH transport error"));
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("SSH connection failed");
@@ -288,7 +292,7 @@ describe("test() - SSH", () => {
     it("returns failure when SSH operation rejects with a non-Error value", async () => {
         mockRemoteBinaryCheck.mockRejectedValue("timeout");
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("SSH connection failed");
@@ -299,7 +303,7 @@ describe("test() - SSH", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "PONG\n", stderr: "" })
             .mockResolvedValueOnce({ code: 0, stdout: "redis_version:7.0.0\r\n", stderr: "" });
 
-        const result = await test(buildConfig({ tls: true, database: 3 }));
+        const result = await test(buildConfig({ tls: true, database: 3 }), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.version).toBe("7.0.0");
@@ -310,7 +314,7 @@ describe("test() - SSH", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "PONG\n", stderr: "" })
             .mockResolvedValueOnce({ code: 0, stdout: "# Server\r\nno_version_field:true\r\n", stderr: "" });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.version).toBeUndefined();
@@ -330,7 +334,7 @@ describe("getDatabases() - local", () => {
     it("returns indices 0..N-1 when CONFIG GET returns a valid count", async () => {
         execSucceeds("databases\n8\n");
 
-        const result = await getDatabases(buildConfig());
+        const result = await getDatabases(buildConfig(), fakeHost);
 
         expect(result).toHaveLength(8);
         expect(result[0]).toBe("0");
@@ -341,7 +345,7 @@ describe("getDatabases() - local", () => {
         // "databases\n" has no second line -> parseInt("" || "16") -> 16
         execSucceeds("databases\n");
 
-        const result = await getDatabases(buildConfig());
+        const result = await getDatabases(buildConfig(), fakeHost);
 
         expect(result).toHaveLength(16);
     });
@@ -349,7 +353,7 @@ describe("getDatabases() - local", () => {
     it("falls back to 16 databases when execFile throws", async () => {
         execFails("ERR config disabled");
 
-        const result = await getDatabases(buildConfig());
+        const result = await getDatabases(buildConfig(), fakeHost);
 
         expect(result).toHaveLength(16);
         expect(result[0]).toBe("0");
@@ -371,7 +375,7 @@ describe("getDatabases() - SSH", () => {
     it("returns indices 0..N-1 via SSH when CONFIG GET succeeds", async () => {
         mockSshExec.mockResolvedValueOnce({ code: 0, stdout: "databases\n4\n", stderr: "" });
 
-        const result = await getDatabases(buildConfig());
+        const result = await getDatabases(buildConfig(), fakeHost);
 
         expect(result).toHaveLength(4);
         expect(result).toEqual(["0", "1", "2", "3"]);
@@ -381,7 +385,7 @@ describe("getDatabases() - SSH", () => {
         // Only the key line with no number -> parseInt("" || "16") -> 16
         mockSshExec.mockResolvedValueOnce({ code: 0, stdout: "databases\n", stderr: "" });
 
-        const result = await getDatabases(buildConfig());
+        const result = await getDatabases(buildConfig(), fakeHost);
 
         expect(result).toHaveLength(16);
     });
@@ -389,7 +393,7 @@ describe("getDatabases() - SSH", () => {
     it("falls back to 16 databases via SSH when exec returns non-zero code", async () => {
         mockSshExec.mockResolvedValueOnce({ code: 1, stdout: "", stderr: "CONFIG disabled" });
 
-        const result = await getDatabases(buildConfig());
+        const result = await getDatabases(buildConfig(), fakeHost);
 
         expect(result).toHaveLength(16);
     });
@@ -397,7 +401,7 @@ describe("getDatabases() - SSH", () => {
     it("falls back to 16 databases via SSH when operation throws", async () => {
         mockRemoteBinaryCheck.mockRejectedValue(new Error("SSH disconnected"));
 
-        const result = await getDatabases(buildConfig());
+        const result = await getDatabases(buildConfig(), fakeHost);
 
         expect(result).toHaveLength(16);
     });
@@ -424,7 +428,7 @@ describe("getDatabasesWithStats() - local", () => {
                 cb(null, { stdout: "# Keyspace\r\ndb0:keys=1234,expires=0,avg_ttl=0\r\ndb2:keys=5,expires=1,avg_ttl=0\r\n", stderr: "" });
             });
 
-        const result = await getDatabasesWithStats(buildConfig());
+        const result = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(result).toEqual([
             { name: "0", tableCount: 1234 },
@@ -446,7 +450,7 @@ describe("getDatabasesWithStats() - local", () => {
                 cb(new Error("NOAUTH"));
             });
 
-        const result = await getDatabasesWithStats(buildConfig());
+        const result = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(result).toEqual([{ name: "0" }, { name: "1" }]);
     });
@@ -468,7 +472,7 @@ describe("getDatabasesWithStats() - SSH", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "databases\n2\n", stderr: "" })
             .mockResolvedValueOnce({ code: 0, stdout: "db1:keys=42,expires=0,avg_ttl=0\r\n", stderr: "" });
 
-        const result = await getDatabasesWithStats(buildConfig());
+        const result = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(result).toEqual([
             { name: "0", tableCount: 0 },
@@ -480,7 +484,7 @@ describe("getDatabasesWithStats() - SSH", () => {
         mockSshExec.mockResolvedValueOnce({ code: 0, stdout: "databases\n2\n", stderr: "" });
         mockRemoteBinaryCheck.mockResolvedValueOnce("redis-cli").mockRejectedValueOnce(new Error("SSH disconnected"));
 
-        const result = await getDatabasesWithStats(buildConfig());
+        const result = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(result).toEqual([{ name: "0" }, { name: "1" }]);
     });

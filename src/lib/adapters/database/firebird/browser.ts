@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { FirebirdConfig } from "@/lib/adapters/definitions";
 import { TableInfo, ColumnInfo, TableDataOptions, TableDataResult } from "@/lib/core/interfaces";
 import { runQuery } from "./connection";
@@ -131,12 +132,12 @@ function parseListRows(stdout: string, columnNames: string[]): Record<string, un
     return rows;
 }
 
-export async function getTables(config: FirebirdConfig, database: string): Promise<TableInfo[]> {
+export async function getTables(config: FirebirdConfig, database: string, _host: ExecutionHost): Promise<TableInfo[]> {
     const stdout = await runQuery(config, database, TABLES_QUERY);
     return parseTablesOutput(stdout);
 }
 
-export async function getTableData(config: FirebirdConfig, options: TableDataOptions): Promise<TableDataResult> {
+export async function getTableData(config: FirebirdConfig, options: TableDataOptions, _host: ExecutionHost): Promise<TableDataResult> {
     const { database, table, page, pageSize, sortBy, sortDir, search, searchColumn, matchMode } = options;
     const offset = (page - 1) * pageSize;
     const tblId = `"${escapeFirebirdIdentifier(table)}"`;

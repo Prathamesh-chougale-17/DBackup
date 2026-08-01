@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { SQLiteConfig } from "@/lib/adapters/definitions";
 
@@ -109,7 +113,7 @@ describe("SQLite dump() - local mode", () => {
         mockFsCreateWriteStream.mockReturnValue(writeStream);
         mockSpawnProcess.mockReturnValue(makeSpawnProcess(0));
 
-        const result = await dump(buildConfig(), "/tmp/out.sql", undefined, undefined);
+        const result = await dump(buildConfig(), "/tmp/out.sql", fakeHost, undefined, undefined);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledWith(
@@ -123,7 +127,7 @@ describe("SQLite dump() - local mode", () => {
         mockFsCreateWriteStream.mockReturnValue(writeStream);
         mockSpawnProcess.mockReturnValue(makeSpawnProcess(0));
 
-        await dump(buildConfig({ sqliteBinaryPath: undefined }), "/tmp/out.sql");
+        await dump(buildConfig({ sqliteBinaryPath: undefined }), "/tmp/out.sql", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith("sqlite3", expect.any(Array));
     });
@@ -133,7 +137,7 @@ describe("SQLite dump() - local mode", () => {
         mockFsCreateWriteStream.mockReturnValue(writeStream);
         mockSpawnProcess.mockReturnValue(makeSpawnProcess(1));
 
-        const result = await dump(buildConfig(), "/tmp/out.sql");
+        const result = await dump(buildConfig(), "/tmp/out.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("failed with code 1");
@@ -150,7 +154,7 @@ describe("SQLite dump() - local mode", () => {
         process.nextTick(() => proc.emit("error", new Error("spawn ENOENT")));
         mockSpawnProcess.mockReturnValue(proc);
 
-        const result = await dump(buildConfig(), "/tmp/out.sql");
+        const result = await dump(buildConfig(), "/tmp/out.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("spawn ENOENT");
@@ -162,7 +166,7 @@ describe("SQLite dump() - local mode", () => {
         mockSpawnProcess.mockReturnValue(makeSpawnProcess(0, "some warning"));
 
         const logs: string[] = [];
-        await dump(buildConfig(), "/tmp/out.sql", (msg) => logs.push(msg));
+        await dump(buildConfig(), "/tmp/out.sql", fakeHost, (msg) => logs.push(msg));
 
         expect(logs.some((l) => l.includes("Starting SQLite dump"))).toBe(true);
     });
@@ -172,7 +176,7 @@ describe("SQLite dump() - local mode", () => {
         mockFsCreateWriteStream.mockReturnValue(writeStream);
         mockSpawnProcess.mockReturnValue(makeSpawnProcess(0));
 
-        const result = await dump(buildConfig(), "/tmp/out.sql");
+        const result = await dump(buildConfig(), "/tmp/out.sql", fakeHost);
 
         expect(result.startedAt).toBeInstanceOf(Date);
         expect(result.completedAt).toBeInstanceOf(Date);
@@ -188,7 +192,7 @@ describe("SQLite dump() - invalid mode", () => {
         const config = buildConfig();
         (config as any).mode = "ftp";
 
-        const result = await dump(config, "/tmp/out.sql");
+        const result = await dump(config, "/tmp/out.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("Invalid mode");
@@ -211,7 +215,7 @@ describe("SQLite dump() - ssh mode", () => {
     it("returns failure when SSH config is missing", async () => {
         mockExtractSqliteSshConfig.mockReturnValue(null);
 
-        const result = await dump(buildSshConfig(), "/tmp/out.sql");
+        const result = await dump(buildSshConfig(), "/tmp/out.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("SSH host and username are required");
@@ -230,7 +234,7 @@ describe("SQLite dump() - ssh mode", () => {
         const stream = makeSshStream(0);
         mockSshExecStream.mockImplementation((_cmd: string, cb: any) => cb(null, stream));
 
-        const result = await dump(buildSshConfig(), "/tmp/out.sql");
+        const result = await dump(buildSshConfig(), "/tmp/out.sql", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSshEnd).toHaveBeenCalled();
@@ -249,7 +253,7 @@ describe("SQLite dump() - ssh mode", () => {
         const stream = makeSshStream(1);
         mockSshExecStream.mockImplementation((_cmd: string, cb: any) => cb(null, stream));
 
-        const result = await dump(buildSshConfig(), "/tmp/out.sql");
+        const result = await dump(buildSshConfig(), "/tmp/out.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("code 1");
@@ -269,7 +273,7 @@ describe("SQLite dump() - ssh mode", () => {
             cb(new Error("channel open failed"), null),
         );
 
-        const result = await dump(buildSshConfig(), "/tmp/out.sql");
+        const result = await dump(buildSshConfig(), "/tmp/out.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("channel open failed");
@@ -290,7 +294,7 @@ describe("SQLite dump() - ssh mode", () => {
         process.nextTick(() => stream.emit("exit", 1, "SIGKILL"));
         mockSshExecStream.mockImplementation((_cmd: string, cb: any) => cb(null, stream));
 
-        const result = await dump(buildSshConfig(), "/tmp/out.sql");
+        const result = await dump(buildSshConfig(), "/tmp/out.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("SIGKILL");

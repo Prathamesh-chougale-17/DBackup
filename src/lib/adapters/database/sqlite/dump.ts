@@ -6,7 +6,7 @@ import fs from "fs";
 import { SshClient, shellEscape, extractSqliteSshConfig } from "@/lib/ssh";
 import { SQLiteConfig } from "@/lib/adapters/definitions";
 
-export const dump: DatabaseAdapter["dump"] = async (config, destinationPath, onLog, onProgress) => {
+export const dump: DatabaseAdapter["dump"] = async (config, destinationPath, _host, onLog, onProgress) => {
     const startedAt = new Date();
     const mode = config.mode || "local";
     const logs: string[] = [];

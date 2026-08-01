@@ -2,6 +2,7 @@ import path from "path";
 import os from "os";
 import fs from "fs/promises";
 import { RunnerContext } from "../types";
+import { createHost, resolveTransport, type ExecutionHost } from "@/lib/transport";
 import { resolveAdapterConfig } from "@/lib/adapters/config-resolver";
 import { downloadDirectory } from "@/lib/adapters/storage/common/download-directory";
 import { createTempDir, cleanupTempDir } from "@/lib/adapters/database/common/tar-utils";
@@ -111,6 +112,9 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
     let engineVersion: string | undefined;
     let engineEdition: string | undefined;
     let sourceConfig: Record<string, unknown> | undefined;
+    // One transport for the whole combined dump. An N-database job used to open
+    // N+2 SSH connections against the same server, one per adapter call.
+    let host: ExecutionHost | null = null;
 
     try {
         // ── Database portion (only if the job has a database source) ──────────────
@@ -125,12 +129,13 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
             if (job.pgCompression !== undefined) {
                 sourceConfig.pgCompression = job.pgCompression;
             }
+            host = createHost(resolveTransport(ctx.sourceAdapter, sourceConfig));
 
             dbNames = parseJobDatabases(job.databases);
             if (dbNames.length === 0 && ctx.sourceAdapter.getDatabases) {
                 ctx.log("No databases selected - auto-discovering all databases...");
                 try {
-                    dbNames = await ctx.sourceAdapter.getDatabases(sourceConfig);
+                    dbNames = await ctx.sourceAdapter.getDatabases(sourceConfig, host!);
                 } catch (e: unknown) {
                     const message = e instanceof Error ? e.message : String(e);
                     ctx.log(`Warning: Could not auto-discover databases: ${message}`, 'warning');
@@ -143,7 +148,7 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
 
             if (ctx.sourceAdapter.test) {
                 try {
-                    const testRes = await ctx.sourceAdapter.test(sourceConfig) as { success: boolean; version?: string; edition?: string };
+                    const testRes = await ctx.sourceAdapter.test(sourceConfig, host!) as { success: boolean; version?: string; edition?: string };
                     if (testRes.success && testRes.version) {
                         engineVersion = testRes.version;
                         ctx.log(`Detected engine version: ${engineVersion}`);
@@ -183,7 +188,7 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
 
             ctx.log(`Dumping database: ${dbName}`, 'info');
             const dumpConfigWithVersion = { ...sourceConfig, detectedVersion: engineVersion };
-            await ctx.sourceAdapter!.dumpOne!(dumpConfigWithVersion, dbName, dest, (msg, level, type, details) => ctx.log(msg, level, type, details));
+            await ctx.sourceAdapter!.dumpOne!(dumpConfigWithVersion, dbName, dest, host!, (msg, level, type, details) => ctx.log(msg, level, type, details));
 
             entries.push({ kind: "database", dbName, path: dest, format, nativeCompression: nativeCompressionActive });
             dbDone++;
@@ -490,6 +495,7 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
         const sizeStr = formatBytes(manifest.totalSize);
         ctx.log(`Combined archive created successfully. Size: ${sizeStr}`, 'success');
     } finally {
+        await host?.dispose().catch(() => {});
         await cleanupTempDir(workDir).catch((e) => log.warn("Failed to clean up combined-dump work directory", { workDir }, wrapError(e)));
     }
 }

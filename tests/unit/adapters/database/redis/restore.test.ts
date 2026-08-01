@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { RedisConfig } from "@/lib/adapters/definitions";
 
@@ -91,7 +95,7 @@ describe("prepareRestore()", () => {
                 cb(null, { stdout: "default\n", stderr: "" });
             });
 
-        await expect(prepareRestore(buildConfig(), [])).resolves.toBeUndefined();
+        await expect(prepareRestore(buildConfig(), [], fakeHost)).resolves.toBeUndefined();
     });
 
     it("resolves when user is non-default and ACL LIST contains allcommands", async () => {
@@ -112,7 +116,7 @@ describe("prepareRestore()", () => {
                 cb(null, { stdout: "user backupuser on allcommands allkeys ~* &*\n", stderr: "" });
             });
 
-        await expect(prepareRestore(buildConfig(), [])).resolves.toBeUndefined();
+        await expect(prepareRestore(buildConfig(), [], fakeHost)).resolves.toBeUndefined();
     });
 
     it("resolves when user is non-default and ACL LIST is missing both allcommands and +flushall", async () => {
@@ -131,13 +135,13 @@ describe("prepareRestore()", () => {
                 cb(null, { stdout: "user restricteduser on +get +set ~* &*\n", stderr: "" });
             });
 
-        await expect(prepareRestore(buildConfig(), [])).resolves.toBeUndefined();
+        await expect(prepareRestore(buildConfig(), [], fakeHost)).resolves.toBeUndefined();
     });
 
     it("throws when the PING command fails", async () => {
         execFails("Connection refused");
 
-        await expect(prepareRestore(buildConfig(), [])).rejects.toThrow("Cannot connect to Redis");
+        await expect(prepareRestore(buildConfig(), [], fakeHost)).rejects.toThrow("Cannot connect to Redis");
     });
 
     it("includes a String-coerced value in the error when PING rejects with a non-Error", async () => {
@@ -147,7 +151,7 @@ describe("prepareRestore()", () => {
             cb("plain string error");
         });
 
-        await expect(prepareRestore(buildConfig(), [])).rejects.toThrow("plain string error");
+        await expect(prepareRestore(buildConfig(), [], fakeHost)).rejects.toThrow("plain string error");
     });
 
     it("resolves when ACL commands are unavailable (Redis < 6 catch block)", async () => {
@@ -163,7 +167,7 @@ describe("prepareRestore()", () => {
                 cb(new Error("ERR unknown command 'ACL'"));
             });
 
-        await expect(prepareRestore(buildConfig(), [])).resolves.toBeUndefined();
+        await expect(prepareRestore(buildConfig(), [], fakeHost)).resolves.toBeUndefined();
     });
 });
 
@@ -195,7 +199,7 @@ describe("restore()", () => {
                 cb(null, { stdout: "dbfilename\ndump.rdb\n", stderr: "" });
             });
 
-        const result = await restore(buildConfig(), "/tmp/backup.rdb");
+        const result = await restore(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.metadata?.requiresManualSteps).toBe(true);
@@ -220,7 +224,7 @@ describe("restore()", () => {
                 cb(null, { stdout: "dbfilename\n", stderr: "" });
             });
 
-        const result = await restore(buildConfig(), "/tmp/backup.rdb");
+        const result = await restore(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.metadata?.dataDir).toBe("/var/lib/redis");
@@ -240,7 +244,7 @@ describe("restore()", () => {
             });
 
         const logs: string[] = [];
-        await restore(buildConfig(), "/tmp/backup.rdb", (msg) => logs.push(msg));
+        await restore(buildConfig(), "/tmp/backup.rdb", fakeHost, (msg) => logs.push(msg));
 
         expect(logs.some((l) => l.includes("restore"))).toBe(true);
     });
@@ -248,7 +252,7 @@ describe("restore()", () => {
     it("returns failure when the source file does not exist (stat throws)", async () => {
         mockFsStat.mockRejectedValue(new Error("ENOENT: no such file or directory"));
 
-        const result = await restore(buildConfig(), "/tmp/missing.rdb");
+        const result = await restore(buildConfig(), "/tmp/missing.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("ENOENT");
@@ -266,7 +270,7 @@ describe("restore()", () => {
                 cb(new Error("ERR CONFIG disabled"));
             });
 
-        const result = await restore(buildConfig(), "/tmp/backup.rdb");
+        const result = await restore(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("ERR CONFIG disabled");
@@ -276,7 +280,7 @@ describe("restore()", () => {
         // Reject with a plain string to cover the `String(error)` branch in the catch block.
         mockFsStat.mockRejectedValue("disk quota exceeded");
 
-        const result = await restore(buildConfig(), "/tmp/backup.rdb");
+        const result = await restore(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("disk quota exceeded");

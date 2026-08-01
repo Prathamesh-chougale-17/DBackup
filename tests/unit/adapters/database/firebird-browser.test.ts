@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/lib/adapters/database/firebird/connection", () => ({
@@ -27,7 +31,7 @@ describe("Firebird browser - getTables", () => {
     it("returns parsed table list, trimming isql's fixed-width padding", async () => {
         mockOutputs("PROBE_TABLE\tTABLE                                                     \n");
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result).toEqual([{ name: "PROBE_TABLE", type: "table" }]);
     });
@@ -35,7 +39,7 @@ describe("Firebird browser - getTables", () => {
     it("maps VIEW type correctly", async () => {
         mockOutputs("PROBE_VIEW\tVIEW\n");
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result[0].type).toBe("view");
     });
@@ -43,7 +47,7 @@ describe("Firebird browser - getTables", () => {
     it("ignores empty lines in output", async () => {
         mockOutputs("\n\nORDERS\tTABLE\n\n");
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result).toHaveLength(1);
         expect(result[0].name).toBe("ORDERS");
@@ -52,7 +56,7 @@ describe("Firebird browser - getTables", () => {
     it("returns empty array when output is blank", async () => {
         mockOutputs("");
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result).toEqual([]);
     });
@@ -60,7 +64,7 @@ describe("Firebird browser - getTables", () => {
     it("surfaces isql failures as errors", async () => {
         vi.mocked(runQuery).mockRejectedValueOnce(new Error("connection refused"));
 
-        await expect(getTables(baseConfig as any, "testdb")).rejects.toThrow("connection refused");
+        await expect(getTables(baseConfig as any, "testdb", fakeHost)).rejects.toThrow("connection refused");
     });
 });
 
@@ -84,7 +88,7 @@ describe("Firebird browser - getTableData", () => {
 
         mockOutputs(colStdout, countStdout, dataStdout);
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(result.totalCount).toBe(2);
         expect(result.columns).toHaveLength(2);
@@ -100,7 +104,7 @@ describe("Firebird browser - getTableData", () => {
         const colStdout = "AMOUNT\t16\t1\t8\t10\t-2\tY\t\n";
         mockOutputs(colStdout, "0\n", "");
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(result.columns[0].dataType).toBe("NUMERIC(10,2)");
     });
@@ -112,7 +116,7 @@ describe("Firebird browser - getTableData", () => {
 
         mockOutputs(colStdout, countStdout, dataStdout);
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(result.rows[0].NAME).toBeNull();
     });
@@ -120,7 +124,7 @@ describe("Firebird browser - getTableData", () => {
     it("builds a ROWS clause reflecting page/pageSize", async () => {
         mockOutputs("", "0\n", "");
 
-        await getTableData(baseConfig as any, { ...options, page: 3, pageSize: 20 } as any);
+        await getTableData(baseConfig as any, { ...options, page: 3, pageSize: 20 } as any, fakeHost);
 
         const dataCall = vi.mocked(runQuery).mock.calls[2];
         expect(dataCall[2]).toContain("ROWS 41 TO 60");
@@ -129,7 +133,7 @@ describe("Firebird browser - getTableData", () => {
     it("applies sortBy and sortDir to the data query", async () => {
         mockOutputs("", "0\n", "");
 
-        await getTableData(baseConfig as any, { ...options, sortBy: "NAME", sortDir: "desc" } as any);
+        await getTableData(baseConfig as any, { ...options, sortBy: "NAME", sortDir: "desc" } as any, fakeHost);
 
         const dataCall = vi.mocked(runQuery).mock.calls[2];
         expect(dataCall[2]).toContain('ORDER BY "NAME" DESC');
@@ -147,7 +151,7 @@ describe("Firebird browser - SQL escaping", () => {
             table: "O'REILLY",
             page: 1,
             pageSize: 10,
-        } as any);
+        } as any, fakeHost);
 
         const colCall = vi.mocked(runQuery).mock.calls[0];
         expect(colCall[2]).toContain("O''REILLY");
@@ -161,7 +165,7 @@ describe("Firebird browser - SQL escaping", () => {
             table: 'WEIRD"NAME',
             page: 1,
             pageSize: 10,
-        } as any);
+        } as any, fakeHost);
 
         const dataCall = vi.mocked(runQuery).mock.calls[2];
         expect(dataCall[2]).toContain('"WEIRD""NAME"');

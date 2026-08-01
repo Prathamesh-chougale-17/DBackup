@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { PostgresConfig } from "@/lib/adapters/definitions";
 import { TableInfo, ColumnInfo, TableDataOptions, TableDataResult } from "@/lib/core/interfaces";
 import {
@@ -100,7 +101,7 @@ function parseDataRows(
         });
 }
 
-export async function getTables(config: PostgresConfig, database: string): Promise<TableInfo[]> {
+export async function getTables(config: PostgresConfig, database: string, _host: ExecutionHost): Promise<TableInfo[]> {
     const query = tablesQuery(database);
     const connectDb = database;
     const env: Record<string, string | undefined> = {};
@@ -130,7 +131,8 @@ export async function getTables(config: PostgresConfig, database: string): Promi
 export async function getTableData(
     config: PostgresConfig,
     options: TableDataOptions
-): Promise<TableDataResult> {
+,
+    _host: ExecutionHost): Promise<TableDataResult> {
     const { database, table, page, pageSize, sortBy, sortDir, search, searchColumn, matchMode } = options;
     const offset = (page - 1) * pageSize;
     const tblId = `"${escapePgIdentifier(table)}"`;

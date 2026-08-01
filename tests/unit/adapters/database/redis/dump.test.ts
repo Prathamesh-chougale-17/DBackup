@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { RedisConfig } from "@/lib/adapters/definitions";
 
@@ -136,7 +140,7 @@ describe("dump() - local", () => {
     it("returns success with size when redis-cli exits with code 0", async () => {
         mockSpawnProcess.mockImplementation(() => makeSpawnProcess(0));
 
-        const result = await dump(buildConfig(), "/tmp/backup.rdb");
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.size).toBe(1024 * 512);
@@ -147,7 +151,7 @@ describe("dump() - local", () => {
         mockSpawnProcess.mockImplementation(() => makeSpawnProcess(0));
         const logs: string[] = [];
 
-        await dump(buildConfig({ password: "mysecret" }), "/tmp/backup.rdb", (msg) => logs.push(msg));
+        await dump(buildConfig({ password: "mysecret" }), "/tmp/backup.rdb", fakeHost, (msg) => logs.push(msg));
 
         const commandLog = logs.find((l) => l.includes("redis-cli"));
         expect(commandLog).not.toContain("mysecret");
@@ -157,7 +161,7 @@ describe("dump() - local", () => {
         mockSpawnProcess.mockImplementation(() => makeSpawnProcess(0, undefined, "Saving..."));
         const logs: string[] = [];
 
-        await dump(buildConfig(), "/tmp/backup.rdb", (msg) => logs.push(msg));
+        await dump(buildConfig(), "/tmp/backup.rdb", fakeHost, (msg) => logs.push(msg));
 
         expect(logs.some((l) => l.includes("Saving..."))).toBe(true);
     });
@@ -167,7 +171,7 @@ describe("dump() - local", () => {
         mockSpawnProcess.mockImplementation(() => makeSpawnProcess(0, undefined, "   "));
         const logs: string[] = [];
 
-        await dump(buildConfig(), "/tmp/backup.rdb", (msg) => logs.push(msg));
+        await dump(buildConfig(), "/tmp/backup.rdb", fakeHost, (msg) => logs.push(msg));
 
         // The whitespace-only message must NOT appear in the logs.
         expect(logs.every((l) => l.trim() !== "")).toBe(true);
@@ -184,7 +188,7 @@ describe("dump() - local", () => {
             return proc;
         });
 
-        const result = await dump(buildConfig(), "/tmp/backup.rdb");
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("binary missing");
@@ -193,7 +197,7 @@ describe("dump() - local", () => {
     it("returns failure when redis-cli exits with a non-zero code", async () => {
         mockSpawnProcess.mockImplementation(() => makeSpawnProcess(1, "NOAUTH Authentication required"));
 
-        const result = await dump(buildConfig(), "/tmp/backup.rdb");
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("code 1");
@@ -202,7 +206,7 @@ describe("dump() - local", () => {
     it("returns failure when the spawn process emits an error event", async () => {
         mockSpawnProcess.mockImplementation(() => makeSpawnProcessWithError("redis-cli not found"));
 
-        const result = await dump(buildConfig(), "/tmp/backup.rdb");
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("redis-cli not found");
@@ -212,7 +216,7 @@ describe("dump() - local", () => {
         mockSpawnProcess.mockImplementation(() => makeSpawnProcess(0));
         mockFsStat.mockResolvedValue({ size: 0 });
 
-        const result = await dump(buildConfig(), "/tmp/backup.rdb");
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("empty");
@@ -252,7 +256,7 @@ describe("dump() - SSH", () => {
             callback(null, makeReadableStream(0));
         });
 
-        const result = await dump(buildConfig(), "/tmp/backup.rdb");
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(true);
     });
@@ -263,7 +267,7 @@ describe("dump() - SSH", () => {
             callback(null, makeReadableStream(0));
         });
 
-        const result = await dump(buildConfig({ tls: true, database: 2 }), "/tmp/backup.rdb");
+        const result = await dump(buildConfig({ tls: true, database: 2 }), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.size).toBe(2048);
@@ -275,7 +279,7 @@ describe("dump() - SSH", () => {
             callback(null, makeReadableStream(0));
         });
 
-        const result = await dump(buildConfig({ tls: false, database: 0 }), "/tmp/backup.rdb");
+        const result = await dump(buildConfig({ tls: false, database: 0 }), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(true);
     });
@@ -283,7 +287,7 @@ describe("dump() - SSH", () => {
     it("returns failure when remote redis-cli --rdb exits with non-zero code", async () => {
         mockSshExec.mockResolvedValueOnce({ code: 1, stdout: "", stderr: "AUTH required" });
 
-        const result = await dump(buildConfig(), "/tmp/backup.rdb");
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("Remote redis-cli --rdb failed");
@@ -295,7 +299,7 @@ describe("dump() - SSH", () => {
             callback(new Error("stream open failed"), null);
         });
 
-        const result = await dump(buildConfig(), "/tmp/backup.rdb");
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("stream open failed");
@@ -307,7 +311,7 @@ describe("dump() - SSH", () => {
             callback(null, makeReadableStream(1));
         });
 
-        const result = await dump(buildConfig(), "/tmp/backup.rdb");
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("Failed to stream RDB");
@@ -320,7 +324,7 @@ describe("dump() - SSH", () => {
         });
         mockFsStat.mockResolvedValue({ size: 0 });
 
-        const result = await dump(buildConfig(), "/tmp/backup.rdb");
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("empty");
@@ -333,7 +337,7 @@ describe("dump() - SSH", () => {
         });
 
         const logs: string[] = [];
-        const result = await dump(buildConfig(), "/tmp/backup.rdb", (msg) => logs.push(msg));
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost, (msg) => logs.push(msg));
 
         expect(result.success).toBe(true);
         expect(logs.some((l) => l.includes("SSH"))).toBe(true);
@@ -349,7 +353,7 @@ describe("dump() - SSH", () => {
         // password is undefined - triggers the '___NONE___' fallback in the replace() call.
         const result = await dump(
             buildConfig({ password: undefined }),
-            "/tmp/backup.rdb",
+            "/tmp/backup.rdb", fakeHost,
             (msg) => logs.push(msg),
         );
 
@@ -365,7 +369,7 @@ describe("dump() - SSH", () => {
             callback(null, stream);
         });
 
-        const result = await dump(buildConfig(), "/tmp/backup.rdb");
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("null");
@@ -376,7 +380,7 @@ describe("dump() - SSH", () => {
         // Make remoteBinaryCheck reject with a plain string, not an Error instance.
         mockRemoteBinaryCheck.mockRejectedValue("binary not found");
 
-        const result = await dump(buildConfig(), "/tmp/backup.rdb");
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("binary not found");
@@ -390,7 +394,7 @@ describe("dump() - SSH", () => {
             callback(null, stream);
         });
 
-        const result = await dump(buildConfig(), "/tmp/backup.rdb");
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("stream read error");
@@ -410,7 +414,7 @@ describe("dump() - SSH", () => {
             return writeStream;
         });
 
-        const result = await dump(buildConfig(), "/tmp/backup.rdb");
+        const result = await dump(buildConfig(), "/tmp/backup.rdb", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("disk full");

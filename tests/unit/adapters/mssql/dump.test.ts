@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { MSSQLConfig } from "@/lib/adapters/definitions";
 
@@ -160,7 +164,7 @@ describe("MSSQL Dump", () => {
         it("should execute BACKUP DATABASE and copy file locally", async () => {
             const config = buildConfig({ fileTransferMode: "local" });
 
-            const result = await dump(config, "/dest/backup.bak");
+            const result = await dump(config, "/dest/backup.bak", fakeHost);
 
             expect(result.success).toBe(true);
             expect(mockExecuteQueryWithMessages).toHaveBeenCalledOnce();
@@ -175,7 +179,7 @@ describe("MSSQL Dump", () => {
             mockExistsSync.mockReturnValue(false);
 
             const config = buildConfig({ fileTransferMode: "local" });
-            const result = await dump(config, "/dest/backup.bak");
+            const result = await dump(config, "/dest/backup.bak", fakeHost);
 
             expect(result.success).toBe(false);
             expect(result.error).toContain("Backup file not found");
@@ -186,7 +190,7 @@ describe("MSSQL Dump", () => {
             const logs: string[] = [];
             const config = buildConfig({ fileTransferMode: "local" });
 
-            await dump(config, "/dest/backup.bak", (msg) => logs.push(msg));
+            await dump(config, "/dest/backup.bak", fakeHost, (msg) => logs.push(msg));
 
             expect(logs).toContain("File transfer mode: Local (shared filesystem)");
         });
@@ -202,7 +206,7 @@ describe("MSSQL Dump", () => {
                 sshPassword: "sshpass",
             });
 
-            const result = await dump(config, "/dest/backup.bak");
+            const result = await dump(config, "/dest/backup.bak", fakeHost);
 
             expect(result.success).toBe(true);
 
@@ -224,7 +228,7 @@ describe("MSSQL Dump", () => {
                 sshUsername: "deploy",
             });
 
-            await dump(config, "/dest/backup.bak");
+            await dump(config, "/dest/backup.bak", fakeHost);
 
             // Remote cleanup should happen
             expect(mockSshDeleteRemote).toHaveBeenCalled();
@@ -238,7 +242,7 @@ describe("MSSQL Dump", () => {
                 localBackupPath: "/custom/path", // Should be ignored in SSH mode
             });
 
-            await dump(config, "/dest/backup.bak");
+            await dump(config, "/dest/backup.bak", fakeHost);
 
             // Download target should be in /tmp, not /custom/path
             const downloadCall = mockSshDownload.mock.calls[0];
@@ -252,7 +256,7 @@ describe("MSSQL Dump", () => {
                 sshUsername: "deploy",
             });
 
-            await dump(config, "/dest/backup.bak", (msg) => logs.push(msg));
+            await dump(config, "/dest/backup.bak", fakeHost, (msg) => logs.push(msg));
 
             expect(logs).toContain("File transfer mode: SSH (remote server)");
             expect(logs.some((l) => l.includes("Connecting via SSH"))).toBe(true);
@@ -266,7 +270,7 @@ describe("MSSQL Dump", () => {
                 sshUsername: "deploy",
             });
 
-            const result = await dump(config, "/dest/backup.bak");
+            const result = await dump(config, "/dest/backup.bak", fakeHost);
 
             expect(result.success).toBe(false);
             expect(result.error).toContain("SFTP connection lost");
@@ -282,7 +286,7 @@ describe("MSSQL Dump", () => {
                 sshUsername: "deploy",
             });
 
-            await dump(config, "/dest/backup.bak");
+            await dump(config, "/dest/backup.bak", fakeHost);
 
             // existsSync should NOT be called (that's the local mode check)
             expect(mockExistsSync).not.toHaveBeenCalled();
@@ -297,7 +301,7 @@ describe("MSSQL Dump", () => {
                 sshUsername: "deploy",
             });
 
-            const result = await dump(config, "/dest/multi.tar");
+            const result = await dump(config, "/dest/multi.tar", fakeHost);
 
             expect(result.success).toBe(true);
 
@@ -317,7 +321,7 @@ describe("MSSQL Dump", () => {
                 sshUsername: "deploy",
             });
 
-            await dump(config, "/dest/multi.tar");
+            await dump(config, "/dest/multi.tar", fakeHost);
 
             // Should delete both remote files
             expect(mockSshDeleteRemote).toHaveBeenCalledTimes(2);
@@ -331,7 +335,7 @@ describe("MSSQL Dump", () => {
             const config = buildConfig({ fileTransferMode: "ssh", sshUsername: "deploy" });
 
             const logs: string[] = [];
-            await dump(config, "/dest/backup.bak", (msg) => logs.push(msg));
+            await dump(config, "/dest/backup.bak", fakeHost, (msg) => logs.push(msg));
 
             expect(logs.some((l) => l.includes("Compression enabled"))).toBe(true);
             const query = mockExecuteQueryWithMessages.mock.calls[0][1];
@@ -343,7 +347,7 @@ describe("MSSQL Dump", () => {
             const config = buildConfig({ fileTransferMode: "ssh", sshUsername: "deploy" });
 
             const logs: string[] = [];
-            await dump(config, "/dest/backup.bak", (msg) => logs.push(msg));
+            await dump(config, "/dest/backup.bak", fakeHost, (msg) => logs.push(msg));
 
             expect(logs.some((l) => l.includes("Compression disabled"))).toBe(true);
         });
@@ -353,7 +357,7 @@ describe("MSSQL Dump", () => {
         it("should return failure result when no user databases found on server", async () => {
             mockGetDatabases.mockResolvedValue([]);
             const config = buildConfig({ database: "" });
-            const result = await dump(config, "/dest/backup.bak");
+            const result = await dump(config, "/dest/backup.bak", fakeHost);
 
             expect(result.success).toBe(false);
             expect(result.error).toContain("No user databases found on server");
@@ -363,7 +367,7 @@ describe("MSSQL Dump", () => {
             mockExecuteQueryWithMessages.mockRejectedValue(new Error("Login failed"));
             const config = buildConfig({ fileTransferMode: "ssh", sshUsername: "deploy" });
 
-            const result = await dump(config, "/dest/backup.bak");
+            const result = await dump(config, "/dest/backup.bak", fakeHost);
 
             expect(result.success).toBe(false);
             expect(result.error).toContain("Login failed");
@@ -376,7 +380,7 @@ describe("MSSQL Dump", () => {
                 sshUsername: "deploy",
             });
 
-            const result = await dump(config, "/dest/backup.bak");
+            const result = await dump(config, "/dest/backup.bak", fakeHost);
 
             expect(result.success).toBe(false);
             expect(result.error).toContain("SSH connection refused");
@@ -386,7 +390,7 @@ describe("MSSQL Dump", () => {
             mockFsStat.mockResolvedValue({ size: 0 });
             const config = buildConfig({ fileTransferMode: "local" });
 
-            const result = await dump(config, "/dest/backup.bak");
+            const result = await dump(config, "/dest/backup.bak", fakeHost);
 
             expect(result.success).toBe(false);
             expect(result.error).toContain("Backup file is empty");
@@ -401,7 +405,7 @@ describe("MSSQL Dump", () => {
                 sshUsername: "deploy",
             });
 
-            const result = await dump(config, "/dest/multi.tar");
+            const result = await dump(config, "/dest/multi.tar", fakeHost);
 
             expect(result.success).toBe(true);
             expect(mockExecuteQueryWithMessages).toHaveBeenCalledTimes(3);
@@ -412,7 +416,7 @@ describe("MSSQL Dump", () => {
             const logs: string[] = [];
             const config = buildConfig({ database: "", fileTransferMode: "ssh", sshUsername: "deploy" });
 
-            await dump(config, "/dest/backup.bak", (msg) => logs.push(msg));
+            await dump(config, "/dest/backup.bak", fakeHost, (msg) => logs.push(msg));
 
             expect(logs.some((l) => l.includes("Found 2 database(s)"))).toBe(true);
         });
@@ -429,7 +433,7 @@ describe("MSSQL Dump", () => {
                 }
             );
 
-            await dump(config, "/dest/backup.bak", (msg) => logs.push(msg));
+            await dump(config, "/dest/backup.bak", fakeHost, (msg) => logs.push(msg));
 
             expect(logs.some((l) => l.includes("SQL Server: 10 percent processed."))).toBe(true);
         });

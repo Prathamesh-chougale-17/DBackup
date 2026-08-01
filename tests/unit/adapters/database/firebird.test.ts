@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EventEmitter } from "events";
 
@@ -145,7 +149,7 @@ describe("Firebird connection - buildConnectionString", () => {
 
 describe("Firebird connection - getDatabases / getDatabasesWithStats", () => {
     it("returns configured alias names without spawning any process", async () => {
-        const result = await getDatabases(baseConfig as any);
+        const result = await getDatabases(baseConfig as any, fakeHost);
         expect(result).toEqual(["erp", "crm"]);
         expect(mockSpawn).not.toHaveBeenCalled();
     });
@@ -163,7 +167,7 @@ describe("Firebird connection - getDatabases / getDatabasesWithStats", () => {
             return proc;
         });
 
-        const result = await getDatabasesWithStats(baseConfig as any);
+        const result = await getDatabasesWithStats(baseConfig as any, fakeHost);
         expect(result).toEqual([
             { name: "erp", path: "/data/erp.fdb", tableCount: 3 },
             { name: "crm", path: "/data/crm.fdb", tableCount: 0 },
@@ -181,7 +185,7 @@ describe("Firebird connection - getDatabases / getDatabasesWithStats", () => {
             return proc;
         });
 
-        const result = await getDatabasesWithStats(baseConfig as any);
+        const result = await getDatabasesWithStats(baseConfig as any, fakeHost);
         expect(result).toEqual([
             { name: "erp", path: "/data/erp.fdb" },
             { name: "crm", path: "/data/crm.fdb" },
@@ -200,7 +204,7 @@ describe("Firebird connection - test()", () => {
             return proc;
         });
 
-        const result = await testConnection(baseConfig as any);
+        const result = await testConnection(baseConfig as any, fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.version).toBe("5.0.1");
@@ -212,7 +216,7 @@ describe("Firebird connection - test()", () => {
     });
 
     it("returns failure when no database aliases are configured", async () => {
-        const result = await testConnection({ ...baseConfig, databases: [] } as any);
+        const result = await testConnection({ ...baseConfig, databases: [] } as any, fakeHost);
         expect(result.success).toBe(false);
         expect(mockSpawn).not.toHaveBeenCalled();
     });
@@ -226,7 +230,7 @@ describe("Firebird dump - direct mode", () => {
             return proc;
         });
 
-        const result = await dump({ ...baseConfig, database: "erp" } as any, "/tmp/erp.fbk");
+        const result = await dump({ ...baseConfig, database: "erp" } as any, "/tmp/erp.fbk", fakeHost);
 
         expect(result.error).toBeUndefined();
         expect(result.success).toBe(true);
@@ -240,7 +244,7 @@ describe("Firebird dump - direct mode", () => {
     });
 
     it("fails with a clear error for an unknown alias", async () => {
-        const result = await dump({ ...baseConfig, database: "unknown" } as any, "/tmp/unknown.fbk");
+        const result = await dump({ ...baseConfig, database: "unknown" } as any, "/tmp/unknown.fbk", fakeHost);
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/Unknown Firebird database alias "unknown"/);
         expect(mockSpawn).not.toHaveBeenCalled();
@@ -256,7 +260,7 @@ describe("Firebird dump - SSH mode", () => {
         });
 
         const sshConfig = { ...baseConfig, connectionMode: "ssh", database: "erp" };
-        const result = await dump(sshConfig as any, "/tmp/erp.fbk");
+        const result = await dump(sshConfig as any, "/tmp/erp.fbk", fakeHost);
 
         expect(result.error).toBeUndefined();
         expect(result.success).toBe(true);
@@ -276,7 +280,7 @@ describe("Firebird restore - direct mode", () => {
             return proc;
         });
 
-        const result = await restore({ ...baseConfig, database: "erp" } as any, "/tmp/erp.fbk");
+        const result = await restore({ ...baseConfig, database: "erp" } as any, "/tmp/erp.fbk", fakeHost);
 
         expect(result.success).toBe(true);
         const [bin, args, options] = mockSpawn.mock.calls[0];
@@ -287,7 +291,7 @@ describe("Firebird restore - direct mode", () => {
     });
 
     it("fails with a clear error when leaving the field empty resolves to an unconfigured alias", async () => {
-        const result = await restore({ ...baseConfig, database: "unknown" } as any, "/tmp/erp.fbk");
+        const result = await restore({ ...baseConfig, database: "unknown" } as any, "/tmp/erp.fbk", fakeHost);
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/Unknown Firebird database alias "unknown"/);
     });
@@ -302,7 +306,7 @@ describe("Firebird restore - direct mode", () => {
         const result = await restore(
             { ...baseConfig, database: "erp", targetDatabaseName: "/custom/new-location.fdb" } as any,
             "/tmp/erp.fbk"
-        );
+        , fakeHost);
 
         expect(result.success).toBe(true);
         const [, args] = mockSpawn.mock.calls[0];
@@ -319,7 +323,7 @@ describe("Firebird restore - SSH mode", () => {
         });
 
         const sshConfig = { ...baseConfig, connectionMode: "ssh", database: "erp" };
-        const result = await restore(sshConfig as any, "/tmp/erp.fbk");
+        const result = await restore(sshConfig as any, "/tmp/erp.fbk", fakeHost);
 
         expect(result.success).toBe(true);
         expect(uploadFileMock).toHaveBeenCalledTimes(1);

@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { execFile } from "child_process";
 import util from "util";
 import { PostgresConfig } from "@/lib/adapters/definitions";
@@ -13,7 +14,7 @@ import {
 
 export const execFileAsync = util.promisify(execFile);
 
-export async function test(config: PostgresConfig): Promise<{ success: boolean; message: string; version?: string }> {
+export async function test(config: PostgresConfig, _host?: ExecutionHost): Promise<{ success: boolean; message: string; version?: string }> {
     if (isSSHMode(config)) {
         const sshConfig = extractSshConfig(config)!;
         const ssh = new SshClient();
@@ -73,7 +74,7 @@ export async function test(config: PostgresConfig): Promise<{ success: boolean; 
     return { success: false, message: "Connection failed: " + errMsg };
 }
 
-export async function getDatabases(config: PostgresConfig): Promise<string[]> {
+export async function getDatabases(config: PostgresConfig, _host: ExecutionHost): Promise<string[]> {
     if (isSSHMode(config)) {
         const sshConfig = extractSshConfig(config)!;
         const ssh = new SshClient();
@@ -168,7 +169,7 @@ async function countTablesViaSsh(
     return isNaN(count) ? undefined : count;
 }
 
-export async function getDatabasesWithStats(config: PostgresConfig): Promise<DatabaseInfo[]> {
+export async function getDatabasesWithStats(config: PostgresConfig, _host: ExecutionHost): Promise<DatabaseInfo[]> {
     if (isSSHMode(config)) {
         const sshConfig = extractSshConfig(config)!;
         const ssh = new SshClient();

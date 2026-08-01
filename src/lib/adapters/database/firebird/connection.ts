@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { spawn } from "child_process";
 import net from "net";
 import { FirebirdConfig } from "@/lib/adapters/definitions";
@@ -41,14 +42,14 @@ export function buildConnectionString(config: FirebirdConfig, dbPath: string): s
     return `${config.host}${portSegment}:${dbPath}`;
 }
 
-export async function getDatabases(config: FirebirdConfig): Promise<string[]> {
+export async function getDatabases(config: FirebirdConfig, _host: ExecutionHost): Promise<string[]> {
     return (config.databases || []).map((d) => d.name);
 }
 
 const TABLE_COUNT_QUERY =
     "SET HEADING OFF;\nSELECT COUNT(*) FROM RDB$RELATIONS WHERE RDB$SYSTEM_FLAG = 0 OR RDB$SYSTEM_FLAG IS NULL;";
 
-export async function getDatabasesWithStats(config: FirebirdConfig): Promise<DatabaseInfo[]> {
+export async function getDatabasesWithStats(config: FirebirdConfig, _host: ExecutionHost): Promise<DatabaseInfo[]> {
     // Firebird has no filesystem-level size query reachable over the wire protocol
     // (no gstat bundled - see tools.ts), so sizeInBytes is intentionally left
     // undefined. `path` is included so the restore UI can prefill the target field
@@ -120,7 +121,7 @@ export async function runQuery(config: FirebirdConfig, database: string, sql: st
     return result.stdout;
 }
 
-export async function test(config: FirebirdConfig): Promise<{ success: boolean; message: string; version?: string }> {
+export async function test(config: FirebirdConfig, _host?: ExecutionHost): Promise<{ success: boolean; message: string; version?: string }> {
     const aliases = config.databases || [];
     if (aliases.length === 0) {
         return { success: false, message: "No database aliases configured" };

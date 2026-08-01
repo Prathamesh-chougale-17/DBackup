@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { spawn } from "child_process";
@@ -168,6 +169,7 @@ export async function dumpOne(
     config: MongoDBDumpConfig,
     dbName: string,
     destinationPath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<{ size: number }> {
     await dumpSingleDatabase(dbName, destinationPath, config, onLog ?? (() => {}));
@@ -178,6 +180,7 @@ export async function dumpOne(
 export async function dump(
     config: MongoDBDumpConfig,
     destinationPath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     _onProgress?: (percentage: number) => void
 ): Promise<BackupResult> {
@@ -209,7 +212,7 @@ export async function dump(
         if (dbs.length === 0) {
             log("No databases selected - backing up all databases");
             try {
-                dbs = await getDatabases(config);
+                dbs = await getDatabases(config, _host);
                 log(`Found ${dbs.length} database(s): ${dbs.join(', ')}`);
             } catch (e: unknown) {
                 const message = e instanceof Error ? e.message : String(e);

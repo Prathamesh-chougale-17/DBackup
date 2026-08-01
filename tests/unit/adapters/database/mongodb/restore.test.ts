@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MongoDBConfig } from "@/lib/adapters/definitions";
 
@@ -162,7 +166,7 @@ describe("prepareRestore()", () => {
     it("skips permission check in SSH mode", async () => {
         mockIsSSHMode.mockReturnValue(true);
 
-        await expect(prepareRestore(buildConfig({ sshHost: "remote.example.com" }), ["mydb"])).resolves.toBeUndefined();
+        await expect(prepareRestore(buildConfig({ sshHost: "remote.example.com" }), ["mydb"], fakeHost)).resolves.toBeUndefined();
         expect(mockMongoConnect).not.toHaveBeenCalled();
     });
 
@@ -172,7 +176,7 @@ describe("prepareRestore()", () => {
         mockCreateCollection.mockResolvedValue(undefined);
         mockDropCollection.mockResolvedValue(undefined);
 
-        await expect(prepareRestore(buildConfig(), ["mydb"])).resolves.toBeUndefined();
+        await expect(prepareRestore(buildConfig(), ["mydb"], fakeHost)).resolves.toBeUndefined();
 
         expect(mockCreateCollection).toHaveBeenCalledWith("__perm_check_tmp");
         expect(mockDropCollection).toHaveBeenCalled();
@@ -185,7 +189,7 @@ describe("prepareRestore()", () => {
         mockDropCollection.mockResolvedValue(undefined);
 
         const config = buildConfig({ privilegedAuth: { user: "superuser", password: "rootpw" } });
-        await expect(prepareRestore(config, ["mydb"])).resolves.toBeUndefined();
+        await expect(prepareRestore(config, ["mydb"], fakeHost)).resolves.toBeUndefined();
     });
 
     it("throws access-denied error when not authorized", async () => {
@@ -196,7 +200,7 @@ describe("prepareRestore()", () => {
             codeName: "Unauthorized",
         });
 
-        await expect(prepareRestore(buildConfig(), ["mydb"])).rejects.toThrow(/Access denied/);
+        await expect(prepareRestore(buildConfig(), ["mydb"], fakeHost)).rejects.toThrow(/Access denied/);
     });
 
     it("re-throws other errors from createCollection", async () => {
@@ -204,7 +208,7 @@ describe("prepareRestore()", () => {
         mockMongoConnect.mockResolvedValue(undefined);
         mockCreateCollection.mockRejectedValue(new Error("Disk full"));
 
-        await expect(prepareRestore(buildConfig(), ["mydb"])).rejects.toThrow("Disk full");
+        await expect(prepareRestore(buildConfig(), ["mydb"], fakeHost)).rejects.toThrow("Disk full");
     });
 });
 
@@ -228,7 +232,7 @@ describe("restore() - single database archive", () => {
     it("restores a single database successfully", async () => {
         const config = buildConfig({ database: "mydb" });
 
-        const result = await restore(config, "/backups/mydb.archive");
+        const result = await restore(config, "/backups/mydb.archive", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledWith(
@@ -244,7 +248,7 @@ describe("restore() - single database archive", () => {
             targetDatabaseName: "mydb_restored",
         });
 
-        const result = await restore(config, "/backups/mydb.archive");
+        const result = await restore(config, "/backups/mydb.archive", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledWith(
@@ -262,7 +266,7 @@ describe("restore() - single database archive", () => {
             database: "mydb",
         });
 
-        const result = await restore(config, "/backups/mydb.archive");
+        const result = await restore(config, "/backups/mydb.archive", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledWith(
@@ -279,7 +283,7 @@ describe("restore() - single database archive", () => {
             authenticationDatabase: "admin",
         });
 
-        const result = await restore(config, "/backups/mydb.archive");
+        const result = await restore(config, "/backups/mydb.archive", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledWith(
@@ -299,7 +303,7 @@ describe("restore() - single database archive", () => {
             ],
         });
 
-        const result = await restore(config, "/backups/mydb.archive");
+        const result = await restore(config, "/backups/mydb.archive", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledWith(
@@ -313,7 +317,7 @@ describe("restore() - single database archive", () => {
         const proc = makeSpawnProcess();
         mockSpawnProcess.mockReturnValue(proc);
 
-        const result = await restore(buildConfig({ database: "mydb" }), "/backups/mydb.archive");
+        const result = await restore(buildConfig({ database: "mydb" }), "/backups/mydb.archive", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("mongorestore exited");
@@ -331,7 +335,7 @@ describe("restore() - single database archive", () => {
         const result = await restore(
             buildConfig({ database: "mydb" }),
             "/backups/mydb.archive"
-        );
+        , fakeHost);
         expect(result.success).toBe(true);
         expect(result.logs.some(l => l.includes("[mongorestore]"))).toBe(true);
     });
@@ -348,7 +352,7 @@ describe("restore() - single database archive", () => {
         // waitForProcess deferred long enough for the error event to fire
         mockWaitForProcess.mockImplementation(() => new Promise(resolve => setTimeout(resolve, 10)));
 
-        const result = await restore(buildConfig({ database: "mydb" }), "/backups/mydb.archive");
+        const result = await restore(buildConfig({ database: "mydb" }), "/backups/mydb.archive", fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.logs.some(l => l.includes("Read stream error"))).toBe(true);
@@ -385,7 +389,7 @@ describe("restore() - multi-database TAR archive", () => {
         const proc = makeSpawnProcess();
         mockSpawnProcess.mockReturnValue(proc);
 
-        const result = await restore(buildConfig(), "/backups/multi.tar");
+        const result = await restore(buildConfig(), "/backups/multi.tar", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledTimes(2);
@@ -411,7 +415,7 @@ describe("restore() - multi-database TAR archive", () => {
         mockSpawnProcess.mockReturnValue(proc);
 
         const onProgress = vi.fn();
-        const result = await restore(buildConfig(), "/backups/multi.tar", undefined, onProgress);
+        const result = await restore(buildConfig(), "/backups/multi.tar", fakeHost, undefined, onProgress);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledTimes(1);
@@ -422,7 +426,7 @@ describe("restore() - multi-database TAR archive", () => {
     it("cleans up temp dir even when restore fails", async () => {
         mockExtractSelectedDatabases.mockRejectedValue(new Error("extraction failed"));
 
-        const result = await restore(buildConfig(), "/backups/multi.tar");
+        const result = await restore(buildConfig(), "/backups/multi.tar", fakeHost);
 
         expect(result.success).toBe(false);
         expect(mockCleanupTempDir).toHaveBeenCalledWith("/tmp/mongo-restore-xyz");
@@ -472,7 +476,7 @@ describe("restore() - SSH TAR archive restore", () => {
         const result = await restore(
             buildConfig({ database: "mydb", sshHost: "remote.example.com" }),
             "/backups/multi.tar"
-        );
+        , fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSshUploadFile).toHaveBeenCalled();
@@ -498,7 +502,7 @@ describe("restore() - SSH TAR archive restore", () => {
         const result = await restore(
             buildConfig({ database: "mydb", sshHost: "remote.example.com" }),
             "/backups/multi.tar"
-        );
+        , fakeHost);
 
         expect(result.success).toBe(false);
     });
@@ -517,7 +521,7 @@ describe("restoreOne()", () => {
     });
 
     it("restores the given file into the given target database directly", async () => {
-        await expect(restoreOne(buildConfig(), "/tmp/db.archive", "targetdb")).resolves.toBeUndefined();
+        await expect(restoreOne(buildConfig(), "/tmp/db.archive", "targetdb", fakeHost)).resolves.toBeUndefined();
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "mongorestore",
@@ -526,11 +530,11 @@ describe("restoreOne()", () => {
     });
 
     it("works without an onLog callback", async () => {
-        await expect(restoreOne(buildConfig(), "/tmp/db.archive", "targetdb")).resolves.toBeUndefined();
+        await expect(restoreOne(buildConfig(), "/tmp/db.archive", "targetdb", fakeHost)).resolves.toBeUndefined();
     });
 
     it("adds nsFrom/nsTo args when the original database name differs from the target", async () => {
-        await restoreOne(buildConfig(), "/tmp/db.archive", "renamed_db", undefined, undefined, "original_db");
+        await restoreOne(buildConfig(), "/tmp/db.archive", "renamed_db", fakeHost, undefined, undefined, "original_db");
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "mongorestore",

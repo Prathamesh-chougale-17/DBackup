@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MySQLConfig } from "@/lib/adapters/definitions";
 
@@ -119,7 +123,7 @@ describe("MySQL Connection - test()", () => {
                 cb(null, { stdout: "8.0.35-MySQL Community Server\n", stderr: "" });
             });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.message).toContain("Connection successful");
@@ -137,7 +141,7 @@ describe("MySQL Connection - test()", () => {
                 cb(null, { stdout: "11.4.9-MariaDB-ubu2404\n", stderr: "" });
             });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.version).toBe("11.4.9");
@@ -149,7 +153,7 @@ describe("MySQL Connection - test()", () => {
             cb({ stderr: "Access denied for user", message: "Command failed" });
         });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("Connection failed");
@@ -167,7 +171,7 @@ describe("MySQL Connection - test()", () => {
                 cb(null, { stdout: "custom-build\n", stderr: "" });
             });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.version).toBe("custom-build");
@@ -186,7 +190,7 @@ describe("MySQL Connection - test()", () => {
                 cb(null, { stdout: "8.0.35\n", stderr: "" });
             });
 
-        await test(buildConfig({ disableSsl: true }));
+        await test(buildConfig({ disableSsl: true }), fakeHost);
     });
 });
 
@@ -199,7 +203,7 @@ describe("MySQL Connection - getDatabases()", () => {
     it("returns user databases and filters system databases", async () => {
         execSucceeds("information_schema\nmysql\nperformance_schema\nsys\ntestdb\n");
 
-        const dbs = await getDatabases(buildConfig());
+        const dbs = await getDatabases(buildConfig(), fakeHost);
 
         expect(dbs).toEqual(["testdb"]);
         expect(dbs).not.toContain("information_schema");
@@ -211,7 +215,7 @@ describe("MySQL Connection - getDatabases()", () => {
     it("returns multiple user databases", async () => {
         execSucceeds("shop\nanalytics\nblog\n");
 
-        const dbs = await getDatabases(buildConfig());
+        const dbs = await getDatabases(buildConfig(), fakeHost);
 
         expect(dbs).toEqual(["shop", "analytics", "blog"]);
     });
@@ -219,7 +223,7 @@ describe("MySQL Connection - getDatabases()", () => {
     it("returns an empty array when only system databases exist", async () => {
         execSucceeds("information_schema\nmysql\n");
 
-        const dbs = await getDatabases(buildConfig());
+        const dbs = await getDatabases(buildConfig(), fakeHost);
 
         expect(dbs).toEqual([]);
     });
@@ -232,7 +236,7 @@ describe("MySQL Connection - getDatabases()", () => {
             cb(null, { stdout: "mydb\n", stderr: "" });
         });
 
-        const dbs = await getDatabases(buildConfig({ disableSsl: true }));
+        const dbs = await getDatabases(buildConfig({ disableSsl: true }), fakeHost);
 
         expect(dbs).toEqual(["mydb"]);
     });
@@ -247,7 +251,7 @@ describe("MySQL Connection - getDatabasesWithStats()", () => {
     it("parses tab-separated stats output correctly", async () => {
         execSucceeds("shop\t102400\t12\nanalytics\t512000\t3\n");
 
-        const stats = await getDatabasesWithStats(buildConfig());
+        const stats = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(stats).toHaveLength(2);
         expect(stats[0]).toEqual({ name: "shop", sizeInBytes: 102400, tableCount: 12 });
@@ -257,7 +261,7 @@ describe("MySQL Connection - getDatabasesWithStats()", () => {
     it("returns an empty array for empty stdout", async () => {
         execSucceeds("");
 
-        const stats = await getDatabasesWithStats(buildConfig());
+        const stats = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(stats).toEqual([]);
     });
@@ -265,7 +269,7 @@ describe("MySQL Connection - getDatabasesWithStats()", () => {
     it("defaults size and count to 0 for unparseable values", async () => {
         execSucceeds("broken\tNULL\tNULL\n");
 
-        const stats = await getDatabasesWithStats(buildConfig());
+        const stats = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(stats[0]).toEqual({ name: "broken", sizeInBytes: 0, tableCount: 0 });
     });
@@ -278,7 +282,7 @@ describe("MySQL Connection - getDatabasesWithStats()", () => {
             cb(null, { stdout: "shop\t1024\t5\n", stderr: "" });
         });
 
-        const stats = await getDatabasesWithStats(buildConfig({ disableSsl: true }));
+        const stats = await getDatabasesWithStats(buildConfig({ disableSsl: true }), fakeHost);
 
         expect(stats[0].name).toBe("shop");
     });
@@ -427,7 +431,7 @@ describe("MySQL Connection - test() SSH path", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "1", stderr: "" })  // SELECT 1
             .mockResolvedValueOnce({ code: 0, stdout: "8.0.35-MySQL Community Server\n", stderr: "" }); // version
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.message).toContain("SSH");
@@ -437,7 +441,7 @@ describe("MySQL Connection - test() SSH path", () => {
     it("returns failure when SSH ping fails", async () => {
         mockSshExec.mockResolvedValue({ code: 1, stdout: "", stderr: "Connection refused" });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("SSH ping failed");
@@ -448,7 +452,7 @@ describe("MySQL Connection - test() SSH path", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" })  // ping
             .mockResolvedValueOnce({ code: 1, stdout: "", stderr: "ERROR 1045 (28000): Access denied for user" }); // SELECT 1
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("Connection failed");
@@ -460,7 +464,7 @@ describe("MySQL Connection - test() SSH path", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "1", stderr: "" })  // SELECT 1
             .mockResolvedValueOnce({ code: 1, stdout: "", stderr: "Permission denied" }); // version fails
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.message).toContain("version unknown");
@@ -472,7 +476,7 @@ describe("MySQL Connection - test() SSH path", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "1", stderr: "" })  // SELECT 1
             .mockResolvedValueOnce({ code: 0, stdout: "custom-build\n", stderr: "" }); // version
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.version).toBe("custom-build");
@@ -481,7 +485,7 @@ describe("MySQL Connection - test() SSH path", () => {
     it("catches SSH exceptions and returns failure", async () => {
         mockSshConnect.mockRejectedValue(new Error("Connection timeout"));
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("SSH connection failed");
@@ -494,7 +498,7 @@ describe("MySQL Connection - test() SSH path", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "1", stderr: "" })  // SELECT 1
             .mockResolvedValueOnce({ code: 0, stdout: "8.0.35\n", stderr: "" }); // version
 
-        const result = await test(buildConfig({ password: undefined }));
+        const result = await test(buildConfig({ password: undefined }), fakeHost);
 
         expect(result.success).toBe(true);
     });
@@ -517,7 +521,7 @@ describe("MySQL Connection - getDatabases() SSH path", () => {
     it("returns filtered databases via SSH", async () => {
         mockSshExec.mockResolvedValue({ code: 0, stdout: "information_schema\nmysql\ntestdb\nshop\n", stderr: "" });
 
-        const dbs = await getDatabases(buildConfig());
+        const dbs = await getDatabases(buildConfig(), fakeHost);
 
         expect(dbs).toEqual(["testdb", "shop"]);
         expect(mockSshEnd).toHaveBeenCalled();
@@ -526,14 +530,14 @@ describe("MySQL Connection - getDatabases() SSH path", () => {
     it("throws when SSH exec returns non-zero code", async () => {
         mockSshExec.mockResolvedValue({ code: 1, stdout: "", stderr: "Permission denied" });
 
-        await expect(getDatabases(buildConfig())).rejects.toThrow("Failed to list databases");
+        await expect(getDatabases(buildConfig(), fakeHost)).rejects.toThrow("Failed to list databases");
         expect(mockSshEnd).toHaveBeenCalled();
     });
 
     it("does not set MYSQL_PWD when password is not set via SSH", async () => {
         mockSshExec.mockResolvedValue({ code: 0, stdout: "testdb\n", stderr: "" });
 
-        const dbs = await getDatabases(buildConfig({ password: undefined }));
+        const dbs = await getDatabases(buildConfig({ password: undefined }), fakeHost);
 
         expect(dbs).toEqual(["testdb"]);
     });
@@ -556,7 +560,7 @@ describe("MySQL Connection - getDatabasesWithStats() SSH path", () => {
     it("returns parsed database stats via SSH", async () => {
         mockSshExec.mockResolvedValue({ code: 0, stdout: "shop\t102400\t12\nanalytics\t512000\t3\n", stderr: "" });
 
-        const stats = await getDatabasesWithStats(buildConfig());
+        const stats = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(stats).toHaveLength(2);
         expect(stats[0]).toEqual({ name: "shop", sizeInBytes: 102400, tableCount: 12 });
@@ -567,14 +571,14 @@ describe("MySQL Connection - getDatabasesWithStats() SSH path", () => {
         // Both the stats query and the SHOW DATABASES fallback fail.
         mockSshExec.mockResolvedValue({ code: 1, stdout: "", stderr: "Permission denied" });
 
-        await expect(getDatabasesWithStats(buildConfig())).rejects.toThrow("Failed to list databases");
+        await expect(getDatabasesWithStats(buildConfig(), fakeHost)).rejects.toThrow("Failed to list databases");
         expect(mockSshEnd).toHaveBeenCalled();
     });
 
     it("does not set MYSQL_PWD when password is not set via SSH", async () => {
         mockSshExec.mockResolvedValue({ code: 0, stdout: "shop\t1024\t5\n", stderr: "" });
 
-        const stats = await getDatabasesWithStats(buildConfig({ password: undefined }));
+        const stats = await getDatabasesWithStats(buildConfig({ password: undefined }), fakeHost);
 
         expect(stats[0].name).toBe("shop");
     });

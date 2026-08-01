@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PostgresConfig } from "@/lib/adapters/definitions";
 
@@ -87,7 +91,7 @@ describe("PostgreSQL Connection - test()", () => {
     it("returns success with parsed version on first database attempt", async () => {
         execSucceeds("PostgreSQL 16.1 on x86_64-pc-linux-gnu\n");
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.message).toContain("Connection successful");
@@ -97,7 +101,7 @@ describe("PostgreSQL Connection - test()", () => {
     it("extracts minor version from full PostgreSQL version string", async () => {
         execSucceeds("PostgreSQL 14.10 on aarch64-unknown-linux-gnu, compiled by gcc\n");
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.version).toBe("14.10");
@@ -106,7 +110,7 @@ describe("PostgreSQL Connection - test()", () => {
     it("falls back to raw version string when regex does not match", async () => {
         execSucceeds("custom-build\n");
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.version).toBe("custom-build");
@@ -130,7 +134,7 @@ describe("PostgreSQL Connection - test()", () => {
                 cb(null, { stdout: "PostgreSQL 15.3\n", stderr: "" });
             });
 
-        const result = await test(buildConfig({ database: "testdb" }));
+        const result = await test(buildConfig({ database: "testdb" }), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.version).toBe("15.3");
@@ -139,7 +143,7 @@ describe("PostgreSQL Connection - test()", () => {
     it("returns failure when all connection attempts fail", async () => {
         execFails("Connection refused", "FATAL: connection refused");
 
-        const result = await test(buildConfig({ database: undefined }));
+        const result = await test(buildConfig({ database: undefined }), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("Connection failed");
@@ -148,7 +152,7 @@ describe("PostgreSQL Connection - test()", () => {
     it("includes stderr in the failure message when available", async () => {
         execFails("command failed", "FATAL: password authentication failed");
 
-        const result = await test(buildConfig({ database: undefined }));
+        const result = await test(buildConfig({ database: undefined }), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("FATAL: password authentication failed");
@@ -161,7 +165,7 @@ describe("PostgreSQL Connection - test()", () => {
             cb("connection timeout");
         });
 
-        const result = await test(buildConfig({ database: undefined }));
+        const result = await test(buildConfig({ database: undefined }), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("connection timeout");
@@ -170,7 +174,7 @@ describe("PostgreSQL Connection - test()", () => {
     it("uses lastError.message when stderr is empty on failed connection", async () => {
         execFails("connection refused"); // default empty stderr
 
-        const result = await test(buildConfig({ database: undefined }));
+        const result = await test(buildConfig({ database: undefined }), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("connection refused");
@@ -188,7 +192,7 @@ describe("PostgreSQL Connection - test()", () => {
             stderr: "",
         });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.message).toContain("SSH");
@@ -203,7 +207,7 @@ describe("PostgreSQL Connection - test()", () => {
             stderr: "connection refused",
         });
 
-        const result = await test(buildConfig({ database: undefined }));
+        const result = await test(buildConfig({ database: undefined }), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("SSH");
@@ -213,7 +217,7 @@ describe("PostgreSQL Connection - test()", () => {
         mockIsSSHMode.mockReturnValue(true);
         mockSshExec.mockResolvedValue({ code: 0, stdout: "custom-build-1.0\n", stderr: "" });
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.version).toBe("custom-build-1.0");
@@ -223,7 +227,7 @@ describe("PostgreSQL Connection - test()", () => {
         mockIsSSHMode.mockReturnValue(true);
         mockSshExec.mockResolvedValue({ code: 0, stdout: "PostgreSQL 15.0\n", stderr: "" });
 
-        const result = await test(buildConfig({ password: "" }));
+        const result = await test(buildConfig({ password: "" }), fakeHost);
 
         expect(result.success).toBe(true);
     });
@@ -232,7 +236,7 @@ describe("PostgreSQL Connection - test()", () => {
         mockIsSSHMode.mockReturnValue(true);
         mockSshExec.mockImplementation(() => Promise.reject("timeout string"));
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("SSH connection failed");
@@ -243,7 +247,7 @@ describe("PostgreSQL Connection - test()", () => {
         mockIsSSHMode.mockReturnValue(true);
         mockSshExec.mockRejectedValue(new Error("SSH transport error"));
 
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.message).toContain("SSH connection failed");
@@ -264,7 +268,7 @@ describe("PostgreSQL Connection - getDatabases()", () => {
     it("returns list of databases from psql output", async () => {
         execSucceeds("postgres\ntestdb\nanalytics\n");
 
-        const result = await getDatabases(buildConfig());
+        const result = await getDatabases(buildConfig(), fakeHost);
 
         expect(result).toEqual(["postgres", "testdb", "analytics"]);
     });
@@ -272,7 +276,7 @@ describe("PostgreSQL Connection - getDatabases()", () => {
     it("filters out empty lines from psql output", async () => {
         execSucceeds("db1\n\ndb2\n\n");
 
-        const result = await getDatabases(buildConfig());
+        const result = await getDatabases(buildConfig(), fakeHost);
 
         expect(result).toEqual(["db1", "db2"]);
     });
@@ -280,7 +284,7 @@ describe("PostgreSQL Connection - getDatabases()", () => {
     it("throws when all connection attempts fail", async () => {
         execFails("connection refused");
 
-        await expect(getDatabases(buildConfig({ database: undefined }))).rejects.toBeDefined();
+        await expect(getDatabases(buildConfig({ database: undefined }), fakeHost)).rejects.toBeDefined();
     });
 
     it("returns databases via SSH when SSH mode is active", async () => {
@@ -291,7 +295,7 @@ describe("PostgreSQL Connection - getDatabases()", () => {
             stderr: "",
         });
 
-        const result = await getDatabases(buildConfig());
+        const result = await getDatabases(buildConfig(), fakeHost);
 
         expect(result).toEqual(["postgres", "app_db"]);
     });
@@ -300,7 +304,7 @@ describe("PostgreSQL Connection - getDatabases()", () => {
         mockIsSSHMode.mockReturnValue(true);
         mockSshExec.mockResolvedValue({ code: 0, stdout: "mydb\n", stderr: "" });
 
-        const result = await getDatabases(buildConfig({ password: "" }));
+        const result = await getDatabases(buildConfig({ password: "" }), fakeHost);
 
         expect(result).toEqual(["mydb"]);
     });
@@ -309,7 +313,7 @@ describe("PostgreSQL Connection - getDatabases()", () => {
         mockIsSSHMode.mockReturnValue(true);
         mockSshExec.mockResolvedValue({ code: 1, stdout: "", stderr: "error" });
 
-        await expect(getDatabases(buildConfig({ database: undefined }))).rejects.toThrow(
+        await expect(getDatabases(buildConfig({ database: undefined }), fakeHost)).rejects.toThrow(
             "Failed to list databases via SSH"
         );
     });
@@ -328,7 +332,7 @@ describe("PostgreSQL Connection - getDatabasesWithStats()", () => {
     it("returns parsed stats from tab-separated psql output", async () => {
         execSucceeds("postgres\t8192000\napp_db\t204800\n");
 
-        const result = await getDatabasesWithStats(buildConfig());
+        const result = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(result).toEqual([
             { name: "postgres", sizeInBytes: 8192000 },
@@ -339,7 +343,7 @@ describe("PostgreSQL Connection - getDatabasesWithStats()", () => {
     it("defaults to 0 for unparseable size field", async () => {
         execSucceeds("broken\tnot_a_number\n");
 
-        const result = await getDatabasesWithStats(buildConfig());
+        const result = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(result).toEqual([
             { name: "broken", sizeInBytes: 0 },
@@ -349,7 +353,7 @@ describe("PostgreSQL Connection - getDatabasesWithStats()", () => {
     it("filters out empty lines", async () => {
         execSucceeds("db1\t1024\n\n");
 
-        const result = await getDatabasesWithStats(buildConfig());
+        const result = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(result).toHaveLength(1);
     });
@@ -371,7 +375,7 @@ describe("PostgreSQL Connection - getDatabasesWithStats()", () => {
             cb(null, { stdout: "12\n", stderr: "" });
         });
 
-        const result = await getDatabasesWithStats(buildConfig());
+        const result = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(result).toEqual([
             { name: "postgres", sizeInBytes: 8192000, tableCount: 5 },
@@ -391,7 +395,7 @@ describe("PostgreSQL Connection - getDatabasesWithStats()", () => {
             cb(Object.assign(new Error("permission denied"), { stderr: "" }));
         });
 
-        const result = await getDatabasesWithStats(buildConfig());
+        const result = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(result).toEqual([{ name: "app_db", sizeInBytes: 204800 }]);
     });
@@ -400,7 +404,7 @@ describe("PostgreSQL Connection - getDatabasesWithStats()", () => {
         execFails("connection refused");
 
         await expect(
-            getDatabasesWithStats(buildConfig({ database: undefined }))
+            getDatabasesWithStats(buildConfig({ database: undefined }), fakeHost)
         ).rejects.toBeDefined();
     });
 
@@ -412,7 +416,7 @@ describe("PostgreSQL Connection - getDatabasesWithStats()", () => {
             stderr: "",
         });
 
-        const result = await getDatabasesWithStats(buildConfig());
+        const result = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(result).toEqual([{ name: "mydb", sizeInBytes: 512000 }]);
     });
@@ -421,7 +425,7 @@ describe("PostgreSQL Connection - getDatabasesWithStats()", () => {
         mockIsSSHMode.mockReturnValue(true);
         mockSshExec.mockResolvedValue({ code: 0, stdout: "db1\t1024\n", stderr: "" });
 
-        const result = await getDatabasesWithStats(buildConfig({ password: "" }));
+        const result = await getDatabasesWithStats(buildConfig({ password: "" }), fakeHost);
 
         expect(result).toEqual([{ name: "db1", sizeInBytes: 1024 }]);
     });
@@ -431,7 +435,7 @@ describe("PostgreSQL Connection - getDatabasesWithStats()", () => {
         mockSshExec.mockResolvedValue({ code: 1, stdout: "", stderr: "error" });
 
         await expect(
-            getDatabasesWithStats(buildConfig({ database: undefined }))
+            getDatabasesWithStats(buildConfig({ database: undefined }), fakeHost)
         ).rejects.toThrow("Failed to get database stats via SSH");
     });
 });

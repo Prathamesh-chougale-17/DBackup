@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MySQLConfig } from "@/lib/adapters/definitions";
 
@@ -168,7 +172,7 @@ describe("prepareRestore()", () => {
     it("calls ensureDatabase for each database in the list", async () => {
         const config = buildConfig();
 
-        await prepareRestore(config, ["db1", "db2"]);
+        await prepareRestore(config, ["db1", "db2"], fakeHost);
 
         expect(mockEnsureDatabase).toHaveBeenCalledTimes(2);
         expect(mockEnsureDatabase).toHaveBeenCalledWith(config, "db1", "root", "secret", false, []);
@@ -180,7 +184,7 @@ describe("prepareRestore()", () => {
             privilegedAuth: { user: "admin", password: "adminpw" },
         });
 
-        await prepareRestore(config, ["mydb"]);
+        await prepareRestore(config, ["mydb"], fakeHost);
 
         expect(mockEnsureDatabase).toHaveBeenCalledWith(
             config, "mydb", "admin", "adminpw", true, []
@@ -188,7 +192,7 @@ describe("prepareRestore()", () => {
     });
 
     it("does nothing when the database list is empty", async () => {
-        await prepareRestore(buildConfig(), []);
+        await prepareRestore(buildConfig(), [], fakeHost);
 
         expect(mockEnsureDatabase).not.toHaveBeenCalled();
     });
@@ -208,7 +212,7 @@ describe("restore() - error paths", () => {
     it("returns failure when no target database is specified", async () => {
         const config = buildConfig({ database: undefined });
 
-        const result = await restore(config, "/fake/dump.sql");
+        const result = await restore(config, "/fake/dump.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/No target database specified/i);
@@ -222,7 +226,7 @@ describe("restore() - error paths", () => {
             ],
         });
 
-        const result = await restore(config, "/fake/dump.sql");
+        const result = await restore(config, "/fake/dump.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/No databases selected/i);
@@ -250,7 +254,7 @@ describe("restore() - single database", () => {
     });
 
     it("restores a single database successfully", async () => {
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledWith("mysql", expect.any(Array), expect.any(Object));
@@ -264,7 +268,7 @@ describe("restore() - single database", () => {
             ],
         });
 
-        const result = await restore(config, "/backups/dump.sql");
+        const result = await restore(config, "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockEnsureDatabase).toHaveBeenCalledWith(
@@ -280,7 +284,7 @@ describe("restore() - single database", () => {
             ],
         });
 
-        const result = await restore(config, "/backups/dump.sql");
+        const result = await restore(config, "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockEnsureDatabase).toHaveBeenCalledWith(
@@ -298,7 +302,7 @@ describe("restore() - single database", () => {
             return Promise.resolve();
         });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.logs.some((l) => l.includes("Importing table data"))).toBe(true);
@@ -310,7 +314,7 @@ describe("restore() - single database", () => {
             return Promise.resolve();
         });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.logs.some((l) => l.toLowerCase().includes("using a password"))).toBe(false);
     });
@@ -321,7 +325,7 @@ describe("restore() - single database", () => {
             return Promise.resolve();
         });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.logs.some((l) => l.toLowerCase().includes("deprecated program name"))).toBe(false);
     });
@@ -333,7 +337,7 @@ describe("restore() - single database", () => {
         });
 
         const logCalls: { msg: string; level?: string }[] = [];
-        await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", (msg, level) => {
+        await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost, (msg, level) => {
             logCalls.push({ msg, level });
         });
 
@@ -349,7 +353,7 @@ describe("restore() - single database", () => {
             return Promise.resolve();
         });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         const truncatedEntry = result.logs.find((l) => l.includes("(truncated)"));
         expect(truncatedEntry).toBeDefined();
@@ -366,7 +370,7 @@ describe("restore() - single database", () => {
             return Promise.resolve();
         });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         const suppressEntry = result.logs.find((l) => l.includes("suppressed"));
         expect(suppressEntry).toBeDefined();
@@ -380,7 +384,7 @@ describe("restore() - single database", () => {
             return Promise.resolve();
         });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.logs.some((l) => l.includes("partial-line-no-newline"))).toBe(true);
     });
@@ -409,7 +413,7 @@ describe("restoreOne()", () => {
     });
 
     it("restores the given file into the given target database directly", async () => {
-        await expect(restoreOne(buildConfig(), "/tmp/db.sql", "targetdb")).resolves.toBeUndefined();
+        await expect(restoreOne(buildConfig(), "/tmp/db.sql", "targetdb", fakeHost)).resolves.toBeUndefined();
 
         expect(mockSpawnProcess).toHaveBeenCalledWith("mysql", expect.any(Array), expect.any(Object));
         // Unlike restore(), restoreOne does not create the target database itself.
@@ -417,12 +421,12 @@ describe("restoreOne()", () => {
     });
 
     it("works without onLog/onProgress callbacks", async () => {
-        await expect(restoreOne(buildConfig(), "/tmp/db.sql", "targetdb")).resolves.toBeUndefined();
+        await expect(restoreOne(buildConfig(), "/tmp/db.sql", "targetdb", fakeHost)).resolves.toBeUndefined();
     });
 
     it("passes the original database name through for USE/CREATE DATABASE rewriting", async () => {
         const logs: string[] = [];
-        await restoreOne(buildConfig(), "/tmp/db.sql", "renamed_db", (msg) => logs.push(msg), undefined, "original_db");
+        await restoreOne(buildConfig(), "/tmp/db.sql", "renamed_db", fakeHost, (msg) => logs.push(msg), undefined, "original_db");
 
         expect(logs.some((l) => l.includes("renamed_db"))).toBe(true);
     });
@@ -463,7 +467,7 @@ describe("restore() - Multi-DB TAR archive", () => {
             ],
         });
 
-        const result = await restore(buildConfig(), "/backups/multi.tar");
+        const result = await restore(buildConfig(), "/backups/multi.tar", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockEnsureDatabase).toHaveBeenCalledTimes(2);
@@ -485,7 +489,7 @@ describe("restore() - Multi-DB TAR archive", () => {
         });
         mockShouldRestoreDatabase.mockImplementation((name: string) => name === "shop");
 
-        const result = await restore(buildConfig(), "/backups/multi.tar");
+        const result = await restore(buildConfig(), "/backups/multi.tar", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockEnsureDatabase).toHaveBeenCalledTimes(1);
@@ -498,7 +502,7 @@ describe("restore() - Multi-DB TAR archive", () => {
         mockCreateTempDir.mockResolvedValue(tempDir);
         mockExtractSelectedDatabases.mockRejectedValue(new Error("extraction failed"));
 
-        const result = await restore(buildConfig(), "/backups/multi.tar");
+        const result = await restore(buildConfig(), "/backups/multi.tar", fakeHost);
 
         expect(result.success).toBe(false);
         expect(mockCleanupTempDir).toHaveBeenCalledWith(tempDir);
@@ -512,7 +516,7 @@ describe("restore() - Multi-DB TAR archive", () => {
             files: [], // no files extracted
         });
 
-        const result = await restore(buildConfig(), "/backups/multi.tar");
+        const result = await restore(buildConfig(), "/backups/multi.tar", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/not found in archive/i);
@@ -540,7 +544,7 @@ describe("restore() - Multi-DB TAR archive", () => {
             ],
         });
 
-        const result = await restore(config, "/backups/multi.tar");
+        const result = await restore(config, "/backups/multi.tar", fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.logs.some((l) => l.includes("Selectively extracted"))).toBe(true);
@@ -584,7 +588,7 @@ describe("restore() - progress tracking", () => {
 
         const result = await restore(
             buildConfig({ database: "testdb" }),
-            "/backups/dump.sql",
+            "/backups/dump.sql", fakeHost,
             undefined,
             (p) => progressValues.push(p)
         );
@@ -628,7 +632,7 @@ describe("createStderrHandler - edge cases", () => {
         });
 
         const logCalls: { msg: string; level?: string }[] = [];
-        await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", (msg, level) => {
+        await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost, (msg, level) => {
             logCalls.push({ msg, level });
         });
 
@@ -649,7 +653,7 @@ describe("createStderrHandler - edge cases", () => {
             return Promise.resolve();
         });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         const suppressEntry = result.logs.find((l) => l.includes("suppressed"));
         expect(suppressEntry).toBeDefined();
@@ -706,7 +710,7 @@ describe("restore() - SSH path", () => {
     it("restores a single database via SSH successfully", async () => {
         setupSuccessExec();
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSshUploadFile).toHaveBeenCalled();
@@ -720,7 +724,7 @@ describe("restore() - SSH path", () => {
 
         const result = await restore(
             buildConfig({ database: "testdb" }),
-            "/backups/dump.sql",
+            "/backups/dump.sql", fakeHost,
             undefined,
             (p) => progressValues.push(p)
         );
@@ -735,7 +739,7 @@ describe("restore() - SSH path", () => {
             .mockResolvedValueOnce({ code: 0, stdout: String(TOTAL_SIZE), stderr: "" })
             .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(true);
     });
@@ -743,7 +747,7 @@ describe("restore() - SSH path", () => {
     it("logs server settings when diagnostics succeed", async () => {
         setupSuccessExec();
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.logs.some((l) => l.includes("Server settings"))).toBe(true);
@@ -757,7 +761,7 @@ describe("restore() - SSH path", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" }) // OOM check (empty)
             .mockResolvedValue({ code: 0, stdout: "", stderr: "" }); // cleanup
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/mismatch/i);
@@ -774,7 +778,7 @@ describe("restore() - SSH path", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" }) // OOM check
             .mockResolvedValue({ code: 0, stdout: "", stderr: "" }); // cleanup
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(false);
     });
@@ -790,7 +794,7 @@ describe("restore() - SSH path", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "oom killed process mysqld", stderr: "" }) // dmesg with OOM
             .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.logs.some((l) => l.includes("still running"))).toBe(true);
@@ -807,7 +811,7 @@ describe("restore() - SSH path", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "no output here", stderr: "" }) // not "alive"
             .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.logs.some((l) => l.includes("NOT responding"))).toBe(true);
@@ -823,7 +827,7 @@ describe("restore() - SSH path", () => {
             .mockRejectedValueOnce(new Error("ssh timeout")) // alive check throws
             .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.logs.some((l) => l.includes("Could not reach MySQL server"))).toBe(true);
@@ -838,7 +842,7 @@ describe("restore() - SSH path", () => {
 
         await restore(
             buildConfig({ database: "testdb", password: "secret" }),
-            "/backups/dump.sql",
+            "/backups/dump.sql", fakeHost,
             (msg) => logs.push(msg)
         );
 
@@ -851,7 +855,7 @@ describe("restore() - SSH path", () => {
             .mockRejectedValueOnce(new Error("stat command not found")) // stat throws - non-critical
             .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(true);
     });
@@ -870,7 +874,7 @@ describe("restore() - SSH path", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" }) // alive check with fallback "mysql"
             .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(false);
     });

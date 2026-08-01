@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { registry } from "@/lib/core/registry";
+import { withHost } from "@/lib/transport";
+import type { DatabaseAdapter } from "@/lib/core/interfaces";
 import { registerAdapters } from "@/lib/adapters";
 import { overlayCredentialsOnConfig } from "@/lib/adapters/config-resolver";
 import { headers } from "next/headers";
@@ -30,13 +32,14 @@ export async function POST(req: NextRequest) {
         }
         checkPermissionWithContext(ctx, requiredPermission);
 
-        const adapter = registry.get(adapterId);
+        const adapter = registry.get(adapterId) as DatabaseAdapter | undefined;
 
         if (!adapter) {
             return NextResponse.json({ success: false, message: "Adapter not found" }, { status: 404 });
         }
 
-        if (!adapter.getDatabases) {
+        const listDatabases = adapter.getDatabases;
+        if (!listDatabases) {
             return NextResponse.json({ success: false, message: "This adapter does not support listing databases." });
         }
 
@@ -47,7 +50,7 @@ export async function POST(req: NextRequest) {
             sshCredentialId ?? null
         );
 
-        const databases = await adapter.getDatabases(mergedConfig);
+        const databases = await withHost(adapter, mergedConfig, (host) => listDatabases(mergedConfig, host));
 
         return NextResponse.json({ success: true, databases });
 

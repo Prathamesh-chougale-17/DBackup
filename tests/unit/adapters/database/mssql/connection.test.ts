@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MSSQLConfig } from "@/lib/adapters/definitions";
 
@@ -153,7 +157,7 @@ describe("test()", () => {
 
     it("returns success with version for a working connection", async () => {
         mockQuery.mockResolvedValue(makeVersionResult());
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.success).toBe(true);
         expect(result.message).toContain("successful");
         expect(result.version).toBe("16.0.1000");
@@ -161,13 +165,13 @@ describe("test()", () => {
 
     it("detects SQL Server 2022 from the version string", async () => {
         mockQuery.mockResolvedValue(makeVersionResult({ Version: "Microsoft SQL Server 2022 ..." }));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.message).toContain("2022");
     });
 
     it("detects SQL Server 2019 from the version string", async () => {
         mockQuery.mockResolvedValue(makeVersionResult({ Version: "Microsoft SQL Server 2019 ..." }));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.message).toContain("2019");
     });
 
@@ -176,37 +180,37 @@ describe("test()", () => {
             Version: "Microsoft SQL Server 2017 ...",
             ProductVersion: "14.0.3356.20",
         }));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.message).toContain("2017");
     });
 
     it("identifies Express edition", async () => {
         mockQuery.mockResolvedValue(makeVersionResult({ Edition: "Express Edition (64-bit)", EngineEdition: 1 }));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.edition).toBe("Express");
     });
 
     it("identifies Standard edition", async () => {
         mockQuery.mockResolvedValue(makeVersionResult({ Edition: "Standard Edition (64-bit)", EngineEdition: 2 }));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.edition).toBe("Standard");
     });
 
     it("identifies Enterprise edition", async () => {
         mockQuery.mockResolvedValue(makeVersionResult({ Edition: "Enterprise Edition (64-bit)", EngineEdition: 3 }));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.edition).toBe("Enterprise");
     });
 
     it("identifies Developer edition", async () => {
         mockQuery.mockResolvedValue(makeVersionResult({ Edition: "Developer Edition (64-bit)", EngineEdition: 3 }));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.edition).toBe("Developer");
     });
 
     it("identifies Web edition", async () => {
         mockQuery.mockResolvedValue(makeVersionResult({ Edition: "Web Edition", EngineEdition: 4 }));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.edition).toBe("Web");
     });
 
@@ -216,53 +220,53 @@ describe("test()", () => {
             EngineEdition: 9,
             Edition: "Azure SQL Edge",
         }));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.edition).toBe("Azure SQL Edge");
     });
 
     it("falls back to first word of edition string for unknown editions", async () => {
         mockQuery.mockResolvedValue(makeVersionResult({ Edition: "Unknown Special Edition", EngineEdition: 2 }));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.edition).toBe("Unknown");
     });
 
     it("handles missing version in ProductVersion gracefully", async () => {
         mockQuery.mockResolvedValue(makeVersionResult({ ProductVersion: "" }));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.success).toBe(true);
     });
 
     it("returns failure with ECONNREFUSED hint", async () => {
         mockConnect.mockRejectedValue(new Error("ECONNREFUSED 127.0.0.1:1433"));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.success).toBe(false);
         expect(result.message).toContain("Connection refused");
     });
 
     it("returns failure with Login failed hint", async () => {
         mockConnect.mockRejectedValue(new Error("Login failed for user 'sa'"));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.success).toBe(false);
         expect(result.message).toContain("Login failed");
     });
 
     it("returns failure with certificate hint", async () => {
         mockConnect.mockRejectedValue(new Error("SSL certificate error: self-signed certificate"));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.success).toBe(false);
         expect(result.message).toContain("Certificate error");
     });
 
     it("returns generic failure message for unknown errors", async () => {
         mockConnect.mockRejectedValue(new Error("Unexpected network error"));
-        const result = await test(buildConfig());
+        const result = await test(buildConfig(), fakeHost);
         expect(result.success).toBe(false);
         expect(result.message).toContain("Connection failed");
     });
 
     it("closes the pool even on error", async () => {
         mockConnect.mockRejectedValue(new Error("ECONNREFUSED"));
-        await test(buildConfig());
+        await test(buildConfig(), fakeHost);
         expect(mockClose).toHaveBeenCalled();
     });
 });
@@ -280,26 +284,26 @@ describe("getDatabases()", () => {
 
     it("returns user database names from the recordset", async () => {
         mockQuery.mockResolvedValue({ recordset: [{ name: "SalesDB" }, { name: "HRdb" }] });
-        const result = await getDatabases(buildConfig());
+        const result = await getDatabases(buildConfig(), fakeHost);
         expect(result).toEqual(["SalesDB", "HRdb"]);
     });
 
     it("returns empty array when no user databases exist", async () => {
         mockQuery.mockResolvedValue({ recordset: [] });
-        const result = await getDatabases(buildConfig());
+        const result = await getDatabases(buildConfig(), fakeHost);
         expect(result).toEqual([]);
     });
 
     it("returns empty array when query throws", async () => {
         mockConnect.mockRejectedValue(new Error("Connection refused"));
-        const result = await getDatabases(buildConfig());
+        const result = await getDatabases(buildConfig(), fakeHost);
         expect(result).toEqual([]);
     });
 
     it("closes the pool even on error", async () => {
         mockConnect.mockResolvedValue(undefined);
         mockQuery.mockRejectedValue(new Error("Query failed"));
-        await getDatabases(buildConfig());
+        await getDatabases(buildConfig(), fakeHost);
         expect(mockClose).toHaveBeenCalled();
     });
 });
@@ -322,7 +326,7 @@ describe("getDatabasesWithStats()", () => {
             })
             .mockResolvedValueOnce({ recordset: [{ cnt: 12 }] });
 
-        const result = await getDatabasesWithStats(buildConfig());
+        const result = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(result).toHaveLength(1);
         expect(result[0].name).toBe("SalesDB");
@@ -337,7 +341,7 @@ describe("getDatabasesWithStats()", () => {
             })
             .mockRejectedValueOnce(new Error("Database is inaccessible"));
 
-        const result = await getDatabasesWithStats(buildConfig());
+        const result = await getDatabasesWithStats(buildConfig(), fakeHost);
 
         expect(result[0].name).toBe("LockedDB");
         expect(result[0].tableCount).toBe(0);
@@ -350,13 +354,13 @@ describe("getDatabasesWithStats()", () => {
             })
             .mockResolvedValueOnce({ recordset: [{ cnt: 0 }] });
 
-        const result = await getDatabasesWithStats(buildConfig());
+        const result = await getDatabasesWithStats(buildConfig(), fakeHost);
         expect(result[0].sizeInBytes).toBe(0);
     });
 
     it("throws when connection fails", async () => {
         mockConnect.mockRejectedValue(new Error("Connection refused"));
-        await expect(getDatabasesWithStats(buildConfig())).rejects.toThrow("Connection refused");
+        await expect(getDatabasesWithStats(buildConfig(), fakeHost)).rejects.toThrow("Connection refused");
     });
 });
 

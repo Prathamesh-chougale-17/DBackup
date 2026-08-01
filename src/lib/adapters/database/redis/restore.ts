@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { buildConnectionArgs } from "./connection";
@@ -31,7 +32,7 @@ type RedisRestoreConfig = RedisConfig & {
  * - RDB files must be placed in the Redis data directory
  * - Server restart is required to load the new RDB
  */
-export async function prepareRestore(config: RedisRestoreConfig, _databases: string[]): Promise<void> {
+export async function prepareRestore(config: RedisRestoreConfig, _databases: string[], _host: ExecutionHost): Promise<void> {
     const args = buildConnectionArgs(config);
 
     // Test basic connectivity
@@ -81,6 +82,7 @@ export async function prepareRestore(config: RedisRestoreConfig, _databases: str
 export async function restore(
     config: RedisRestoreConfig,
     sourcePath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     _onProgress?: (percentage: number) => void
 ): Promise<BackupResult> {

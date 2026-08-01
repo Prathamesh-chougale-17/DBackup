@@ -13,6 +13,8 @@ All notable changes to DBackup are documented here.
 
 - **paths**: Slash trimming moved into one shared helper that cannot backtrack, replacing the three hand-rolled copies that had drifted apart.
 - **ssh**: Added a transport layer that models direct and SSH connections as interchangeable implementations of one interface. Commands are now described as argument lists rather than assembled shell strings, so remote quoting lives in a single tested place instead of being repeated at every call site.
+- **ssh**: A backup or restore now opens one SSH connection for the whole run instead of one per adapter call. A combined backup of ten databases previously performed twelve separate handshakes against the same server.
+- **health check**: The per-adapter timeout now runs inside the connection scope. Previously a check that timed out while still connecting left its socket open, once a minute for every unreachable source.
 
 ### 🧪 Tests
 

@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mock child_process execFile before importing the module under test.
@@ -47,7 +51,7 @@ describe("MySQL browser - getTables", () => {
             stderr: "",
         } as any);
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result).toHaveLength(1);
         expect(result[0]).toMatchObject({
@@ -64,7 +68,7 @@ describe("MySQL browser - getTables", () => {
             stderr: "",
         } as any);
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result[0].type).toBe("view");
     });
@@ -75,7 +79,7 @@ describe("MySQL browser - getTables", () => {
             stderr: "",
         } as any);
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result).toHaveLength(1);
         expect(result[0].name).toBe("orders");
@@ -84,7 +88,7 @@ describe("MySQL browser - getTables", () => {
     it("returns empty array when output is blank", async () => {
         vi.mocked(execFileAsync).mockResolvedValue({ stdout: "", stderr: "" } as any);
 
-        const result = await getTables(baseConfig as any, "testdb");
+        const result = await getTables(baseConfig as any, "testdb", fakeHost);
 
         expect(result).toEqual([]);
     });
@@ -113,7 +117,7 @@ describe("MySQL browser - getTableData", () => {
             .mockResolvedValueOnce({ stdout: countStdout, stderr: "" } as any)
             .mockResolvedValueOnce({ stdout: dataStdout, stderr: "" } as any);
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(result.totalCount).toBe(3);
         expect(result.columns).toHaveLength(2);
@@ -133,7 +137,7 @@ describe("MySQL browser - getTableData", () => {
             .mockResolvedValueOnce({ stdout: countStdout, stderr: "" } as any)
             .mockResolvedValueOnce({ stdout: dataStdout, stderr: "" } as any);
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(result.rows[0].name).toBeNull();
     });
@@ -145,7 +149,7 @@ describe("MySQL browser - getTableData", () => {
             ...options,
             sortBy: "name",
             sortDir: "desc",
-        } as any);
+        } as any, fakeHost);
 
         // Verify that execFileAsync was called (queries were built with sort clause).
         expect(execFileAsync).toHaveBeenCalled();
@@ -173,7 +177,7 @@ describe("MySQL browser - SQL escaping", () => {
     it("doubles backslashes in database name (tablesQuery)", async () => {
         vi.mocked(execFileAsync).mockResolvedValue({ stdout: "", stderr: "" } as any);
 
-        await getTables(baseConfig as any, "back\\slash");
+        await getTables(baseConfig as any, "back\\slash", fakeHost);
 
         expect(getTablesQueryArg()).toContain("'back\\\\slash'");
     });
@@ -181,7 +185,7 @@ describe("MySQL browser - SQL escaping", () => {
     it("escapes single quotes in database name (tablesQuery)", async () => {
         vi.mocked(execFileAsync).mockResolvedValue({ stdout: "", stderr: "" } as any);
 
-        await getTables(baseConfig as any, "it's");
+        await getTables(baseConfig as any, "it's", fakeHost);
 
         expect(getTablesQueryArg()).toContain("'it\\'s'");
     });
@@ -189,7 +193,7 @@ describe("MySQL browser - SQL escaping", () => {
     it("removes null bytes from database name (tablesQuery)", async () => {
         vi.mocked(execFileAsync).mockResolvedValue({ stdout: "", stderr: "" } as any);
 
-        await getTables(baseConfig as any, "db\0name");
+        await getTables(baseConfig as any, "db\0name", fakeHost);
 
         const query = getTablesQueryArg();
         expect(query).toContain("'dbname'");
@@ -204,7 +208,7 @@ describe("MySQL browser - SQL escaping", () => {
             table: "users",
             page: 1,
             pageSize: 10,
-        } as any);
+        } as any, fakeHost);
 
         expect(getColumnsQueryArg()).toContain("'back\\\\slash'");
     });
@@ -217,7 +221,7 @@ describe("MySQL browser - SQL escaping", () => {
             table: "o'reilly",
             page: 1,
             pageSize: 10,
-        } as any);
+        } as any, fakeHost);
 
         expect(getColumnsQueryArg()).toContain("'o\\'reilly'");
     });

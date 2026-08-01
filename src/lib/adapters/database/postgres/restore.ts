@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { BackupResult } from "@/lib/core/interfaces";
 import { execFileAsync } from "./connection";
@@ -41,7 +42,7 @@ type PostgresRestoreConfig = PostgresConfig & {
     }>;
 };
 
-export async function prepareRestore(config: PostgresRestoreConfig, databases: string[]): Promise<void> {
+export async function prepareRestore(config: PostgresRestoreConfig, databases: string[], _host: ExecutionHost): Promise<void> {
     if (isSSHMode(config)) {
         return prepareRestoreSSH(config, databases);
     }
@@ -313,6 +314,7 @@ export async function restoreOne(
     config: PostgresRestoreConfig,
     filePath: string,
     targetDbName: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<void> {
     const env = { ...process.env };
@@ -327,6 +329,7 @@ export async function restoreOne(
 export async function restore(
     config: PostgresRestoreConfig,
     sourcePath: string,
+    _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     onProgress?: (percentage: number) => void
 ): Promise<BackupResult> {
@@ -393,7 +396,7 @@ export async function restore(
 
                 log(`Restoring database: ${dbEntry.name} -> ${targetDb}`, 'info');
 
-                await prepareRestore(usageConfig, [targetDb]);
+                await prepareRestore(usageConfig, [targetDb], _host);
                 await restoreSingleDatabase(dumpPath, targetDb, usageConfig, env, log);
                 log(`Database ${targetDb} restored successfully`, 'success');
 
@@ -431,7 +434,7 @@ export async function restore(
 
             log(`Restoring single database to: ${targetDb}`, 'info');
 
-            await prepareRestore(usageConfig, [targetDb]);
+            await prepareRestore(usageConfig, [targetDb], _host);
             await restoreSingleDatabase(sourcePath, targetDb, usageConfig, env, log);
         }
 

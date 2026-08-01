@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ---------------------------------------------------------------------------
@@ -59,7 +63,7 @@ describe("Redis browser - getTables", () => {
     it("returns a single 'Keys' table with DBSIZE as rowCount", async () => {
         queueExecResponses({ stdout: "42\n" });
 
-        const result = await getTables(baseConfig as any, "0");
+        const result = await getTables(baseConfig as any, "0", fakeHost);
 
         expect(result).toHaveLength(1);
         expect(result[0]).toMatchObject({ name: "Keys", type: "table", rowCount: 42 });
@@ -68,7 +72,7 @@ describe("Redis browser - getTables", () => {
     it("returns rowCount 0 when DBSIZE output is not a number", async () => {
         queueExecResponses({ stdout: "ERR\n" });
 
-        const result = await getTables(baseConfig as any, "0");
+        const result = await getTables(baseConfig as any, "0", fakeHost);
 
         expect(result[0].rowCount).toBe(0);
     });
@@ -94,7 +98,7 @@ describe("Redis browser - getTableData", () => {
             { stdout: '1) "string\t30"\n2) "hash\t-1"\n' } // EVAL
         );
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(result.totalCount).toBe(2);
         expect(result.columns.map(c => c.name)).toEqual(["key", "type", "ttl"]);
@@ -108,7 +112,7 @@ describe("Redis browser - getTableData", () => {
             { stdout: '1) "string\t-1"\n' }
         );
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(result.rows[0].ttl).toBe("no expiry");
     });
@@ -120,7 +124,7 @@ describe("Redis browser - getTableData", () => {
             { stdout: '1) "string\t-2"\n' }
         );
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(result.rows[0].ttl).toBe("expired");
     });
@@ -132,7 +136,7 @@ describe("Redis browser - getTableData", () => {
             { stdout: '1) "string\t120"\n' }
         );
 
-        const result = await getTableData(baseConfig as any, options as any);
+        const result = await getTableData(baseConfig as any, options as any, fakeHost);
 
         expect(result.rows[0].ttl).toBe("120s");
     });

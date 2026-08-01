@@ -1,3 +1,4 @@
+import { withHost } from "@/lib/transport";
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { registry } from '@/lib/core/registry';
 import { registerAdapters } from '@/lib/adapters';
@@ -37,22 +38,24 @@ describe('Integration Tests: Multi-Database Restore', () => {
                 if (fs.existsSync(dumpFile)) fs.unlinkSync(dumpFile);
 
                 // Step 1: Create backup
-                const dumpResult = await adapter.dump(
+                const dumpResult = await withHost(adapter, config, (host) => adapter.dump(
                     config as any,
                     dumpFile,
+                    host,
                     () => {}
-                );
+                ));
                 expect(dumpResult.success).toBe(true);
                 expect(fs.existsSync(dumpFile)).toBe(true);
 
                 // Step 2: Restore the backup
                 // For multi-DB restore, we need to specify target databases
                 // We'll restore to the same databases (typical scenario)
-                const restoreResult = await adapter.restore(
+                const restoreResult = await withHost(adapter, config, (host) => adapter.restore(
                     config as any,
                     dumpFile,
+                    host,
                     () => {}
-                );
+                ));
 
                 expect(restoreResult.success).toBe(true);
             }, 120000); // 2 minutes timeout for backup + restore
@@ -73,11 +76,12 @@ describe('Integration Tests: Multi-Database Restore', () => {
                 if (fs.existsSync(dumpFile)) fs.unlinkSync(dumpFile);
 
                 // Step 1: Create backup of single DB
-                const dumpResult = await adapter.dump(
+                const dumpResult = await withHost(adapter, singleDbConfig, (host) => adapter.dump(
                     singleDbConfig as any,
                     dumpFile,
+                    host,
                     () => {}
-                );
+                ));
                 expect(dumpResult.success).toBe(true);
 
                 // Step 2: Restore with rename (testdb -> testdb)
@@ -88,11 +92,12 @@ describe('Integration Tests: Multi-Database Restore', () => {
                     targetDatabaseName: 'testdb' // Same name (safe for tests)
                 };
 
-                const restoreResult = await adapter.restore(
+                const restoreResult = await withHost(adapter, restoreConfig, (host) => adapter.restore(
                     restoreConfig as any,
                     dumpFile,
+                    host,
                     () => {}
-                );
+                ));
 
                 expect(restoreResult.success).toBe(true);
             }, 60000);

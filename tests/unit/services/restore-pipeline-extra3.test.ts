@@ -280,7 +280,7 @@ describe('runRestorePipeline (extra coverage 3)', () => {
             const capturedOnLog: Array<(msg: string, level?: string) => void> = [];
 
             const restoreMock = vi.fn().mockImplementation(
-                async (_conf: any, _file: string, onLog: (msg: string, level?: string) => void) => {
+                async (_conf: any, _file: string, _host: any, onLog: (msg: string, level?: string) => void) => {
                     capturedOnLog.push(onLog);
                     onLog('Restore in progress...', 'info');
                     return { success: true };
@@ -336,7 +336,7 @@ describe('runRestorePipeline (extra coverage 3)', () => {
             vi.mocked(decomp.getDecompressionStream).mockReturnValue(null);
 
             const restoreMock = vi.fn().mockImplementation(
-                async (_conf: any, _file: string, onLog: (msg: string, level?: string) => void) => {
+                async (_conf: any, _file: string, _host: any, onLog: (msg: string, level?: string) => void) => {
                     // Level is explicitly 'info' - should not throw or cause a failure mark.
                     onLog('0 errors found in restore', 'info');
                     return { success: true };
@@ -367,7 +367,7 @@ describe('runRestorePipeline (extra coverage 3)', () => {
 
             let callCount = 0;
             const restoreMock = vi.fn().mockImplementation(
-                async (_conf: any, _file: string, onLog: (msg: string, level?: string) => void) => {
+                async (_conf: any, _file: string, _host: any, onLog: (msg: string, level?: string) => void) => {
                     onLog('Step 1 complete', 'info');
                     onLog('Step 2 complete', 'info');
                     onLog('Step 3 complete', 'info');

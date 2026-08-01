@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { MongoClient } from "mongodb";
 import { MongoDBConfig } from "@/lib/adapters/definitions";
 import {
@@ -31,7 +32,7 @@ function buildConnectionUri(config: MongoDBConfig): string {
     return `mongodb://${auth}${config.host}:${config.port}/${authParam}`;
 }
 
-export async function test(config: MongoDBConfig): Promise<{ success: boolean; message: string; version?: string }> {
+export async function test(config: MongoDBConfig, _host?: ExecutionHost): Promise<{ success: boolean; message: string; version?: string }> {
     if (isSSHMode(config)) {
         const sshConfig = extractSshConfig(config)!;
         const ssh = new SshClient();
@@ -86,7 +87,7 @@ export async function test(config: MongoDBConfig): Promise<{ success: boolean; m
     }
 }
 
-export async function getDatabases(config: MongoDBConfig): Promise<string[]> {
+export async function getDatabases(config: MongoDBConfig, _host: ExecutionHost): Promise<string[]> {
     const sysDbs = ["admin", "config", "local"];
 
     if (isSSHMode(config)) {
@@ -157,7 +158,7 @@ export async function getDatabases(config: MongoDBConfig): Promise<string[]> {
 
 import { DatabaseInfo } from "@/lib/core/interfaces";
 
-export async function getDatabasesWithStats(config: MongoDBConfig): Promise<DatabaseInfo[]> {
+export async function getDatabasesWithStats(config: MongoDBConfig, _host: ExecutionHost): Promise<DatabaseInfo[]> {
     const sysDbs = ["admin", "config", "local"];
 
     if (isSSHMode(config)) {

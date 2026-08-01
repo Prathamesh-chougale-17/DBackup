@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import sql from "mssql";
 import { MSSQLConfig } from "@/lib/adapters/definitions";
 import { TableInfo, ColumnInfo, TableDataOptions, TableDataResult } from "@/lib/core/interfaces";
@@ -13,7 +14,7 @@ function escapeMssqlStringLiteral(name: string): string {
     return name.replace(/'/g, "''").replace(/\0/g, "");
 }
 
-export async function getTables(config: MSSQLConfig, database: string): Promise<TableInfo[]> {
+export async function getTables(config: MSSQLConfig, database: string, _host: ExecutionHost): Promise<TableInfo[]> {
     const dbId = escapeMssqlIdentifier(database);
     let pool: sql.ConnectionPool | null = null;
 
@@ -52,7 +53,8 @@ export async function getTables(config: MSSQLConfig, database: string): Promise<
 export async function getTableData(
     config: MSSQLConfig,
     options: TableDataOptions
-): Promise<TableDataResult> {
+,
+    _host: ExecutionHost): Promise<TableDataResult> {
     const { database, table, page, pageSize, sortBy, sortDir, search, searchColumn, matchMode } = options;
     const offset = (page - 1) * pageSize;
     const dbId = escapeMssqlIdentifier(database);

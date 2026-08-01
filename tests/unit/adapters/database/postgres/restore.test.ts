@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PostgresConfig } from "@/lib/adapters/definitions";
 
@@ -156,7 +160,7 @@ describe("prepareRestore()", () => {
         // First call: SELECT check returns "1" (DB exists)
         mockExecFileAsync.mockResolvedValue({ stdout: "1\n", stderr: "" });
 
-        await prepareRestore(buildConfig(), ["mydb"]);
+        await prepareRestore(buildConfig(), ["mydb"], fakeHost);
 
         // Only the SELECT check should be called, not CREATE DATABASE
         expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
@@ -172,7 +176,7 @@ describe("prepareRestore()", () => {
             .mockResolvedValueOnce({ stdout: "", stderr: "" }) // SELECT -> not found
             .mockResolvedValueOnce({ stdout: "", stderr: "" }); // CREATE DATABASE
 
-        await prepareRestore(buildConfig(), ["newdb"]);
+        await prepareRestore(buildConfig(), ["newdb"], fakeHost);
 
         expect(mockExecFileAsync).toHaveBeenCalledTimes(2);
         expect(mockExecFileAsync).toHaveBeenNthCalledWith(
@@ -190,7 +194,7 @@ describe("prepareRestore()", () => {
             .mockResolvedValueOnce({ stdout: "", stderr: "" })    // db2 check -> not found
             .mockResolvedValueOnce({ stdout: "", stderr: "" });   // db2 CREATE
 
-        await prepareRestore(buildConfig(), ["db1", "db2"]);
+        await prepareRestore(buildConfig(), ["db1", "db2"], fakeHost);
 
         expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
     });
@@ -201,7 +205,7 @@ describe("prepareRestore()", () => {
         await prepareRestore(
             buildConfig({ privilegedAuth: { user: "superuser", password: "adminpw" } }),
             ["mydb"]
-        );
+        , fakeHost);
 
         expect(mockExecFileAsync).toHaveBeenCalledWith(
             "psql",
@@ -215,7 +219,7 @@ describe("prepareRestore()", () => {
             .mockResolvedValueOnce({ stdout: "", stderr: "" }) // SELECT -> not found
             .mockRejectedValueOnce({ stderr: "ERROR: permission denied to create database" });
 
-        await expect(prepareRestore(buildConfig(), ["restricted"])).rejects.toThrow(
+        await expect(prepareRestore(buildConfig(), ["restricted"], fakeHost)).rejects.toThrow(
             /Access denied/i
         );
     });
@@ -225,13 +229,13 @@ describe("prepareRestore()", () => {
             .mockResolvedValueOnce({ stdout: "", stderr: "" }) // SELECT -> not found
             .mockRejectedValueOnce({ stderr: "ERROR: database 'mydb' already exists" });
 
-        await expect(prepareRestore(buildConfig(), ["mydb"])).resolves.toBeUndefined();
+        await expect(prepareRestore(buildConfig(), ["mydb"], fakeHost)).resolves.toBeUndefined();
     });
 
     it("re-throws unknown errors from psql", async () => {
         mockExecFileAsync.mockRejectedValue({ stderr: "FATAL: out of memory", message: "crash" });
 
-        await expect(prepareRestore(buildConfig(), ["mydb"])).rejects.toBeDefined();
+        await expect(prepareRestore(buildConfig(), ["mydb"], fakeHost)).rejects.toBeDefined();
     });
 
     // SSH path
@@ -239,7 +243,7 @@ describe("prepareRestore()", () => {
         mockIsSSHMode.mockReturnValue(true);
         // SSH exec: DB exists check returns "1"
         mockSshExec.mockResolvedValue({ code: 0, stdout: "1", stderr: "" });
-        await expect(prepareRestore(buildConfig(), ["mydb"])).resolves.toBeUndefined();
+        await expect(prepareRestore(buildConfig(), ["mydb"], fakeHost)).resolves.toBeUndefined();
     });
 
     it("creates database via SSH when it does not exist on remote", async () => {
@@ -248,7 +252,7 @@ describe("prepareRestore()", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" }) // check -> not found
             .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" }); // CREATE
 
-        await prepareRestore(buildConfig(), ["newdb"]);
+        await prepareRestore(buildConfig(), ["newdb"], fakeHost);
 
         expect(mockSshExec).toHaveBeenCalledTimes(2);
     });
@@ -259,7 +263,7 @@ describe("prepareRestore()", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" }) // check -> not found
             .mockResolvedValueOnce({ code: 1, stdout: "", stderr: "permission denied to create database" });
 
-        await expect(prepareRestore(buildConfig(), ["restricted"])).rejects.toThrow(/Access denied/i);
+        await expect(prepareRestore(buildConfig(), ["restricted"], fakeHost)).rejects.toThrow(/Access denied/i);
     });
 
     it("silently continues via SSH when database already exists on CREATE", async () => {
@@ -268,7 +272,7 @@ describe("prepareRestore()", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" }) // check -> not found
             .mockResolvedValueOnce({ code: 1, stdout: "", stderr: "database already exists" });
 
-        await expect(prepareRestore(buildConfig(), ["mydb"])).resolves.toBeUndefined();
+        await expect(prepareRestore(buildConfig(), ["mydb"], fakeHost)).resolves.toBeUndefined();
     });
 
     it("throws a generic error via SSH when CREATE DATABASE fails with unexpected reason", async () => {
@@ -277,7 +281,7 @@ describe("prepareRestore()", () => {
             .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" }) // check -> not found
             .mockResolvedValueOnce({ code: 1, stdout: "", stderr: "disk full, cannot create database" });
 
-        await expect(prepareRestore(buildConfig(), ["mydb"])).rejects.toThrow("Failed to create database");
+        await expect(prepareRestore(buildConfig(), ["mydb"], fakeHost)).rejects.toThrow("Failed to create database");
     });
 });
 
@@ -297,7 +301,7 @@ describe("restoreOne()", () => {
     });
 
     it("restores the given file into the given target database directly", async () => {
-        await expect(restoreOne(buildConfig(), "/tmp/db.dump", "targetdb")).resolves.toBeUndefined();
+        await expect(restoreOne(buildConfig(), "/tmp/db.dump", "targetdb", fakeHost)).resolves.toBeUndefined();
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_restore",
@@ -309,7 +313,7 @@ describe("restoreOne()", () => {
     });
 
     it("works without an onLog callback", async () => {
-        await expect(restoreOne(buildConfig(), "/tmp/db.dump", "targetdb")).resolves.toBeUndefined();
+        await expect(restoreOne(buildConfig(), "/tmp/db.dump", "targetdb", fakeHost)).resolves.toBeUndefined();
     });
 
     it("uses privilegedAuth credentials when provided", async () => {
@@ -317,7 +321,7 @@ describe("restoreOne()", () => {
             buildConfig({ privilegedAuth: { user: "admin", password: "adminpw" } }),
             "/tmp/db.dump",
             "targetdb"
-        );
+        , fakeHost);
 
         const [, , spawnOptions] = mockSpawnProcess.mock.calls[0] as any[];
         expect(spawnOptions.env.PGPASSWORD).toBe("adminpw");
@@ -337,7 +341,7 @@ describe("restore() - single custom format", () => {
     });
 
     it("restores a single custom-format backup successfully", async () => {
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledWith(
@@ -348,7 +352,7 @@ describe("restore() - single custom format", () => {
     });
 
     it("includes --clean and --if-exists in pg_restore args", async () => {
-        await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp");
+        await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_restore",
@@ -360,7 +364,7 @@ describe("restore() - single custom format", () => {
     it("returns failure for plain SQL format (not PGDMP)", async () => {
         mockFsOpen.mockResolvedValue(makeFsHandle("--SQL"));
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/Plain SQL format is no longer supported/i);
@@ -369,7 +373,7 @@ describe("restore() - single custom format", () => {
     it("returns success on pg_restore exit code 0", async () => {
         mockSpawnProcess.mockImplementation(() => makeRestoreProcess(0));
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", fakeHost);
 
         expect(result.success).toBe(true);
     });
@@ -379,7 +383,7 @@ describe("restore() - single custom format", () => {
             makeRestoreProcess(1, "pg_restore: warning: errors ignored on restore: 1")
         );
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", fakeHost);
 
         expect(result.success).toBe(true);
     });
@@ -395,7 +399,7 @@ describe("restore() - single custom format", () => {
 
         const result = await restore(
             buildConfig({ database: "testdb" }),
-            "/backups/dump.pgdmp",
+            "/backups/dump.pgdmp", fakeHost,
             (msg) => logs.push(msg)
         );
 
@@ -406,7 +410,7 @@ describe("restore() - single custom format", () => {
     it("returns failure for pg_restore exit code 2", async () => {
         mockSpawnProcess.mockImplementation(() => makeRestoreProcess(2));
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/pg_restore exited with code 2/i);
@@ -417,7 +421,7 @@ describe("restore() - single custom format", () => {
             makeRestoreProcess(2, "FATAL: database 'testdb' does not exist")
         );
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("pg_restore exited with code 2");
@@ -434,7 +438,7 @@ describe("restore() - single custom format", () => {
         });
         mockSpawnProcess.mockImplementation(() => proc);
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toContain("ENOENT");
@@ -452,7 +456,7 @@ describe("restore() - single custom format", () => {
         mockSpawnProcess.mockImplementation(() => proc);
 
         const logs: string[] = [];
-        await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", (msg) =>
+        await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", fakeHost, (msg) =>
             logs.push(msg)
         );
 
@@ -465,7 +469,7 @@ describe("restore() - single custom format", () => {
         );
         const logs: string[] = [];
 
-        await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", (msg) =>
+        await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", fakeHost, (msg) =>
             logs.push(msg)
         );
 
@@ -477,7 +481,7 @@ describe("restore() - single custom format", () => {
 
         await restore(
             buildConfig({ database: "testdb", password: undefined }),
-            "/backups/dump.pgdmp",
+            "/backups/dump.pgdmp", fakeHost,
             (msg) => logs.push(msg)
         );
 
@@ -496,7 +500,7 @@ describe("restore() - single custom format", () => {
             ],
         });
 
-        await restore(config, "/backups/dump.pgdmp");
+        await restore(config, "/backups/dump.pgdmp", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_restore",
@@ -513,7 +517,7 @@ describe("restore() - single custom format", () => {
             ],
         });
 
-        await restore(config, "/backups/dump.pgdmp");
+        await restore(config, "/backups/dump.pgdmp", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_restore",
@@ -530,7 +534,7 @@ describe("restore() - single custom format", () => {
             ],
         });
 
-        const result = await restore(config, "/backups/dump.pgdmp");
+        const result = await restore(config, "/backups/dump.pgdmp", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/No databases selected/i);
@@ -545,7 +549,7 @@ describe("restore() - single custom format", () => {
             ],
         });
 
-        const result = await restore(config, "/backups/dump.pgdmp");
+        const result = await restore(config, "/backups/dump.pgdmp", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/cannot be restored to multiple databases/i);
@@ -554,7 +558,7 @@ describe("restore() - single custom format", () => {
     it("falls back to 'postgres' database when no config.database and no mapping", async () => {
         const config = buildConfig({ database: undefined });
 
-        await restore(config, "/backups/dump.pgdmp");
+        await restore(config, "/backups/dump.pgdmp", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_restore",
@@ -569,7 +573,7 @@ describe("restore() - single custom format", () => {
             privilegedAuth: { user: "superuser", password: "adminpw" },
         });
 
-        await restore(config, "/backups/dump.pgdmp");
+        await restore(config, "/backups/dump.pgdmp", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith(
             "pg_restore",
@@ -609,7 +613,7 @@ describe("restore() - TAR archive", () => {
     });
 
     it("restores all databases from a TAR archive", async () => {
-        const result = await restore(buildConfig(), "/backups/multi.tar");
+        const result = await restore(buildConfig(), "/backups/multi.tar", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledTimes(2);
@@ -620,7 +624,7 @@ describe("restore() - TAR archive", () => {
             .mockReturnValueOnce(true)  // shop: include
             .mockReturnValueOnce(false); // analytics: skip
 
-        const result = await restore(buildConfig(), "/backups/multi.tar");
+        const result = await restore(buildConfig(), "/backups/multi.tar", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledTimes(1);
@@ -631,7 +635,7 @@ describe("restore() - TAR archive", () => {
 
         await restore(
             buildConfig(),
-            "/backups/multi.tar",
+            "/backups/multi.tar", fakeHost,
             undefined,
             (pct) => progressValues.push(pct)
         );
@@ -649,7 +653,7 @@ describe("restore() - TAR archive", () => {
             ],
         });
 
-        await restore(config, "/backups/multi.tar");
+        await restore(config, "/backups/multi.tar", fakeHost);
 
         const [, , selectedNames] = mockExtractSelectedDatabases.mock.calls[0] as any[];
         expect(selectedNames).toContain("shop");
@@ -657,7 +661,7 @@ describe("restore() - TAR archive", () => {
     });
 
     it("cleans up temp directory after successful TAR restore", async () => {
-        await restore(buildConfig(), "/backups/multi.tar");
+        await restore(buildConfig(), "/backups/multi.tar", fakeHost);
 
         expect(mockCleanupTempDir).toHaveBeenCalledWith("/tmp/pg-restore-abc");
     });
@@ -667,7 +671,7 @@ describe("restore() - TAR archive", () => {
             .mockImplementationOnce(() => makeRestoreProcess(0))
             .mockImplementationOnce(() => makeRestoreProcess(2));
 
-        await restore(buildConfig(), "/backups/multi.tar");
+        await restore(buildConfig(), "/backups/multi.tar", fakeHost);
 
         expect(mockCleanupTempDir).toHaveBeenCalledWith("/tmp/pg-restore-abc");
     });
@@ -690,7 +694,7 @@ describe("restore() - format detection", () => {
     it("detects custom format when file starts with PGDMP magic bytes", async () => {
         mockFsOpen.mockResolvedValue(makeFsHandle("PGDMP"));
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockSpawnProcess).toHaveBeenCalledWith("pg_restore", expect.any(Array), expect.any(Object));
@@ -699,7 +703,7 @@ describe("restore() - format detection", () => {
     it("treats file as plain SQL when magic bytes do not match PGDMP", async () => {
         mockFsOpen.mockResolvedValue(makeFsHandle("-- PO"));
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/Plain SQL/i);
@@ -708,7 +712,7 @@ describe("restore() - format detection", () => {
     it("treats file as plain SQL when fs.open throws", async () => {
         mockFsOpen.mockRejectedValue(new Error("ENOENT: no such file"));
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/missing.dump");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/missing.dump", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/Plain SQL/i);
@@ -731,7 +735,7 @@ describe("restore() - SSH path", () => {
     });
 
     it("restores a single database via SSH successfully", async () => {
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", fakeHost);
 
         expect(result.success).toBe(true);
         // uploadFile should be called to transfer the dump to remote
@@ -744,7 +748,7 @@ describe("restore() - SSH path", () => {
             .mockResolvedValueOnce({ code: 2, stdout: "", stderr: "fatal error" }) // pg_restore fails
             .mockResolvedValue({ code: 0, stdout: "", stderr: "" }); // cleanup
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/exited with code 2/i);
@@ -760,7 +764,7 @@ describe("restore() - SSH path", () => {
             }) // pg_restore with warnings
             .mockResolvedValue({ code: 0, stdout: "", stderr: "" }); // cleanup
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp");
+        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.pgdmp", fakeHost);
 
         expect(result.success).toBe(true);
     });
@@ -778,7 +782,7 @@ describe("restore() - SSH path", () => {
         const logs: string[] = [];
         const result = await restore(
             buildConfig({ database: "testdb" }),
-            "/backups/dump.pgdmp",
+            "/backups/dump.pgdmp", fakeHost,
             (msg) => logs.push(msg)
         );
 
@@ -795,7 +799,7 @@ describe("restore() - SSH path", () => {
         const logs: string[] = [];
         await restore(
             buildConfig({ database: "testdb" }),
-            "/backups/dump.pgdmp",
+            "/backups/dump.pgdmp", fakeHost,
             (msg) => logs.push(msg)
         );
 
@@ -812,7 +816,7 @@ describe("restore() - SSH path", () => {
             privilegedAuth: { user: "superuser", password: "adminpw" },
         });
 
-        const result = await restore(config, "/backups/dump.pgdmp");
+        const result = await restore(config, "/backups/dump.pgdmp", fakeHost);
 
         expect(result.success).toBe(true);
     });

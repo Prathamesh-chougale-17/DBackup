@@ -1,3 +1,4 @@
+import type { ExecutionHost } from "@/lib/transport";
 import { execFile } from "child_process";
 import util from "util";
 import { RedisConfig } from "@/lib/adapters/definitions";
@@ -77,7 +78,7 @@ async function getKeyInfoSsh(
     });
 }
 
-export async function getTables(config: RedisConfig, database: string): Promise<TableInfo[]> {
+export async function getTables(config: RedisConfig, database: string, _host: ExecutionHost): Promise<TableInfo[]> {
     const dbIndex = parseInt(database, 10);
     const cliArgs = buildArgs(config, dbIndex);
 
@@ -105,7 +106,8 @@ export async function getTables(config: RedisConfig, database: string): Promise<
 export async function getTableData(
     config: RedisConfig,
     options: TableDataOptions
-): Promise<TableDataResult> {
+,
+    _host: ExecutionHost): Promise<TableDataResult> {
     const dbIndex = parseInt(options.database, 10);
     const cliArgs = buildArgs(config, dbIndex);
 

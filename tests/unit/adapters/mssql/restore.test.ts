@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { MSSQLConfig } from "@/lib/adapters/definitions";
 
@@ -202,7 +206,7 @@ describe("MSSQL Restore", () => {
             });
 
             const config = buildConfig();
-            await expect(prepareRestore(config, ["testdb"])).resolves.toBeUndefined();
+            await expect(prepareRestore(config, ["testdb"], fakeHost)).resolves.toBeUndefined();
         });
 
         it("should accept names SQL Server accepts as delimited identifiers", async () => {
@@ -212,19 +216,19 @@ describe("MSSQL Restore", () => {
 
             const config = buildConfig();
             await expect(
-                prepareRestore(config, ["nax-init", "test-test", "with.dot", "with space"])
+                prepareRestore(config, ["nax-init", "test-test", "with.dot", "with space"], fakeHost)
             ).resolves.toBeUndefined();
         });
 
         it("should reject empty and over-long database names", async () => {
             const config = buildConfig();
-            await expect(prepareRestore(config, [""])).rejects.toThrow("Invalid database name");
-            await expect(prepareRestore(config, ["a".repeat(129)])).rejects.toThrow("Invalid database name");
+            await expect(prepareRestore(config, [""], fakeHost)).rejects.toThrow("Invalid database name");
+            await expect(prepareRestore(config, ["a".repeat(129)], fakeHost)).rejects.toThrow("Invalid database name");
         });
 
         it("should reject database names containing control characters", async () => {
             const config = buildConfig();
-            await expect(prepareRestore(config, ["db\u0000name"])).rejects.toThrow("Invalid database name");
+            await expect(prepareRestore(config, ["db\u0000name"], fakeHost)).rejects.toThrow("Invalid database name");
         });
 
         it("should throw when database is not online", async () => {
@@ -233,7 +237,7 @@ describe("MSSQL Restore", () => {
             });
 
             const config = buildConfig();
-            await expect(prepareRestore(config, ["testdb"])).rejects.toThrow("not online");
+            await expect(prepareRestore(config, ["testdb"], fakeHost)).rejects.toThrow("not online");
         });
 
         it("should allow restore when database does not exist yet", async () => {
@@ -242,14 +246,14 @@ describe("MSSQL Restore", () => {
             });
 
             const config = buildConfig();
-            await expect(prepareRestore(config, ["newdb"])).resolves.toBeUndefined();
+            await expect(prepareRestore(config, ["newdb"], fakeHost)).resolves.toBeUndefined();
         });
 
         it("should wrap connection errors in a Cannot prepare restore message", async () => {
             mockExecuteParameterizedQuery.mockRejectedValue(new Error("Connection refused"));
 
             const config = buildConfig();
-            await expect(prepareRestore(config, ["testdb"])).rejects.toThrow(
+            await expect(prepareRestore(config, ["testdb"], fakeHost)).rejects.toThrow(
                 "Cannot prepare restore for 'testdb'"
             );
         });
@@ -259,14 +263,14 @@ describe("MSSQL Restore", () => {
             mockExecuteParameterizedQuery.mockRejectedValue(new Error("Invalid database name: testdb"));
 
             const config = buildConfig();
-            await expect(prepareRestore(config, ["testdb"])).rejects.toThrow("Invalid database name");
+            await expect(prepareRestore(config, ["testdb"], fakeHost)).rejects.toThrow("Invalid database name");
         });
     });
 
     describe("Local Mode", () => {
         it("should restore database from local .bak file", async () => {
             const config = buildConfig({ fileTransferMode: "local" });
-            const result = await restore(config, "/backups/testdb.bak");
+            const result = await restore(config, "/backups/testdb.bak", fakeHost);
 
             expect(result.success).toBe(true);
 
@@ -281,7 +285,7 @@ describe("MSSQL Restore", () => {
             const logs: string[] = [];
             const config = buildConfig({ fileTransferMode: "local" });
 
-            await restore(config, "/backups/testdb.bak", (msg) => logs.push(msg));
+            await restore(config, "/backups/testdb.bak", fakeHost, (msg) => logs.push(msg));
 
             expect(logs).toContain("File transfer mode: Local (shared filesystem)");
         });
@@ -296,7 +300,7 @@ describe("MSSQL Restore", () => {
                 sshPassword: "sshpass",
             });
 
-            const result = await restore(config, "/backups/testdb.bak");
+            const result = await restore(config, "/backups/testdb.bak", fakeHost);
 
             expect(result.success).toBe(true);
 
@@ -316,7 +320,7 @@ describe("MSSQL Restore", () => {
                 sshUsername: "deploy",
             });
 
-            await restore(config, "/backups/testdb.bak");
+            await restore(config, "/backups/testdb.bak", fakeHost);
 
             expect(mockSshDeleteRemote).toHaveBeenCalled();
             expect(mockSshEnd).toHaveBeenCalled();
@@ -329,7 +333,7 @@ describe("MSSQL Restore", () => {
                 sshUsername: "deploy",
             });
 
-            await restore(config, "/backups/testdb.bak", (msg) => logs.push(msg));
+            await restore(config, "/backups/testdb.bak", fakeHost, (msg) => logs.push(msg));
 
             expect(logs).toContain("File transfer mode: SSH (remote server)");
             expect(logs.some((l) => l.includes("Connecting via SSH"))).toBe(true);
@@ -347,7 +351,7 @@ describe("MSSQL Restore", () => {
                 sshUsername: "deploy",
             });
 
-            const result = await restore(config, "/backups/testdb.bak");
+            const result = await restore(config, "/backups/testdb.bak", fakeHost);
 
             expect(result.success).toBe(false);
             expect(result.error).toContain("exclusive access");
@@ -365,7 +369,7 @@ describe("MSSQL Restore", () => {
                 sshUsername: "deploy",
             });
 
-            const result = await restore(config, "/backups/testdb.bak");
+            const result = await restore(config, "/backups/testdb.bak", fakeHost);
 
             expect(result.success).toBe(false);
             expect(result.error).toContain("SFTP upload failed");
@@ -381,7 +385,7 @@ describe("MSSQL Restore", () => {
                 localBackupPath: "/mssql-shared", // Should not be used
             });
 
-            await restore(config, "/backups/testdb.bak");
+            await restore(config, "/backups/testdb.bak", fakeHost);
 
             // SSH upload should be used instead of local copy
             expect(mockSshUpload).toHaveBeenCalled();
@@ -398,7 +402,7 @@ describe("MSSQL Restore", () => {
                 ],
             });
 
-            const result = await restore(config, "/backups/testdb.bak");
+            const result = await restore(config, "/backups/testdb.bak", fakeHost);
 
             expect(result.success).toBe(true);
 
@@ -416,7 +420,7 @@ describe("MSSQL Restore", () => {
                 ],
             });
 
-            const result = await restore(config, "/backups/testdb.bak");
+            const result = await restore(config, "/backups/testdb.bak", fakeHost);
 
             expect(result.success).toBe(false);
             expect(result.error).toContain("No target database specified");
@@ -426,7 +430,7 @@ describe("MSSQL Restore", () => {
     describe("Error Handling", () => {
         it("should return failure when no target database specified", async () => {
             const config = buildConfig({ database: "" });
-            const result = await restore(config, "/backups/testdb.bak");
+            const result = await restore(config, "/backups/testdb.bak", fakeHost);
 
             expect(result.success).toBe(false);
             expect(result.error).toContain("No target database specified");
@@ -440,7 +444,7 @@ describe("MSSQL Restore", () => {
                 sshUsername: "deploy",
             });
 
-            const result = await restore(config, "/backups/testdb.bak");
+            const result = await restore(config, "/backups/testdb.bak", fakeHost);
 
             expect(result.success).toBe(false);
             expect(result.error).toContain("SSH auth failed");
@@ -455,7 +459,7 @@ describe("MSSQL Restore", () => {
                 ],
             });
 
-            const result = await restore(config, "/backups/testdb.bak");
+            const result = await restore(config, "/backups/testdb.bak", fakeHost);
 
             expect(result.success).toBe(true);
 
@@ -476,7 +480,7 @@ describe("MSSQL Restore", () => {
                 }
             );
 
-            await restore(config, "/backups/testdb.bak", (msg) => logs.push(msg));
+            await restore(config, "/backups/testdb.bak", fakeHost, (msg) => logs.push(msg));
 
             expect(logs.some((l) => l.includes("SQL Server: 30 percent processed."))).toBe(true);
         });
@@ -511,7 +515,7 @@ describe("MSSQL Restore", () => {
 
             const logs: string[] = [];
             const config = buildConfig({ fileTransferMode: "local", database: "testdb" });
-            await restore(config, "/backups/testdb.tar", (msg) => logs.push(msg));
+            await restore(config, "/backups/testdb.tar", fakeHost, (msg) => logs.push(msg));
 
             // TAR was detected via .bak header name
             expect(logs.some((l) => l.includes("TAR archive"))).toBe(true);
@@ -524,7 +528,7 @@ describe("MSSQL Restore", () => {
             const config = buildConfig({ fileTransferMode: "local", database: "testdb" });
 
             // TAR extract yields no files - restore continues but has no bakFiles to process
-            await restore(config, "/backups/testdb.tar", (msg) => logs.push(msg));
+            await restore(config, "/backups/testdb.tar", fakeHost, (msg) => logs.push(msg));
 
             // TAR was detected: the log must contain the detection message
             expect(logs.some((l) => l.includes("TAR archive"))).toBe(true);
@@ -564,7 +568,7 @@ describe("MSSQL Restore", () => {
             const logs: string[] = [];
             const config = buildConfig({ fileTransferMode: "local", database: "testdb" });
 
-            await restore(config, "/backups/testdb.tar", (msg) => logs.push(msg));
+            await restore(config, "/backups/testdb.tar", fakeHost, (msg) => logs.push(msg));
 
             expect(logs.some((l) => l.includes("TAR archive"))).toBe(true);
         });
@@ -600,7 +604,7 @@ describe("MSSQL Restore", () => {
             const logs: string[] = [];
             const config = buildConfig({ fileTransferMode: "local", database: "testdb" });
 
-            await restore(config, "/backups/multi.tar", (msg) => logs.push(msg));
+            await restore(config, "/backups/multi.tar", fakeHost, (msg) => logs.push(msg));
 
             // Skipping should be logged
             expect(logs.some((l) => l.includes("Skipping extraction") || l.includes("TAR archive"))).toBe(true);
@@ -637,7 +641,7 @@ describe("MSSQL Restore", () => {
 
             const config = buildConfig({ fileTransferMode: "local", database: "testdb" });
             // Should not throw; non-.bak entries are silently skipped
-            const result = await restore(config, "/backups/archive.tar");
+            const result = await restore(config, "/backups/archive.tar", fakeHost);
             // No bakFiles extracted -> no target match -> result may fail or succeed depending on config
             expect(result).toHaveProperty("success");
         });
@@ -647,7 +651,7 @@ describe("MSSQL Restore", () => {
 
             // When TAR check fails, isTarArchive = false, falls through to single .bak path
             const config = buildConfig({ fileTransferMode: "local" });
-            const result = await restore(config, "/nonexistent/backup.bak");
+            const result = await restore(config, "/nonexistent/backup.bak", fakeHost);
 
             // Should still attempt a restore (as single .bak file)
             expect(result.success).toBe(true);
@@ -667,7 +671,7 @@ describe("MSSQL Restore", () => {
             };
 
             const config = buildConfig({ fileTransferMode: "local", database: "testdb" });
-            const result = await restore(config, "/backups/corrupt.tar");
+            const result = await restore(config, "/backups/corrupt.tar", fakeHost);
             expect(result.success).toBe(false);
         });
 
@@ -707,7 +711,7 @@ describe("MSSQL Restore", () => {
             };
 
             const config = buildConfig({ fileTransferMode: "local", database: "testdb" });
-            const result = await restore(config, "/backups/testdb.tar");
+            const result = await restore(config, "/backups/testdb.tar", fakeHost);
             expect(result.success).toBe(false);
         });
     });

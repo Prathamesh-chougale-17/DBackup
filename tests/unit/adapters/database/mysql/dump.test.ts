@@ -1,3 +1,7 @@
+import { createFakeHost } from "@/lib/testing/fake-host";
+
+const fakeHost = createFakeHost();
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MySQLConfig } from "@/lib/adapters/definitions";
 
@@ -161,7 +165,7 @@ describe("MySQL Dump - dump()", () => {
     // -------------------------------------------------------------------------
 
     it("dumps a single database and returns success", async () => {
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.size).toBe(1024 * 100);
@@ -172,7 +176,7 @@ describe("MySQL Dump - dump()", () => {
     });
 
     it("uses mysqldump command from tools module", async () => {
-        await dump(buildConfig({ database: "mydb" }), "/tmp/output.sql");
+        await dump(buildConfig({ database: "mydb" }), "/tmp/output.sql", fakeHost);
 
         expect(mockSpawnProcess).toHaveBeenCalledWith("mysqldump", expect.any(Array));
     });
@@ -182,7 +186,7 @@ describe("MySQL Dump - dump()", () => {
     // -------------------------------------------------------------------------
 
     it("dumpOne() dumps the given database directly, without TAR wrapping", async () => {
-        const result = await dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.sql");
+        const result = await dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.sql", fakeHost);
 
         expect(result).toEqual({ size: 1024 * 100 });
         expect(mockSpawnProcess).toHaveBeenCalledWith(
@@ -193,12 +197,12 @@ describe("MySQL Dump - dump()", () => {
     });
 
     it("dumpOne() works without an onLog callback", async () => {
-        await expect(dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.sql")).resolves.toEqual({ size: 1024 * 100 });
+        await expect(dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.sql", fakeHost)).resolves.toEqual({ size: 1024 * 100 });
     });
 
     it("dumpOne() forwards log messages when onLog is provided", async () => {
         const logs: string[] = [];
-        await dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.sql", (msg) => logs.push(msg));
+        await dumpOne(buildConfig(), "otherdb", "/tmp/otherdb.sql", fakeHost, (msg) => logs.push(msg));
 
         expect(logs.some((l) => l.includes("otherdb"))).toBe(true);
     });
@@ -207,7 +211,7 @@ describe("MySQL Dump - dump()", () => {
         mockFsStat.mockResolvedValue({ size: 0 });
         mockSpawnProcess.mockImplementation(() => makeSpawnProcess(0));
 
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/empty/i);
@@ -216,7 +220,7 @@ describe("MySQL Dump - dump()", () => {
     it("returns failure when mysqldump exits with non-zero code", async () => {
         mockSpawnProcess.mockImplementation(() => makeSpawnProcess(1));
 
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", fakeHost);
 
         expect(result.success).toBe(false);
     });
@@ -225,7 +229,7 @@ describe("MySQL Dump - dump()", () => {
         mockSpawnProcess.mockImplementation(() => makeSpawnProcess(0, "Table does not support optimize.\n"));
         const logs: string[] = [];
 
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", (msg) => {
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", fakeHost, (msg) => {
             logs.push(msg);
         });
 
@@ -239,7 +243,7 @@ describe("MySQL Dump - dump()", () => {
         );
         const logs: string[] = [];
 
-        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", (msg) => {
+        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", fakeHost, (msg) => {
             logs.push(msg);
         });
 
@@ -253,7 +257,7 @@ describe("MySQL Dump - dump()", () => {
     it("discovers databases via getDatabases when none specified in config", async () => {
         mockGetDatabases.mockResolvedValue(["discovered_db"]);
 
-        const result = await dump(buildConfig({ database: undefined as any }), "/tmp/out.sql");
+        const result = await dump(buildConfig({ database: undefined as any }), "/tmp/out.sql", fakeHost);
 
         expect(mockGetDatabases).toHaveBeenCalled();
         expect(result.success).toBe(true);
@@ -262,7 +266,7 @@ describe("MySQL Dump - dump()", () => {
     it("returns failure when no databases exist on the server", async () => {
         mockGetDatabases.mockResolvedValue([]);
 
-        const result = await dump(buildConfig({ database: undefined as any }), "/tmp/out.sql");
+        const result = await dump(buildConfig({ database: undefined as any }), "/tmp/out.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/No databases found/i);
@@ -277,7 +281,7 @@ describe("MySQL Dump - dump()", () => {
             databases: [{ name: "db1" }, { name: "db2" }],
         });
 
-        const result = await dump(buildConfig({ database: "db1,db2" }), "/tmp/multi.tar");
+        const result = await dump(buildConfig({ database: "db1,db2" }), "/tmp/multi.tar", fakeHost);
 
         expect(result.success).toBe(true);
         expect(mockCreateMultiDbTar).toHaveBeenCalled();
@@ -299,7 +303,7 @@ describe("MySQL Dump - dump()", () => {
         const result = await dump(
             buildConfig({ database: ["shop", "analytics"] as any }),
             "/tmp/multi.tar"
-        );
+        , fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.metadata?.multiDb?.format).toBe("tar");
@@ -313,7 +317,7 @@ describe("MySQL Dump - dump()", () => {
         const result = await dump(
             buildConfig({ database: "db1,db2" }),
             "/tmp/multi.tar"
-        );
+        , fakeHost);
 
         expect(result.success).toBe(false);
         expect(mockCleanupTempDir).toHaveBeenCalledWith("/tmp/mysql-multidb-fail");
@@ -352,7 +356,7 @@ describe("MySQL Dump - SSH path", () => {
     });
 
     it("dumps a single database via SSH successfully", async () => {
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", fakeHost);
 
         expect(result.success).toBe(true);
         expect(result.size).toBe(1024 * 100);
@@ -363,7 +367,7 @@ describe("MySQL Dump - SSH path", () => {
         const result = await dump(
             buildConfig({ database: "mydb", options: "--no-create-info --single-transaction" } as any),
             "/tmp/mydb.sql"
-        );
+        , fakeHost);
 
         expect(result.success).toBe(true);
     });
@@ -374,7 +378,7 @@ describe("MySQL Dump - SSH path", () => {
         });
         const logs: string[] = [];
 
-        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", (msg) => logs.push(msg));
+        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", fakeHost, (msg) => logs.push(msg));
 
         expect(logs.some((l) => l.includes("Table storage engine not found"))).toBe(true);
     });
@@ -385,7 +389,7 @@ describe("MySQL Dump - SSH path", () => {
         });
         const logs: string[] = [];
 
-        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", (msg) => logs.push(msg));
+        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", fakeHost, (msg) => logs.push(msg));
 
         expect(logs.some((l) => l.toLowerCase().includes("using a password"))).toBe(false);
     });
@@ -396,7 +400,7 @@ describe("MySQL Dump - SSH path", () => {
         });
         const logs: string[] = [];
 
-        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", (msg) => logs.push(msg));
+        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", fakeHost, (msg) => logs.push(msg));
 
         expect(logs.some((l) => l.toLowerCase().includes("deprecated program name"))).toBe(false);
     });
@@ -406,7 +410,7 @@ describe("MySQL Dump - SSH path", () => {
             callback(null, makeSshDumpStream(1));
         });
 
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", fakeHost);
 
         expect(result.success).toBe(false);
     });
@@ -414,7 +418,7 @@ describe("MySQL Dump - SSH path", () => {
     it("returns failure when the dump file is empty after SSH dump", async () => {
         mockFsStat.mockResolvedValue({ size: 0 });
 
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", fakeHost);
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/empty/i);
@@ -425,7 +429,7 @@ describe("MySQL Dump - SSH path", () => {
             callback(new Error("execStream failed"), null);
         });
 
-        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
+        const result = await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", fakeHost);
 
         expect(result.success).toBe(false);
     });
@@ -435,7 +439,7 @@ describe("MySQL Dump - SSH path", () => {
             callback(null, makeSshDumpStream(1));
         });
 
-        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql");
+        await dump(buildConfig({ database: "mydb" }), "/tmp/mydb.sql", fakeHost);
 
         expect(mockSshEnd).toHaveBeenCalled();
     });
