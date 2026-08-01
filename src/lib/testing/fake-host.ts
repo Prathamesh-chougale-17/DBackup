@@ -54,6 +54,8 @@ export interface FakeHostOptions {
     onWhich?: (candidates: string[]) => string | null | undefined;
     /** Sizes reported by stat(), keyed by path. */
     files?: Record<string, number>;
+    /** Paths stat() reports as directories. Needed by anything that checks a target is a folder. */
+    directories?: string[];
 }
 
 export interface FakeHost extends ExecutionHost {
@@ -80,6 +82,7 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
     };
 
     const files = { ...(options.files ?? {}) };
+    const directories = new Set(options.directories ?? []);
     let tempCounter = 0;
     const tmpDir = options.tmpDir ?? "/tmp";
 
@@ -174,6 +177,7 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
         },
 
         async stat(hostPath): Promise<HostStat | null> {
+            if (directories.has(hostPath)) return { size: 0, isDirectory: true };
             if (!(hostPath in files)) return null;
             return { size: files[hostPath], isDirectory: false };
         },

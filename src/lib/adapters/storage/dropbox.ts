@@ -8,6 +8,7 @@ import path from "path";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
+import { stripTrailingSlashes } from "@/lib/paths";
 
 const log = logger.child({ adapter: "dropbox" });
 
@@ -193,7 +194,7 @@ function createDropboxAuth(config: DropboxConfig): DropboxAuth {
  * Dropbox paths must start with "/" and be lowercase-normalized by the API.
  */
 function buildDropboxPath(basePath: string | undefined, relativePath: string): string {
-    const base = basePath?.replace(/\/+$/, "") || "";
+    const base = stripTrailingSlashes(basePath ?? "");
     const rel = relativePath.replace(/^\/+/, "");
     const fullPath = `${base}/${rel}`;
     // Ensure path starts with /
@@ -437,7 +438,7 @@ export const DropboxAdapter: StorageAdapter = {
     async list(config: DropboxConfig, dir: string = ""): Promise<FileInfo[]> {
         try {
             const dbx = createDropboxClient(config);
-            const basePath = config.folderPath?.replace(/\/+$/, "") || "";
+            const basePath = stripTrailingSlashes(config.folderPath ?? "");
             const listPath = dir && dir !== "."
                 ? buildDropboxPath(config.folderPath, dir)
                 : (basePath || "");
@@ -452,7 +453,7 @@ export const DropboxAdapter: StorageAdapter = {
     async browseDirectories(config: DropboxConfig, subPath: string = ""): Promise<DirectoryBrowseEntry[]> {
         try {
             const dbx = createDropboxClient(config);
-            const basePath = config.folderPath?.replace(/\/+$/, "") || "";
+            const basePath = stripTrailingSlashes(config.folderPath ?? "");
             const listPath = subPath ? buildDropboxPath(config.folderPath, subPath) : basePath;
 
             const entries: DirectoryBrowseEntry[] = [];
@@ -514,7 +515,7 @@ export const DropboxAdapter: StorageAdapter = {
     async test(config: DropboxConfig): Promise<{ success: boolean; message: string }> {
         try {
             const dbx = createDropboxClient(config);
-            const basePath = config.folderPath?.replace(/\/+$/, "") || "";
+            const basePath = stripTrailingSlashes(config.folderPath ?? "");
 
             // Test 1: Verify we can access the account
             const account = await dbx.usersGetCurrentAccount();

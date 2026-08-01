@@ -25,6 +25,7 @@ import { execFile } from "child_process";
 import { logger } from "@/lib/logging/logger";
 import { AdapterError } from "@/lib/logging/errors";
 import type { SnapshotHandle } from "@/lib/core/interfaces";
+import { stripTrailingSlashes } from "@/lib/paths";
 
 const log = logger.child({ adapter: "smb", feature: "vss" });
 
@@ -94,7 +95,7 @@ export function splitShareAddress(address: string): { host: string; share: strin
     if (slash === -1) {
         throw new AdapterError("smb", "vss", `Share address '${address}' is missing the share name (expected //server/share)`);
     }
-    return { host: normalized.slice(0, slash), share: normalized.slice(slash + 1).replace(/\/+$/, "") };
+    return { host: normalized.slice(0, slash), share: stripTrailingSlashes(normalized.slice(slash + 1)) };
 }
 
 /** The UNC form FSRVP expects for a share, e.g. `\\\\server\\share`. */

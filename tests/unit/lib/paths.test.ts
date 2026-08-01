@@ -35,6 +35,9 @@ describe("slash trimming", () => {
             expect(stripTrailingSlashes(input)).toBe(input.replace(/\/+$/, ""));
             expect(stripLeadingSlashes(input)).toBe(input.replace(/^\/+/, ""));
             expect(stripSlashes(input)).toBe(input.replace(/^\/+/, "").replace(/\/+$/, ""));
+            // The storage adapters spelled it as one global alternation rather
+            // than two passes, so parity is asserted against that form too.
+            expect(stripSlashes(input)).toBe(input.replace(/^\/+|\/+$/g, ""));
         }
     });
 

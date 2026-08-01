@@ -3,6 +3,7 @@ import { NtfySchema, NtfyConfig } from "@/lib/adapters/definitions";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { validateOutboundUrl } from "@/lib/url-validation";
+import { stripTrailingSlashes } from "@/lib/paths";
 
 const log = logger.child({ adapter: "ntfy" });
 
@@ -60,7 +61,7 @@ export const NtfyAdapter: NotificationAdapter = {
 
     async test(config: NtfyConfig): Promise<{ success: boolean; message: string }> {
         try {
-            const baseUrl = config.serverUrl.replace(/\/+$/, "");
+            const baseUrl = stripTrailingSlashes(config.serverUrl);
             const url = `${baseUrl}/${encodeURIComponent(config.topic)}`;
 
             const headers: Record<string, string> = {
@@ -94,7 +95,7 @@ export const NtfyAdapter: NotificationAdapter = {
 
     async send(config: NtfyConfig, message: string, context?: any): Promise<boolean> {
         try {
-            const baseUrl = config.serverUrl.replace(/\/+$/, "");
+            const baseUrl = stripTrailingSlashes(config.serverUrl);
             const url = `${baseUrl}/${encodeURIComponent(config.topic)}`;
             const priority = resolvePriority(config.priority ?? 3, context);
             const tags = mapTagsFromContext(context);

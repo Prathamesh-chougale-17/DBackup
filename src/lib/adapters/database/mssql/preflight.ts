@@ -1,6 +1,7 @@
 import type { ExecutionHost } from "@/lib/transport";
 import type { MSSQLConfig } from "@/lib/adapters/definitions";
 import { executeParameterizedQuery } from "./connection";
+import { stripTrailingSlashes } from "@/lib/paths";
 
 /**
  * Verify that SQL Server's backup directory is usable from DBackup's side.
@@ -45,7 +46,9 @@ export async function checkBackupPath(
 }
 
 function probePath(backupPath: string): string {
-    return `${backupPath.replace(/\/+$/, "")}/.dbackup_probe`;
+    // stripTrailingSlashes, not `/\/+$/`. That regex backtracks quadratically on
+    // a long run of slashes, and backupPath comes straight from a stored config.
+    return `${stripTrailingSlashes(backupPath)}/.dbackup_probe`;
 }
 
 /**

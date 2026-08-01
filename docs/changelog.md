@@ -24,6 +24,7 @@ All notable changes to DBackup are documented here.
 ### 🔒 Security
 
 - **restore**: Trimming trailing slashes off a restore target path used a regular expression that runs in quadratic time on a long run of slashes, letting a crafted target path occupy the server. Reported by CodeQL as `js/polynomial-redos`.
+- **storage**: The same quadratic slash trimming was still in use for the S3 path prefix, the Dropbox and OneDrive folder path, the SMB share, directory downloads, file exclusion patterns, and the ntfy and Gotify server URLs. All seventeen now use the linear-time helper.
 
 ### 🎨 Improvements
 

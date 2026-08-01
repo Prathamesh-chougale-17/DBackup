@@ -9,6 +9,7 @@ import path from "path";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
+import { stripSlashes } from "@/lib/paths";
 
 const log = logger.child({ adapter: "s3" });
 
@@ -33,7 +34,7 @@ class S3ClientFactory {
     }
 
     static getTargetKey(config: S3InternalConfig, remotePath: string): string {
-        const prefix = config.pathPrefix ? config.pathPrefix.replace(/^\/+|\/+$/g, '') : '';
+        const prefix = config.pathPrefix ? stripSlashes(config.pathPrefix) : '';
         return prefix ? `${prefix}/${remotePath}` : remotePath;
     }
 
@@ -48,7 +49,7 @@ class S3ClientFactory {
      * paths (which surfaced as an extra folder named after the prefix on restore).
      */
     static stripPrefix(config: S3InternalConfig, key: string): string {
-        const prefix = config.pathPrefix ? config.pathPrefix.replace(/^\/+|\/+$/g, '') : '';
+        const prefix = config.pathPrefix ? stripSlashes(config.pathPrefix) : '';
         if (!prefix) return key;
         const withSlash = `${prefix}/`;
         return key.startsWith(withSlash) ? key.slice(withSlash.length) : key;

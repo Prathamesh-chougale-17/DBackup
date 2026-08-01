@@ -6,11 +6,12 @@ import { mapWithConcurrency, untilAborted } from "@/lib/concurrency";
 import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
 import { summariseExcluded, formatExcludeSummary } from "@/lib/exclude-summary";
 import { listTreeForCollection } from "./list-tree";
+import { stripSlashes } from "@/lib/paths";
 
 /** Strips a queried remotePath prefix from a FileInfo.path (which list() returns relative to the adapter root). */
 export function toRelativePath(filePath: string, remotePath: string): string {
     const normalizedFile = filePath.replace(/\\/g, "/").replace(/^\/+/, "");
-    const normalizedRoot = remotePath.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    const normalizedRoot = stripSlashes(remotePath.replace(/\\/g, "/"));
     if (normalizedRoot && normalizedFile.startsWith(`${normalizedRoot}/`)) {
         return normalizedFile.slice(normalizedRoot.length + 1);
     }

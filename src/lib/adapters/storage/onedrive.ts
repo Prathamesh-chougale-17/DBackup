@@ -9,6 +9,7 @@ import { pipeline } from "stream/promises";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
+import { stripSlashes } from "@/lib/paths";
 
 const log = logger.child({ adapter: "onedrive" });
 
@@ -75,7 +76,7 @@ function createGraphClient(accessToken: string): Client {
  * Uses the /me/drive/root:/path:/... format for path-based API access.
  */
 function buildDrivePath(basePath: string | undefined, relativePath: string): string {
-    const base = basePath?.replace(/^\/+|\/+$/g, "") || "";
+    const base = stripSlashes(basePath ?? "");
     const rel = relativePath.replace(/^\/+/, "");
     const fullPath = base ? `${base}/${rel}` : rel;
     return fullPath;
@@ -449,7 +450,7 @@ export const OneDriveAdapter: StorageAdapter = {
         try {
             const accessToken = await getAccessToken(config);
             const client = createGraphClient(accessToken);
-            const basePath = config.folderPath?.replace(/^\/+|\/+$/g, "") || "";
+            const basePath = stripSlashes(config.folderPath ?? "");
             const listPath = dir && dir !== "."
                 ? (basePath ? `${basePath}/${dir}` : dir)
                 : basePath;
@@ -465,7 +466,7 @@ export const OneDriveAdapter: StorageAdapter = {
         try {
             const accessToken = await getAccessToken(config);
             const client = createGraphClient(accessToken);
-            const basePath = config.folderPath?.replace(/^\/+|\/+$/g, "") || "";
+            const basePath = stripSlashes(config.folderPath ?? "");
             const listPath = subPath ? (basePath ? `${basePath}/${subPath}` : subPath) : basePath;
 
             const apiPath = listPath
@@ -559,7 +560,7 @@ export const OneDriveAdapter: StorageAdapter = {
             const ownerName = drive.owner?.user?.displayName || "Unknown";
 
             // Test 2: Verify folder path exists (or root)
-            const basePath = config.folderPath?.replace(/^\/+|\/+$/g, "") || "";
+            const basePath = stripSlashes(config.folderPath ?? "");
             if (basePath) {
                 try {
                     const folder = await client
