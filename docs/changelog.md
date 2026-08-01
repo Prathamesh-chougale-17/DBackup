@@ -2,26 +2,12 @@
 
 All notable changes to DBackup are documented here.
 
-## vNEXT
-*Release: In Progress*
-
-### 🔒 Security
-
-- **restore**: Trimming trailing slashes off a restore target path used a regular expression that runs in quadratic time on a long run of slashes, letting a crafted target path occupy the server. Reported by CodeQL as `js/polynomial-redos`.
+## v3.1.0 - SSH Connection Mode for MSSQL, SSH Transport rewrite, and Bug Fixes
+*Released: Aug 1, 2026*
 
 ### ✨ Features
 
 - **mssql**: SQL Server sources can now use **SSH connection mode**, like every other database source. The connection to SQL Server is tunnelled through SSH, so the SQL Server port no longer has to be reachable from DBackup, and backup files travel over that same connection with no separate file transfer setup. Certificate validation stays intact through the tunnel. The existing **File Transfer** setting is untouched and keeps working exactly as before for sources that connect directly, so no existing SQL Server source needs any change.
-
-### 🎨 Improvements
-
-- **paths**: Slash trimming moved into one shared helper that cannot backtrack, replacing the three hand-rolled copies that had drifted apart.
-- **ssh**: Added a transport layer that models direct and SSH connections as interchangeable implementations of one interface. Commands are now described as argument lists rather than assembled shell strings, so remote quoting lives in a single tested place instead of being repeated at every call site.
-- **ssh**: A backup or restore now opens one SSH connection for the whole run instead of one per adapter call. A combined backup of ten databases previously performed twelve separate handshakes against the same server.
-- **health check**: The per-adapter timeout now runs inside the connection scope. Previously a check that timed out while still connecting left its socket open, once a minute for every unreachable source.
-- **mysql**: SSH-mode dumps now use the same version-aware options as direct dumps. Previously the SSH path built a smaller set of arguments by hand and missed them, so a MySQL 8 dump taken over SSH did not get `--default-character-set=utf8mb4`.
-- **mysql**: Listing databases with sizes now falls back to a plain listing when `information_schema` is unreadable. A least-privilege backup user previously saw an error instead of the database list in direct mode.
-- **postgres**: Connecting, listing databases and reading sizes now run through one code path for both connection modes, so the two no longer differ in which errors they report or how they fall back between the `postgres`, `template1` and configured databases.
 
 ### 🐛 Bug Fixes
 
@@ -34,6 +20,20 @@ All notable changes to DBackup are documented here.
 - **sqlite**: Browsing tables over SSH no longer fails on a database path or table name containing a quote or a space. The path and the query were assembled into a remote shell command and are now passed as separate arguments.
 - **mongodb**: Listing collections and browsing documents over SSH no longer break on a database or collection name containing a single quote. The query script was pasted into a quoted remote shell command and is now passed as one argument.
 - **mongodb**: A single-database restore no longer streams the archive through the client's standard input. It reads the archive from a path, the same way multi-database restores already did, which removes a source of truncated restores on large archives.
+
+### 🔒 Security
+
+- **restore**: Trimming trailing slashes off a restore target path used a regular expression that runs in quadratic time on a long run of slashes, letting a crafted target path occupy the server. Reported by CodeQL as `js/polynomial-redos`.
+
+### 🎨 Improvements
+
+- **paths**: Slash trimming moved into one shared helper that cannot backtrack, replacing the three hand-rolled copies that had drifted apart.
+- **ssh**: Added a transport layer that models direct and SSH connections as interchangeable implementations of one interface. Commands are now described as argument lists rather than assembled shell strings, so remote quoting lives in a single tested place instead of being repeated at every call site.
+- **ssh**: A backup or restore now opens one SSH connection for the whole run instead of one per adapter call. A combined backup of ten databases previously performed twelve separate handshakes against the same server.
+- **health check**: The per-adapter timeout now runs inside the connection scope. Previously a check that timed out while still connecting left its socket open, once a minute for every unreachable source.
+- **mysql**: SSH-mode dumps now use the same version-aware options as direct dumps. Previously the SSH path built a smaller set of arguments by hand and missed them, so a MySQL 8 dump taken over SSH did not get `--default-character-set=utf8mb4`.
+- **mysql**: Listing databases with sizes now falls back to a plain listing when `information_schema` is unreadable. A least-privilege backup user previously saw an error instead of the database list in direct mode.
+- **postgres**: Connecting, listing databases and reading sizes now run through one code path for both connection modes, so the two no longer differ in which errors they report or how they fall back between the `postgres`, `template1` and configured databases.
 
 ### 📝 Documentation
 
@@ -52,8 +52,8 @@ All notable changes to DBackup are documented here.
 
 ### 🐳 Docker
 
-- **Image**: `skyfay/dbackup:vNEXT`
-- **Also tagged as**: `latest`, `vNEXT`
+- **Image**: `skyfay/dbackup:v3.1.0`
+- **Also tagged as**: `latest`, `v3`
 - **CI Image**: `skyfay/dbackup:ci`
 - **Platforms**: linux/amd64, linux/arm64
 
