@@ -1,3 +1,4 @@
+import { transportSuffix } from "@/lib/transport";
 import { DatabaseAdapter } from "@/lib/core/interfaces";
 
 const NO_HOST_MESSAGE = "SQLite adapter requires an execution host. Call it through withHost().";
@@ -16,7 +17,7 @@ export const test: NonNullable<DatabaseAdapter["test"]> = async (config, host) =
     }
 
     const dbPath = config.path as string;
-    const via = host.kind === "ssh" ? " over SSH" : "";
+    const via = transportSuffix(host);
 
     try {
         const binary = await host.which(binaryOf(config));

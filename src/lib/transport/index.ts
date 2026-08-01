@@ -22,6 +22,7 @@ export {
     readSshConfig,
     resolveTransport,
     standardTransport,
+    transportSuffix,
     type SshKeyMap,
 } from "./spec";
 

@@ -1,13 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { registry } from "@/lib/core/registry";
-import { createHost, resolveTransport, type TransportSpec, type SshConnectionConfig } from "@/lib/transport";
+import { SshHost, createHost, resolveTransport, type TransportSpec, type SshConnectionConfig } from "@/lib/transport";
 import type { DatabaseAdapter } from "@/lib/core/interfaces";
 import { headers } from "next/headers";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
 import { checkBackupPath } from "@/lib/adapters/database/mssql/preflight";
 import { MSSQLConfig } from "@/lib/adapters/definitions";
-import { SshClient } from "@/lib/ssh";
 import { overlayCredentialsOnConfig } from "@/lib/adapters/config-resolver";
 import { registerAdapters } from "@/lib/adapters";
 import { logger } from "@/lib/logging/logger";
@@ -109,10 +108,9 @@ export async function POST(req: NextRequest) {
  * Generic SSH test: connect and run a simple echo command.
  */
 async function testGenericSsh(sshConfig: SshConnectionConfig, sshHost: string, sshPort: number) {
-    const ssh = new SshClient();
+    const host = new SshHost(sshConfig);
     try {
-        await ssh.connect(sshConfig);
-        const result = await ssh.exec("echo connected");
+        const result = await host.exec(["echo", "connected"]);
 
         if (result.code === 0) {
             return NextResponse.json({
@@ -123,22 +121,20 @@ async function testGenericSsh(sshConfig: SshConnectionConfig, sshHost: string, s
 
         return NextResponse.json({
             success: false,
-            message: `SSH connected but test command failed: ${result.stderr}`,
+            message: `SSH connected but test command failed: ${result.stderr.trim()}`,
         });
     } catch (connectError: unknown) {
-        const message =
-            connectError instanceof Error
-                ? connectError.message
-                : "SSH connection failed";
+        const message = connectError instanceof Error ? connectError.message : "SSH connection failed";
         log.warn("SSH test failed", { sshHost }, wrapError(connectError));
         return NextResponse.json({ success: false, message });
     } finally {
-        ssh.end();
+        await host.dispose().catch(() => {});
     }
 }
 
 /**
- * MSSQL-specific SSH test: SFTP connect + backup path check.
+ * MSSQL SSH test: connect and verify the backup directory is usable, since a
+ * problem there only surfaces as a missing .bak in the middle of a backup.
  */
 async function testMssqlSsh(
     config: MSSQLConfig,

@@ -33,8 +33,13 @@ All notable changes to DBackup are documented here.
 - **mongodb**: Listing collections and browsing documents over SSH no longer break on a database or collection name containing a single quote. The query script was pasted into a quoted remote shell command and is now passed as one argument.
 - **mongodb**: A single-database restore no longer streams the archive through the client's standard input. It reads the archive from a path, the same way multi-database restores already did, which removes a source of truncated restores on large archives.
 
+### 📝 Documentation
+
+- **wiki**: The database adapter developer guide now documents the transport layer, replacing the SSH section that described the removed client.
+
 ### 🧪 Tests
 
+- **ssh**: Added a lint guard that rejects transport branching in adapter code, direct process spawning and hand-written escaping, and checks that every source offering SSH credentials actually resolves a transport.
 - **paths**: Added coverage that slash trimming matches what the regular expressions produced and stays linear on a pathological run of slashes.
 - **mysql**: The adapter suites now run every expectation against both connection modes from one table and assert on argument lists rather than assembled command strings.
 - **ssh**: New transport test suite covering both connection modes. Argument quoting is verified by round-tripping hostile values (command substitution, embedded quotes, newlines, non-ASCII) through a real shell and comparing the recovered arguments against the originals.

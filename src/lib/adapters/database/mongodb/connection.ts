@@ -1,4 +1,4 @@
-import type { ExecutionHost } from "@/lib/transport";
+import { transportSuffix, type ExecutionHost } from "@/lib/transport";
 import { MongoDBConfig } from "@/lib/adapters/definitions";
 import { DatabaseInfo } from "@/lib/core/interfaces";
 import { withMongoMeta } from "./meta";
@@ -13,7 +13,7 @@ export async function test(
         return { success: false, message: NO_HOST_MESSAGE };
     }
 
-    const via = host.kind === "ssh" ? " (via SSH)" : "";
+    const via = transportSuffix(host);
 
     try {
         const version = await withMongoMeta(config, host, (meta) => meta.serverVersion());

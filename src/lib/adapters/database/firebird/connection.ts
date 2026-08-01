@@ -1,4 +1,4 @@
-import type { ExecutionHost } from "@/lib/transport";
+import { transportSuffix, type ExecutionHost } from "@/lib/transport";
 import { FirebirdConfig } from "@/lib/adapters/definitions";
 import { DatabaseInfo } from "@/lib/core/interfaces";
 import { getIsqlCommand } from "./tools";
@@ -121,7 +121,7 @@ export async function test(
         return { success: false, message: NO_HOST_MESSAGE };
     }
 
-    const via = host.kind === "ssh" ? " (via SSH)" : "";
+    const via = transportSuffix(host);
     const connStr = buildConnectionString(config, aliases[0].path);
 
     try {
@@ -155,7 +155,7 @@ export async function ping(
         return { success: false, message: NO_HOST_MESSAGE };
     }
 
-    const via = host.kind === "ssh" ? " (via SSH)" : "";
+    const via = transportSuffix(host);
     try {
         const socket = await host.connect(config.host, config.port || 3050);
         socket.destroy();

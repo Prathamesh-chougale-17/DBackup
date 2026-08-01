@@ -130,3 +130,14 @@ export function resolveTransport(
         });
     }
 }
+
+/**
+ * The " (via SSH)" suffix used in connection-test messages.
+ *
+ * A helper rather than an inline `host.kind` check at every call site, so the
+ * transport lint guard can treat any remaining kind check as what it is: a real
+ * behavioural fork that needs a written justification.
+ */
+export function transportSuffix(host: { kind: string }): string {
+    return host.kind === "ssh" ? " (via SSH)" : "";
+}

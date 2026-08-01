@@ -15,7 +15,6 @@ const {
     mockCountDocuments,
     mockFindToArray,
     mockSort,
-    mockIsSSHMode,
 } = vi.hoisted(() => ({
     mockConnect: vi.fn().mockResolvedValue(undefined),
     mockClose: vi.fn().mockResolvedValue(undefined),
@@ -24,7 +23,6 @@ const {
     mockCountDocuments: vi.fn().mockResolvedValue(0),
     mockFindToArray: vi.fn().mockResolvedValue([]),
     mockSort: vi.fn(),
-    mockIsSSHMode: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("mongodb", () => {
@@ -51,17 +49,6 @@ vi.mock("mongodb", () => {
     return { MongoClient: MockMongoClient };
 });
 
-vi.mock("@/lib/ssh", () => ({
-    SshClient: class {
-        connect = vi.fn();
-        exec = vi.fn();
-        end = vi.fn();
-    },
-    isSSHMode: (...args: unknown[]) => mockIsSSHMode(...args),
-    extractSshConfig: vi.fn(),
-    buildMongoArgs: vi.fn(() => []),
-    remoteBinaryCheck: vi.fn(),
-}));
 
 import { getTables, getTableData } from "@/lib/adapters/database/mongodb/browser";
 

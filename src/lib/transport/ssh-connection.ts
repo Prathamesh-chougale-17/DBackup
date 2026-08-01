@@ -1,6 +1,6 @@
 import { Client, type ConnectConfig } from "ssh2";
 
-import { normalizeSshPrivateKey } from "@/lib/ssh/pkcs8-compat";
+import { normalizeSshPrivateKey } from "./pkcs8-compat";
 import type { SshConnectionConfig } from "./types";
 
 /** Handshake budget. Matches the previous SshClient so behaviour does not shift. */

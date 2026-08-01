@@ -1,4 +1,4 @@
-import type { ExecutionHost } from "@/lib/transport";
+import { transportSuffix, type ExecutionHost } from "@/lib/transport";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { RedisConfig } from "@/lib/adapters/definitions";
@@ -38,7 +38,7 @@ export async function test(
         return { success: false, message: e instanceof Error ? e.message : String(e) };
     }
 
-    const via = host.kind === "ssh" ? " (via SSH)" : "";
+    const via = transportSuffix(host);
 
     try {
         const redisCli = await host.which(...REDIS_CLI);
