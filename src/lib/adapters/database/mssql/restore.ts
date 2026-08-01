@@ -1,10 +1,10 @@
 import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
-import { executeQuery, executeParameterizedQuery, executeQueryWithMessages } from "./connection";
+import { executeQuery, executeParameterizedQuery, executeQueryWithMessages, type SqlServerMessage } from "./connection";
 import { getDialect } from "./dialects";
 import { assertValidDatabaseName, toPhysicalFileName } from "./identifiers";
-import { MssqlSshTransfer, isSSHTransferEnabled } from "./ssh-transfer";
+import { isCompositeHost } from "@/lib/transport";
 import fs from "fs/promises";
 import { createReadStream, createWriteStream } from "fs";
 import path from "path";
@@ -32,7 +32,7 @@ type MSSQLRestoreConfig = MSSQLConfig & {
 /**
  * Prepare restore by validating target databases
  */
-export async function prepareRestore(config: MSSQLRestoreConfig, databases: string[], _host: ExecutionHost): Promise<void> {
+export async function prepareRestore(config: MSSQLRestoreConfig, databases: string[], host: ExecutionHost): Promise<void> {
     // Check if target databases can be created/overwritten
     for (const dbName of databases) {
         // Accept every name SQL Server accepts as a delimited identifier.
@@ -45,6 +45,7 @@ export async function prepareRestore(config: MSSQLRestoreConfig, databases: stri
             // Use parameterized query for safety (even with validated input)
             const result = await executeParameterizedQuery(
                 config,
+                host,
                 `SELECT state_desc FROM sys.databases WHERE name = @dbName`,
                 { dbName }
             );
@@ -74,7 +75,7 @@ export async function prepareRestore(config: MSSQLRestoreConfig, databases: stri
 export async function restore(
     config: MSSQLRestoreConfig,
     sourcePath: string,
-    _host: ExecutionHost,
+    host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
     _onProgress?: (percentage: number) => void
 ): Promise<BackupResult> {
@@ -88,7 +89,9 @@ export async function restore(
     try {
         const dialect = getDialect(config.detectedVersion);
         const serverBackupPath = config.backupPath || "/var/opt/mssql/backup";
-        const useSSH = isSSHTransferEnabled(config);
+        // The transport decides how the .bak file travels: a shared mount makes it
+        // visible to SQL Server, otherwise it is uploaded over SSH.
+        const useSSH = host.kind !== "direct" || isCompositeHost(host);
         const localBackupPath = config.localBackupPath || "/tmp";
 
         if (useSSH) {
@@ -160,19 +163,11 @@ export async function restore(
             bakFiles.push({ serverPath: serverBakPath, localPath: localBakPath, dbName });
         }
 
-        // Transfer .bak files to the SQL Server
-        let sshTransfer: MssqlSshTransfer | null = null;
-
         try {
             if (useSSH) {
-                // SSH mode: upload .bak files to the remote server
-                log(`Connecting via SSH to upload backup file(s)...`);
-                sshTransfer = new MssqlSshTransfer();
-                await sshTransfer.connect(config);
-
                 for (const bakFile of bakFiles) {
                     log(`Uploading: ${path.basename(bakFile.localPath)} → ${bakFile.serverPath}`);
-                    await sshTransfer.upload(bakFile.localPath, bakFile.serverPath);
+                    await host.putFile(bakFile.localPath, bakFile.serverPath);
                     log(`Uploaded: ${path.basename(bakFile.localPath)}`);
                 }
             } else {
@@ -197,7 +192,7 @@ export async function restore(
 
                 // Get file list from backup to determine logical names
                 const fileListQuery = `RESTORE FILELISTONLY FROM DISK = N'${bakFile.serverPath.replace(/'/g, "''")}'`;
-                const fileListResult = await executeQuery(config, fileListQuery);
+                const fileListResult = await executeQuery(config, host, fileListQuery);
 
                 const logicalFiles = fileListResult.recordset.map((row: any) => ({
                     logicalName: row.LogicalName,
@@ -237,7 +232,7 @@ export async function restore(
                 try {
                     // Use requestTimeout=0 (no timeout) - large DB restores can run for hours.
                     // Stream progress messages in real-time so the UI shows live updates.
-                    await executeQueryWithMessages(config, restoreQuery, undefined, 0, (msg) => {
+                    await executeQueryWithMessages(config, host, restoreQuery, undefined, 0, (msg: SqlServerMessage) => {
                         if (msg.message) {
                             log(`SQL Server: ${msg.message}`, "info", "general");
                         }
@@ -259,12 +254,12 @@ export async function restore(
             for (const bakFile of bakFiles) {
                 await fs.unlink(bakFile.localPath).catch(() => {});
             }
-            // Clean up remote .bak files uploaded via SSH
-            if (sshTransfer) {
+            // Remove the server-side copies too. With a shared mount the unlink
+            // above already did that, since both paths are one file.
+            if (useSSH) {
                 for (const bakFile of bakFiles) {
-                    await sshTransfer.deleteRemote(bakFile.serverPath).catch(() => {});
+                    await host.removeFile(bakFile.serverPath).catch(() => {});
                 }
-                sshTransfer.end();
             }
         }
 

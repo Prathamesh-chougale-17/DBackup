@@ -97,3 +97,8 @@ export class CompositeHost extends BaseHost {
         await this.fileHost.dispose().catch(() => {});
     }
 }
+
+/** True when this host moves files over a different transport than it runs commands on. */
+export function isCompositeHost(host: ExecutionHost): boolean {
+    return host instanceof CompositeHost;
+}

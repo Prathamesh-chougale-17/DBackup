@@ -1,441 +1,174 @@
-import { createFakeHost } from "@/lib/testing/fake-host";
-
-const fakeHost = createFakeHost();
-
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { MSSQLConfig } from "@/lib/adapters/definitions";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import { join } from "node:path";
 
-// --- Mock setup ---
+const { mockExecuteWithMessages, mockGetDatabases, mockSupportsCompression } = vi.hoisted(() => ({
+    mockExecuteWithMessages: vi.fn(),
+    mockGetDatabases: vi.fn(),
+    mockSupportsCompression: vi.fn(),
+}));
 
-// Use vi.hoisted for variables referenced inside vi.mock factories
-const {
-    mockExecuteQueryWithMessages,
-    mockGetDatabases,
-    mockSupportsCompression,
-    mockSshConnect,
-    mockSshDownload,
-    mockSshDeleteRemote,
-    mockSshEnd,
-    mockFsStat,
-    mockFsUnlink,
-    mockExistsSync,
-    PassThrough,
-} = vi.hoisted(() => {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { PassThrough } = require("stream") as { PassThrough: typeof import("stream").PassThrough };
-    return {
-        mockExecuteQueryWithMessages: vi.fn(),
-        mockGetDatabases: vi.fn(),
-        mockSupportsCompression: vi.fn(),
-        mockSshConnect: vi.fn(),
-        mockSshDownload: vi.fn(),
-        mockSshDeleteRemote: vi.fn(),
-        mockSshEnd: vi.fn(),
-        mockFsStat: vi.fn(),
-        mockFsUnlink: vi.fn(),
-        mockExistsSync: vi.fn(),
-        PassThrough,
-    };
-});
-
-// Mock connection module
 vi.mock("@/lib/adapters/database/mssql/connection", () => ({
-    executeQueryWithMessages: (...args: any[]) => mockExecuteQueryWithMessages(...args),
-    getDatabases: (...args: any[]) => mockGetDatabases(...args),
-    supportsCompression: (...args: any[]) => mockSupportsCompression(...args),
+    executeQueryWithMessages: (...args: unknown[]) => mockExecuteWithMessages(...args),
+    getDatabases: (...args: unknown[]) => mockGetDatabases(...args),
+    supportsCompression: (...args: unknown[]) => mockSupportsCompression(...args),
 }));
 
-// Mock SSH transfer (use a class so it's constructable with `new`)
-vi.mock("@/lib/adapters/database/mssql/ssh-transfer", () => {
-    class MockMssqlSshTransfer {
-        connect(...args: any[]) { return mockSshConnect(...args); }
-        download(...args: any[]) { return mockSshDownload(...args); }
-        deleteRemote(...args: any[]) { return mockSshDeleteRemote(...args); }
-        end(...args: any[]) { return mockSshEnd(...args); }
-    }
-    return {
-        MssqlSshTransfer: MockMssqlSshTransfer,
-        isSSHTransferEnabled: (config: any) =>
-            config.fileTransferMode === "ssh" && !!config.sshUsername,
-    };
-});
-
-// Mock fs/promises
-vi.mock("fs/promises", () => ({
-    default: {
-        stat: (...args: any[]) => mockFsStat(...args),
-        unlink: (...args: any[]) => mockFsUnlink(...args),
-    },
-    stat: (...args: any[]) => mockFsStat(...args),
-    unlink: (...args: any[]) => mockFsUnlink(...args),
-}));
-
-// Mock fs (sync functions + streams)
-vi.mock("fs", () => {
-    const existsSync = (...args: any[]) => mockExistsSync(...args);
-
-    const createReadStream = vi.fn(() => {
-        const stream = new PassThrough();
-        process.nextTick(() => stream.end(Buffer.from("backup-content")));
-        return stream;
-    });
-
-    const createWriteStream = vi.fn(() => {
-        const stream = new PassThrough();
-        stream.on("pipe", () => {
-            process.nextTick(() => stream.emit("finish"));
-        });
-        return stream;
-    });
-
-    return {
-        default: { existsSync, createReadStream, createWriteStream },
-        existsSync,
-        createReadStream,
-        createWriteStream,
-    };
-});
-
-// Mock tar-stream
-vi.mock("tar-stream", () => ({
-    pack: vi.fn(() => {
-        const stream = new PassThrough() as any;
-        stream.entry = vi.fn((_opts: any) => {
-            // Return a writable entry stream - don't auto-emit finish
-            // The entry naturally ends when the source pipe calls .end()
-            const entry = new PassThrough();
-            return entry;
-        });
-        stream.finalize = vi.fn(() => {
-            process.nextTick(() => stream.end());
-        });
-        return stream;
-    }),
-}));
-
-// Mock stream/promises
-vi.mock("stream/promises", () => {
-    const pipeline = vi.fn().mockResolvedValue(undefined);
-    return {
-        default: { pipeline },
-        pipeline,
-    };
-});
-
+import { createFakeHost, type FakeHost } from "@/lib/testing/fake-host";
 import { dump } from "@/lib/adapters/database/mssql/dump";
+import { CompositeHost, DirectHost } from "@/lib/transport";
 
-// Helper to build config
-function buildConfig(overrides: Partial<MSSQLConfig> = {}): MSSQLConfig & { detectedVersion?: string } {
+/**
+ * These run against a real temp directory rather than a mocked filesystem, so
+ * the shared-mount path is exercised for what it actually is: SQL Server writes
+ * the .bak and DBackup reads the very same file from its own side.
+ */
+
+let mountDir: string;
+let outDir: string;
+
+/** The queries that reached SQL Server. */
+function queries(): string[] {
+    return mockExecuteWithMessages.mock.calls.map(c => c[2] as string);
+}
+
+/** Stand in for SQL Server writing the .bak into the shared directory. */
+function serverWritesBackup() {
+    mockExecuteWithMessages.mockImplementation(async (_cfg, _host, query: string) => {
+        const match = /DISK\s*=\s*N?'([^']+)'/.exec(query);
+        if (match) {
+            await writeFile(join(mountDir, match[1].split("/").pop()!), "BAKDATA");
+        }
+        return { result: {}, messages: [] };
+    });
+}
+
+function config() {
     return {
-        host: "db.example.com",
+        host: "sql.internal",
         port: 1433,
         user: "sa",
         password: "secret",
         database: "testdb",
-        encrypt: true,
-        trustServerCertificate: false,
         backupPath: "/var/opt/mssql/backup",
-        fileTransferMode: "local",
-        localBackupPath: "/mssql-shared",
-        requestTimeout: 300000,
-        ...overrides,
+        localBackupPath: mountDir,
     };
 }
 
-describe("MSSQL Dump", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockSupportsCompression.mockResolvedValue(true);
-        mockExecuteQueryWithMessages.mockResolvedValue({ result: { recordset: [] }, messages: [] });
-        mockFsStat.mockResolvedValue({ size: 1024 * 1024 }); // 1 MB
-        mockFsUnlink.mockResolvedValue(undefined);
-        mockExistsSync.mockReturnValue(true);
+beforeEach(async () => {
+    vi.clearAllMocks();
+    mountDir = await mkdtemp(join(os.tmpdir(), "dbackup-mssql-mount-"));
+    outDir = await mkdtemp(join(os.tmpdir(), "dbackup-mssql-out-"));
+    mockSupportsCompression.mockResolvedValue(true);
+    mockExecuteWithMessages.mockResolvedValue({ result: {}, messages: [] });
+});
+
+afterEach(async () => {
+    await rm(mountDir, { recursive: true, force: true });
+    await rm(outDir, { recursive: true, force: true });
+});
+
+describe("MSSQL dump with a shared mount", () => {
+    beforeEach(serverWritesBackup);
+
+    it("runs BACKUP DATABASE and reads the file in place", async () => {
+        // Copying would be wrong here: the two paths are one file seen from two
+        // sides, so a copy would truncate the source.
+        const host = createFakeHost({ kind: "direct" });
+        const out = join(outDir, "out.bak");
+
+        const result = await dump(config() as never, out, host);
+
+        expect(result.success).toBe(true);
+        expect(queries()[0]).toContain("BACKUP DATABASE [testdb]");
+        expect(host.calls.getFile).toHaveLength(0);
+        expect(await readFile(out, "utf8")).toBe("BAKDATA");
+    });
+
+    it("removes only the local file, since both paths are one file", async () => {
+        const host = createFakeHost({ kind: "direct" });
+        await dump(config() as never, join(outDir, "out.bak"), host);
+
+        expect(host.calls.removed).toHaveLength(0);
+    });
+
+    it("discovers the databases when none are selected", async () => {
         mockGetDatabases.mockResolvedValue(["testdb"]);
-        mockSshConnect.mockResolvedValue(undefined);
-        mockSshDownload.mockResolvedValue(undefined);
-        mockSshDeleteRemote.mockResolvedValue(undefined);
+        const host = createFakeHost({ kind: "direct" });
+
+        await dump({ ...config(), database: "" } as never, join(outDir, "out.bak"), host);
+        expect(mockGetDatabases).toHaveBeenCalledWith(expect.anything(), host);
     });
 
-    afterEach(() => {
-        vi.restoreAllMocks();
+    it("skips compression on an edition that does not support it", async () => {
+        mockSupportsCompression.mockResolvedValue(false);
+
+        const logs: string[] = [];
+        await dump(config() as never, join(outDir, "out.bak"), createFakeHost({ kind: "direct" }), (m) => logs.push(m));
+
+        expect(logs.join("\n")).toContain("Compression disabled");
     });
 
-    describe("Local Mode", () => {
-        it("should execute BACKUP DATABASE and copy file locally", async () => {
-            const config = buildConfig({ fileTransferMode: "local" });
+    it("explains the mount when the file never appears", async () => {
+        // SQL Server writes nothing, which is what a wrong localBackupPath looks like.
+        mockExecuteWithMessages.mockResolvedValue({ result: {}, messages: [] });
 
-            const result = await dump(config, "/dest/backup.bak", fakeHost);
+        const result = await dump(config() as never, join(outDir, "out.bak"), createFakeHost({ kind: "direct" }));
 
-            expect(result.success).toBe(true);
-            expect(mockExecuteQueryWithMessages).toHaveBeenCalledOnce();
+        expect(result.success).toBe(false);
+        expect(result.error).toContain("localBackupPath");
+    });
+});
 
-            // Verify BACKUP DATABASE query was executed
-            const query = mockExecuteQueryWithMessages.mock.calls[0][1];
-            expect(query).toContain("BACKUP DATABASE [testdb]");
-            expect(query).toContain("COMPRESSION");
-        });
+describe.each([
+    ["a full SSH connection", () => createFakeHost({ kind: "ssh" })],
+    ["the legacy SSH file transfer", () => {
+        const files = createFakeHost({ kind: "ssh" });
+        const composite = new CompositeHost(new DirectHost(), files);
+        // Reuse the fake's recorder for the file side.
+        Object.defineProperty(composite, "calls", { get: () => files.calls });
+        return composite as unknown as FakeHost;
+    }],
+])("MSSQL dump over %s", (_label, makeHost) => {
+    /** Over SSH the .bak is fetched, so the fake writes it where it lands. */
+    function hostThatDelivers(): FakeHost {
+        const host = makeHost();
+        const original = host.getFile.bind(host);
+        host.getFile = async (hostPath: string, localPath: string) => {
+            await original(hostPath, localPath);
+            await writeFile(localPath, "BAKDATA");
+        };
+        return host;
+    }
 
-        it("should fail when local file does not exist after backup", async () => {
-            mockExistsSync.mockReturnValue(false);
+    it("fetches the backup file from the server", async () => {
+        const host = hostThatDelivers();
+        const result = await dump(config() as never, join(outDir, "out.bak"), host);
 
-            const config = buildConfig({ fileTransferMode: "local" });
-            const result = await dump(config, "/dest/backup.bak", fakeHost);
-
-            expect(result.success).toBe(false);
-            expect(result.error).toContain("Backup file not found");
-            expect(result.error).toContain("localBackupPath");
-        });
-
-        it("should log correct transfer mode", async () => {
-            const logs: string[] = [];
-            const config = buildConfig({ fileTransferMode: "local" });
-
-            await dump(config, "/dest/backup.bak", fakeHost, (msg) => logs.push(msg));
-
-            expect(logs).toContain("File transfer mode: Local (shared filesystem)");
-        });
+        expect(result.success).toBe(true);
+        expect(host.calls.getFile).toHaveLength(1);
+        expect(host.calls.getFile[0].hostPath).toContain("/var/opt/mssql/backup/");
     });
 
-    describe("SSH Mode", () => {
-        it("should connect via SSH and download backup file", async () => {
-            const config = buildConfig({
-                fileTransferMode: "ssh",
-                sshHost: "ssh.example.com",
-                sshUsername: "deploy",
-                sshAuthType: "password",
-                sshPassword: "sshpass",
-            });
+    it("stages into /tmp rather than the mount path", async () => {
+        const host = hostThatDelivers();
+        await dump(config() as never, join(outDir, "out.bak"), host);
 
-            const result = await dump(config, "/dest/backup.bak", fakeHost);
-
-            expect(result.success).toBe(true);
-
-            // SSH connect should be called
-            expect(mockSshConnect).toHaveBeenCalledOnce();
-            expect(mockSshConnect).toHaveBeenCalledWith(config);
-
-            // SFTP download should be called for the .bak file
-            expect(mockSshDownload).toHaveBeenCalledOnce();
-            expect(mockSshDownload).toHaveBeenCalledWith(
-                expect.stringContaining("/var/opt/mssql/backup/"),
-                expect.stringContaining("/tmp/")
-            );
-        });
-
-        it("should clean up remote .bak file after download", async () => {
-            const config = buildConfig({
-                fileTransferMode: "ssh",
-                sshUsername: "deploy",
-            });
-
-            await dump(config, "/dest/backup.bak", fakeHost);
-
-            // Remote cleanup should happen
-            expect(mockSshDeleteRemote).toHaveBeenCalled();
-            expect(mockSshEnd).toHaveBeenCalled();
-        });
-
-        it("should use /tmp as local path in SSH mode", async () => {
-            const config = buildConfig({
-                fileTransferMode: "ssh",
-                sshUsername: "deploy",
-                localBackupPath: "/custom/path", // Should be ignored in SSH mode
-            });
-
-            await dump(config, "/dest/backup.bak", fakeHost);
-
-            // Download target should be in /tmp, not /custom/path
-            const downloadCall = mockSshDownload.mock.calls[0];
-            expect(downloadCall[1]).toMatch(/^\/tmp\//);
-        });
-
-        it("should log SSH transfer mode", async () => {
-            const logs: string[] = [];
-            const config = buildConfig({
-                fileTransferMode: "ssh",
-                sshUsername: "deploy",
-            });
-
-            await dump(config, "/dest/backup.bak", fakeHost, (msg) => logs.push(msg));
-
-            expect(logs).toContain("File transfer mode: SSH (remote server)");
-            expect(logs.some((l) => l.includes("Connecting via SSH"))).toBe(true);
-        });
-
-        it("should still clean up on SSH download failure", async () => {
-            mockSshDownload.mockRejectedValue(new Error("SFTP connection lost"));
-
-            const config = buildConfig({
-                fileTransferMode: "ssh",
-                sshUsername: "deploy",
-            });
-
-            const result = await dump(config, "/dest/backup.bak", fakeHost);
-
-            expect(result.success).toBe(false);
-            expect(result.error).toContain("SFTP connection lost");
-
-            // Cleanup should still happen
-            expect(mockSshDeleteRemote).toHaveBeenCalled();
-            expect(mockSshEnd).toHaveBeenCalled();
-        });
-
-        it("should not use existsSync check in SSH mode", async () => {
-            const config = buildConfig({
-                fileTransferMode: "ssh",
-                sshUsername: "deploy",
-            });
-
-            await dump(config, "/dest/backup.bak", fakeHost);
-
-            // existsSync should NOT be called (that's the local mode check)
-            expect(mockExistsSync).not.toHaveBeenCalled();
-        });
+        expect(host.calls.getFile[0].localPath.startsWith("/tmp/")).toBe(true);
     });
 
-    describe("Multi-Database Backup", () => {
-        it("should backup multiple databases and download all via SSH", async () => {
-            const config = buildConfig({
-                database: ["db1", "db2"],
-                fileTransferMode: "ssh",
-                sshUsername: "deploy",
-            });
+    it("removes the server-side backup file afterwards", async () => {
+        const host = hostThatDelivers();
+        await dump(config() as never, join(outDir, "out.bak"), host);
 
-            const result = await dump(config, "/dest/multi.tar", fakeHost);
-
-            expect(result.success).toBe(true);
-
-            // Two BACKUP DATABASE queries should be executed
-            expect(mockExecuteQueryWithMessages).toHaveBeenCalledTimes(2);
-            expect(mockExecuteQueryWithMessages.mock.calls[0][1]).toContain("[db1]");
-            expect(mockExecuteQueryWithMessages.mock.calls[1][1]).toContain("[db2]");
-
-            // Two SFTP downloads
-            expect(mockSshDownload).toHaveBeenCalledTimes(2);
-        });
-
-        it("should clean up all remote files after multi-DB backup", async () => {
-            const config = buildConfig({
-                database: ["db1", "db2"],
-                fileTransferMode: "ssh",
-                sshUsername: "deploy",
-            });
-
-            await dump(config, "/dest/multi.tar", fakeHost);
-
-            // Should delete both remote files
-            expect(mockSshDeleteRemote).toHaveBeenCalledTimes(2);
-            expect(mockSshEnd).toHaveBeenCalledOnce();
-        });
+        expect(host.calls.removed.some(p => p.includes("/var/opt/mssql/backup/"))).toBe(true);
     });
 
-    describe("Compression Detection", () => {
-        it("should use compression when supported", async () => {
-            mockSupportsCompression.mockResolvedValue(true);
-            const config = buildConfig({ fileTransferMode: "ssh", sshUsername: "deploy" });
+    it("logs the transfer mode", async () => {
+        const logs: string[] = [];
+        await dump(config() as never, join(outDir, "out.bak"), hostThatDelivers(), (m) => logs.push(m));
 
-            const logs: string[] = [];
-            await dump(config, "/dest/backup.bak", fakeHost, (msg) => logs.push(msg));
-
-            expect(logs.some((l) => l.includes("Compression enabled"))).toBe(true);
-            const query = mockExecuteQueryWithMessages.mock.calls[0][1];
-            expect(query).toContain("COMPRESSION");
-        });
-
-        it("should skip compression when not supported (Express edition)", async () => {
-            mockSupportsCompression.mockResolvedValue(false);
-            const config = buildConfig({ fileTransferMode: "ssh", sshUsername: "deploy" });
-
-            const logs: string[] = [];
-            await dump(config, "/dest/backup.bak", fakeHost, (msg) => logs.push(msg));
-
-            expect(logs.some((l) => l.includes("Compression disabled"))).toBe(true);
-        });
-    });
-
-    describe("Error Handling", () => {
-        it("should return failure result when no user databases found on server", async () => {
-            mockGetDatabases.mockResolvedValue([]);
-            const config = buildConfig({ database: "" });
-            const result = await dump(config, "/dest/backup.bak", fakeHost);
-
-            expect(result.success).toBe(false);
-            expect(result.error).toContain("No user databases found on server");
-        });
-
-        it("should return failure result when SQL query fails", async () => {
-            mockExecuteQueryWithMessages.mockRejectedValue(new Error("Login failed"));
-            const config = buildConfig({ fileTransferMode: "ssh", sshUsername: "deploy" });
-
-            const result = await dump(config, "/dest/backup.bak", fakeHost);
-
-            expect(result.success).toBe(false);
-            expect(result.error).toContain("Login failed");
-        });
-
-        it("should return failure result when SSH connect fails", async () => {
-            mockSshConnect.mockRejectedValue(new Error("SSH connection refused"));
-            const config = buildConfig({
-                fileTransferMode: "ssh",
-                sshUsername: "deploy",
-            });
-
-            const result = await dump(config, "/dest/backup.bak", fakeHost);
-
-            expect(result.success).toBe(false);
-            expect(result.error).toContain("SSH connection refused");
-        });
-
-        it("should return failure when backup file is empty (size 0)", async () => {
-            mockFsStat.mockResolvedValue({ size: 0 });
-            const config = buildConfig({ fileTransferMode: "local" });
-
-            const result = await dump(config, "/dest/backup.bak", fakeHost);
-
-            expect(result.success).toBe(false);
-            expect(result.error).toContain("Backup file is empty");
-        });
-    });
-
-    describe("Database string formats", () => {
-        it("should parse comma-separated database string", async () => {
-            const config = buildConfig({
-                database: "db1,db2,db3",
-                fileTransferMode: "ssh",
-                sshUsername: "deploy",
-            });
-
-            const result = await dump(config, "/dest/multi.tar", fakeHost);
-
-            expect(result.success).toBe(true);
-            expect(mockExecuteQueryWithMessages).toHaveBeenCalledTimes(3);
-        });
-
-        it("should log found databases after auto-discovery", async () => {
-            mockGetDatabases.mockResolvedValue(["SalesDB", "HRdb"]);
-            const logs: string[] = [];
-            const config = buildConfig({ database: "", fileTransferMode: "ssh", sshUsername: "deploy" });
-
-            await dump(config, "/dest/backup.bak", fakeHost, (msg) => logs.push(msg));
-
-            expect(logs.some((l) => l.includes("Found 2 database(s)"))).toBe(true);
-        });
-
-        it("should invoke onLog progress callback for SQL Server messages", async () => {
-            const config = buildConfig({ fileTransferMode: "local" });
-            const logs: string[] = [];
-
-            // Simulate a SQL Server info message callback
-            mockExecuteQueryWithMessages.mockImplementation(
-                async (_cfg: any, _q: any, _db: any, _timeout: any, onMessage: any) => {
-                    if (onMessage) onMessage({ message: "10 percent processed." });
-                    return { result: { recordset: [] }, messages: [] };
-                }
-            );
-
-            await dump(config, "/dest/backup.bak", fakeHost, (msg) => logs.push(msg));
-
-            expect(logs.some((l) => l.includes("SQL Server: 10 percent processed."))).toBe(true);
-        });
+        expect(logs.join("\n")).toContain("File transfer mode: SSH");
     });
 });

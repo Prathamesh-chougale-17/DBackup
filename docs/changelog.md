@@ -9,6 +9,10 @@ All notable changes to DBackup are documented here.
 
 - **restore**: Trimming trailing slashes off a restore target path used a regular expression that runs in quadratic time on a long run of slashes, letting a crafted target path occupy the server. Reported by CodeQL as `js/polynomial-redos`.
 
+### ✨ Features
+
+- **mssql**: SQL Server sources can now use **SSH connection mode**, like every other database source. The connection to SQL Server is tunnelled through SSH, so the SQL Server port no longer has to be reachable from DBackup, and backup files travel over that same connection with no separate file transfer setup. Certificate validation stays intact through the tunnel. The existing **File Transfer** setting is untouched and keeps working exactly as before for sources that connect directly, so no existing SQL Server source needs any change.
+
 ### 🎨 Improvements
 
 - **paths**: Slash trimming moved into one shared helper that cannot backtrack, replacing the three hand-rolled copies that had drifted apart.

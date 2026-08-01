@@ -184,10 +184,23 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 
         async forwardPort(remoteHost, remotePort): Promise<PortForward> {
             calls.forwards.push({ host: remoteHost, port: remotePort });
+
+            // Mirrors DirectHost: with nothing to tunnel through, the original
+            // address is handed back unchanged rather than a loopback stand-in.
+            if ((options.kind ?? "direct") !== "ssh") {
+                return {
+                    host: remoteHost,
+                    port: remotePort,
+                    forwarded: false,
+                    lastError: null,
+                    close: async () => {},
+                };
+            }
+
             return {
                 host: "127.0.0.1",
                 port: 15000 + calls.forwards.length,
-                forwarded: (options.kind ?? "direct") === "ssh",
+                forwarded: true,
                 lastError: null,
                 close: async () => {},
             };

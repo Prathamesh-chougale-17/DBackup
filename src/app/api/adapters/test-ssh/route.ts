@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { registry } from "@/lib/core/registry";
-import { resolveTransport, type TransportSpec, type SshConnectionConfig } from "@/lib/transport";
+import { createHost, resolveTransport, type TransportSpec, type SshConnectionConfig } from "@/lib/transport";
 import type { DatabaseAdapter } from "@/lib/core/interfaces";
 import { headers } from "next/headers";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
-import { MssqlSshTransfer } from "@/lib/adapters/database/mssql/ssh-transfer";
+import { checkBackupPath } from "@/lib/adapters/database/mssql/preflight";
 import { MSSQLConfig } from "@/lib/adapters/definitions";
 import { SshClient } from "@/lib/ssh";
 import { overlayCredentialsOnConfig } from "@/lib/adapters/config-resolver";
@@ -88,8 +88,8 @@ export async function POST(req: NextRequest) {
         const sshPort = spec.ssh.port ?? 22;
 
         // MSSQL uses SFTP-based SSH test (backup path check)
-        if (resolvedConfig.fileTransferMode === "ssh") {
-            return testMssqlSsh(resolvedConfig as MSSQLConfig, sshHost, sshPort);
+        if (resolvedConfig.fileTransferMode === "ssh" || resolvedConfig.connectionMode === "ssh") {
+            return testMssqlSsh(resolvedConfig as MSSQLConfig, spec, sshHost, sshPort);
         }
 
         // Generic SSH connection test for all other adapters
@@ -140,25 +140,26 @@ async function testGenericSsh(sshConfig: SshConnectionConfig, sshHost: string, s
 /**
  * MSSQL-specific SSH test: SFTP connect + backup path check.
  */
-async function testMssqlSsh(config: MSSQLConfig, sshHost: string, sshPort: number) {
-    const sshTransfer = new MssqlSshTransfer();
+async function testMssqlSsh(
+    config: MSSQLConfig,
+    spec: TransportSpec,
+    sshHost: string,
+    sshPort: number,
+) {
+    const backupPath = config.backupPath || "/var/opt/mssql/backup";
+    const host = createHost(spec);
 
     try {
-        await sshTransfer.connect(config);
+        const result = await checkBackupPath(host, backupPath);
 
-        const backupPath = config.backupPath || "/var/opt/mssql/backup";
-        const pathResult = await sshTransfer.testBackupPath(backupPath);
-
-        sshTransfer.end();
-
-        if (!pathResult.readable) {
+        if (!result.readable) {
             return NextResponse.json({
                 success: false,
-                message: `SSH connection to ${sshHost}:${sshPort} successful, but backup path is not accessible: ${backupPath}`,
+                message: `SSH connection to ${sshHost}:${sshPort} successful, but backup path is not accessible: ${backupPath}${result.error ? ` (${result.error})` : ""}`,
             });
         }
 
-        if (!pathResult.writable) {
+        if (!result.writable) {
             return NextResponse.json({
                 success: false,
                 message: `SSH connection to ${sshHost}:${sshPort} successful, but backup path is read-only: ${backupPath}`,
@@ -170,17 +171,10 @@ async function testMssqlSsh(config: MSSQLConfig, sshHost: string, sshPort: numbe
             message: `SSH connection to ${sshHost}:${sshPort} successful - backup path ${backupPath} is readable and writable`,
         });
     } catch (connectError: unknown) {
-        sshTransfer.end();
-        const message =
-            connectError instanceof Error
-                ? connectError.message
-                : "SSH connection failed";
-
+        const message = connectError instanceof Error ? connectError.message : "SSH connection failed";
         log.warn("SSH test failed", { sshHost }, wrapError(connectError));
-
-        return NextResponse.json({
-            success: false,
-            message,
-        });
+        return NextResponse.json({ success: false, message });
+    } finally {
+        await host.dispose().catch(() => {});
     }
 }

@@ -640,9 +640,26 @@ export function DatabaseFormContent({
 
             {isMSSQL && (
                 <TabsContent value="filetransfer" className="space-y-4 pt-4">
-                    <FieldList keys={['backupPath', 'fileTransferMode']} adapter={adapter} />
+                    {/* In SSH connection mode the .bak file travels over the same
+                        connection, so there is nothing left to choose. */}
+                    <FieldList keys={connectionMode === "ssh" ? ['backupPath'] : ['backupPath', 'fileTransferMode']} adapter={adapter} />
 
-                    {fileTransferMode === "ssh" && (
+                    {connectionMode === "ssh" && (
+                        <>
+                            <SshCredentialPickerSlot
+                                adapter={adapter}
+                                sshCredentialId={sshCredentialId}
+                                onSshChange={onSshChange}
+                            />
+                            <SshConfigSection adapter={adapter} sshAuthType={sshAuthType} sshCredentialId={sshCredentialId} />
+                            <p className="text-sm text-muted-foreground">
+                                Backup files travel over this same SSH connection, and the SQL Server port
+                                does not need to be reachable from DBackup.
+                            </p>
+                        </>
+                    )}
+
+                    {connectionMode !== "ssh" && fileTransferMode === "ssh" && (
                         <>
                             <SshCredentialPickerSlot
                                 adapter={adapter}
@@ -652,7 +669,7 @@ export function DatabaseFormContent({
                             <SshConfigSection adapter={adapter} sshAuthType={sshAuthType} sshCredentialId={sshCredentialId} />
                         </>
                     )}
-                    {fileTransferMode === "local" && (
+                    {connectionMode !== "ssh" && fileTransferMode === "local" && (
                         <div className="space-y-4">
                             <FieldList keys={['localBackupPath']} adapter={adapter} />
                             <p className="text-sm text-muted-foreground">

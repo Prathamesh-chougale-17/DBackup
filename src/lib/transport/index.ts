@@ -28,5 +28,5 @@ export {
 export { BaseHost } from "./base-host";
 export { DirectHost } from "./direct-host";
 export { SshHost } from "./ssh-host";
-export { CompositeHost } from "./composite-host";
+export { CompositeHost, isCompositeHost } from "./composite-host";
 export { shellEscape, buildRemoteCommand } from "./ssh-escape";
