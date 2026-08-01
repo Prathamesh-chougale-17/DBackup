@@ -12,10 +12,12 @@ All notable changes to DBackup are documented here.
 ### 🎨 Improvements
 
 - **paths**: Slash trimming moved into one shared helper that cannot backtrack, replacing the three hand-rolled copies that had drifted apart.
+- **ssh**: Added a transport layer that models direct and SSH connections as interchangeable implementations of one interface. Commands are now described as argument lists rather than assembled shell strings, so remote quoting lives in a single tested place instead of being repeated at every call site.
 
 ### 🧪 Tests
 
 - **paths**: Added coverage that slash trimming matches what the regular expressions produced and stays linear on a pathological run of slashes.
+- **ssh**: New transport test suite covering both connection modes. Argument quoting is verified by round-tripping hostile values (command substitution, embedded quotes, newlines, non-ASCII) through a real shell and comparing the recovered arguments against the originals.
 
 ### 🐳 Docker
 
