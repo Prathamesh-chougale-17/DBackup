@@ -25,6 +25,7 @@ All notable changes to DBackup are documented here.
 - **redis**: Restore preparation on an SSH source queried the wrong server. It ran `redis-cli` from DBackup against the host field, which in SSH mode describes the database as seen from the SSH server, so the reported data directory and RDB filename were wrong or the step failed outright.
 - **redis**: Browsing keys over SSH no longer breaks on key names containing quotes or spaces. The key list was pasted into a remote shell command and is now passed as separate arguments.
 - **firebird**: The health check on an SSH source reported the connection as healthy whenever SSH itself worked, even when the Firebird server behind it was down. It now opens the database port as reachable from the SSH host.
+- **sqlite**: Browsing tables over SSH no longer fails on a database path or table name containing a quote or a space. The path and the query were assembled into a remote shell command and are now passed as separate arguments.
 
 ### 🧪 Tests
 

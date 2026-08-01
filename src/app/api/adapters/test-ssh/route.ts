@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import { registry } from "@/lib/core/registry";
+import { resolveTransport, type TransportSpec, type SshConnectionConfig } from "@/lib/transport";
+import type { DatabaseAdapter } from "@/lib/core/interfaces";
 import { headers } from "next/headers";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
 import { MssqlSshTransfer } from "@/lib/adapters/database/mssql/ssh-transfer";
 import { MSSQLConfig } from "@/lib/adapters/definitions";
 import { SshClient } from "@/lib/ssh";
-import { extractSshConfig } from "@/lib/ssh";
 import { overlayCredentialsOnConfig } from "@/lib/adapters/config-resolver";
 import { registerAdapters } from "@/lib/adapters";
 import { logger } from "@/lib/logging/logger";
@@ -57,32 +59,33 @@ export async function POST(req: NextRequest) {
             }
         }
 
-        // Normalize: SQLite uses mode:"ssh" with unprefixed SSH fields (host/username/authType/...)
-        // instead of the standard connectionMode:"ssh" with sshHost/sshUsername/... convention.
-        // Lift the unprefixed fields to the prefixed counterparts so that extractSshConfig and
-        // the username check below work uniformly for all adapters.
-        if (resolvedConfig.mode === "ssh" && !resolvedConfig.sshUsername && resolvedConfig.username) {
-            resolvedConfig = {
-                ...resolvedConfig,
-                sshHost: resolvedConfig.sshHost ?? resolvedConfig.host,
-                sshPort: resolvedConfig.sshPort ?? resolvedConfig.port,
-                sshUsername: resolvedConfig.username,
-                sshAuthType: resolvedConfig.sshAuthType ?? resolvedConfig.authType,
-                ...(resolvedConfig.password !== undefined && { sshPassword: resolvedConfig.sshPassword ?? resolvedConfig.password }),
-                ...(resolvedConfig.privateKey !== undefined && { sshPrivateKey: resolvedConfig.sshPrivateKey ?? resolvedConfig.privateKey }),
-                ...(resolvedConfig.passphrase !== undefined && { sshPassphrase: resolvedConfig.sshPassphrase ?? resolvedConfig.passphrase }),
-            };
-        }
-
-        if (!resolvedConfig.sshUsername) {
+        // Which SSH parameters a config carries is the adapter's own business:
+        // SQLite stores mode/host/username where everyone else stores
+        // connectionMode/sshHost/sshUsername. Asking the adapter's resolver
+        // replaces the hand-rolled field lifting that used to live here.
+        const adapter = adapterId ? registry.get(adapterId) : undefined;
+        let spec: TransportSpec;
+        try {
+            spec = resolveTransport(
+                { id: adapterId ?? "ssh", transport: (adapter as DatabaseAdapter | undefined)?.transport },
+                { ...resolvedConfig, connectionMode: "ssh" },
+            );
+        } catch (resolveError: unknown) {
             return NextResponse.json(
-                { success: false, message: "SSH username is required" },
-                { status: 400 }
+                { success: false, message: resolveError instanceof Error ? resolveError.message : "Invalid SSH configuration" },
+                { status: 400 },
             );
         }
 
-        const sshHost = resolvedConfig.sshHost || resolvedConfig.host;
-        const sshPort = resolvedConfig.sshPort || 22;
+        if (spec.kind !== "ssh") {
+            return NextResponse.json(
+                { success: false, message: "SSH username is required" },
+                { status: 400 },
+            );
+        }
+
+        const sshHost = spec.ssh.host;
+        const sshPort = spec.ssh.port ?? 22;
 
         // MSSQL uses SFTP-based SSH test (backup path check)
         if (resolvedConfig.fileTransferMode === "ssh") {
@@ -90,7 +93,7 @@ export async function POST(req: NextRequest) {
         }
 
         // Generic SSH connection test for all other adapters
-        return testGenericSsh(resolvedConfig, sshHost, sshPort);
+        return testGenericSsh(spec.ssh, sshHost, sshPort);
     } catch (error: unknown) {
         log.error("SSH test route error", {}, wrapError(error));
         const message =
@@ -105,15 +108,7 @@ export async function POST(req: NextRequest) {
 /**
  * Generic SSH test: connect and run a simple echo command.
  */
-async function testGenericSsh(config: Record<string, any>, sshHost: string, sshPort: number) {
-    const sshConfig = extractSshConfig({ ...config, connectionMode: "ssh" });
-    if (!sshConfig) {
-        return NextResponse.json(
-            { success: false, message: "Invalid SSH configuration" },
-            { status: 400 }
-        );
-    }
-
+async function testGenericSsh(sshConfig: SshConnectionConfig, sshHost: string, sshPort: number) {
     const ssh = new SshClient();
     try {
         await ssh.connect(sshConfig);

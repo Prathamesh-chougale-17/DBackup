@@ -1,383 +1,93 @@
-import { createFakeHost } from "@/lib/testing/fake-host";
-
-const fakeHost = createFakeHost();
-
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { SQLiteConfig } from "@/lib/adapters/definitions";
 
-// --- Hoisted mocks ---
+import { createFakeHost, type FakeHost } from "@/lib/testing/fake-host";
+import { restore, prepareRestore } from "@/lib/adapters/database/sqlite/restore";
+import type { HostKind } from "@/lib/transport/types";
 
-const {
-    mockSpawnProcess,
-    mockFsExistsSync,
-    mockFsCopyFileSync,
-    mockFsUnlinkSync,
-    mockFsCreateReadStream,
-    mockFsStatPromise,
-    mockSshConnect,
-    mockSshExec,
-    mockSshExecStream,
-    mockSshUploadFile,
-    mockSshEnd,
-    mockExtractSqliteSshConfig,
-    mockRandomUUID,
-    PassThrough,
-} = vi.hoisted(() => {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { PassThrough } = require("stream") as { PassThrough: typeof import("stream").PassThrough };
-    return {
-        mockSpawnProcess: vi.fn(),
-        mockFsExistsSync: vi.fn(),
-        mockFsCopyFileSync: vi.fn(),
-        mockFsUnlinkSync: vi.fn(),
-        mockFsCreateReadStream: vi.fn(),
-        mockFsStatPromise: vi.fn(),
-        mockSshConnect: vi.fn(),
-        mockSshExec: vi.fn(),
-        mockSshExecStream: vi.fn(),
-        mockSshUploadFile: vi.fn(),
-        mockSshEnd: vi.fn(),
-        mockExtractSqliteSshConfig: vi.fn(),
-        mockRandomUUID: vi.fn(() => "test-uuid-1234"),
-        PassThrough,
-    };
-});
+const baseConfig = { mode: "local", path: "/data/app.sqlite" };
 
-vi.mock("child_process", () => ({
-    spawn: (...args: any[]) => mockSpawnProcess(...args),
-    default: { spawn: (...args: any[]) => mockSpawnProcess(...args) },
-}));
-
-vi.mock("fs", () => ({
-    default: {
-        existsSync: (...args: any[]) => mockFsExistsSync(...args),
-        copyFileSync: (...args: any[]) => mockFsCopyFileSync(...args),
-        unlinkSync: (...args: any[]) => mockFsUnlinkSync(...args),
-        createReadStream: (...args: any[]) => mockFsCreateReadStream(...args),
-        promises: { stat: (...args: any[]) => mockFsStatPromise(...args) },
-    },
-    existsSync: (...args: any[]) => mockFsExistsSync(...args),
-    copyFileSync: (...args: any[]) => mockFsCopyFileSync(...args),
-    unlinkSync: (...args: any[]) => mockFsUnlinkSync(...args),
-    createReadStream: (...args: any[]) => mockFsCreateReadStream(...args),
-    promises: { stat: (...args: any[]) => mockFsStatPromise(...args) },
-}));
-
-vi.mock("@/lib/ssh", () => ({
-    SshClient: class {
-        connect = (...args: any[]) => mockSshConnect(...args);
-        exec = (...args: any[]) => mockSshExec(...args);
-        execStream = (...args: any[]) => mockSshExecStream(...args);
-        uploadFile = (...args: any[]) => mockSshUploadFile(...args);
-        end = () => mockSshEnd();
-    },
-    shellEscape: vi.fn((s: string) => s),
-    extractSqliteSshConfig: (...args: any[]) => mockExtractSqliteSshConfig(...args),
-}));
-
-vi.mock("crypto", () => ({
-    randomUUID: (...args: any[]) => (mockRandomUUID as (...a: any[]) => any)(...args),
-    default: { randomUUID: (...args: any[]) => (mockRandomUUID as (...a: any[]) => any)(...args) },
-}));
-
-import { prepareRestore, restore } from "@/lib/adapters/database/sqlite/restore";
-
-// -------------------------------------------------------------------------
-// Helpers
-// -------------------------------------------------------------------------
-
-function buildConfig(overrides: Partial<SQLiteConfig> = {}): SQLiteConfig {
-    return {
-        mode: "local",
-        path: "/data/db.sqlite",
-        sqliteBinaryPath: "sqlite3",
-        ...overrides,
-    } as SQLiteConfig;
+/** The sqlite3 dot command a recorded call issued, if any. */
+function dotCommandOf(argv: string[]): string | undefined {
+    return argv.find(a => a.startsWith("."));
 }
 
-/** Creates a mock spawn child process. */
-function makeSpawnProcess(exitCode = 0, stderrData?: string) {
-    const proc = new PassThrough() as any;
-    proc.stdout = new PassThrough();
-    proc.stderr = new PassThrough();
-    proc.stdin = new PassThrough();
-
-    process.nextTick(() => {
-        if (stderrData) proc.stderr.emit("data", Buffer.from(stderrData));
-        proc.emit("close", exitCode);
+function restoreHost(kind: HostKind, opts: { files?: Record<string, number>; code?: number; stderr?: string } = {}): FakeHost {
+    return createFakeHost({
+        kind,
+        files: opts.files,
+        onExec: (argv) => dotCommandOf(argv) ? { code: opts.code, stderr: opts.stderr } : { code: 0 },
     });
-
-    return proc;
 }
 
-/** Creates a mock SSH stream. */
-function makeSshStream(exitCode = 0, stderrData?: string) {
-    const stream = new PassThrough() as any;
-    stream.stderr = new PassThrough();
+describe.each<HostKind>(["direct", "ssh"])("SQLite restore over a %s host", (kind) => {
+    beforeEach(() => vi.clearAllMocks());
 
-    process.nextTick(() => {
-        if (stderrData) stream.stderr.emit("data", Buffer.from(stderrData));
-        stream.emit("exit", exitCode, null);
+    it("needs no preparation", async () => {
+        await expect(prepareRestore(baseConfig as never, [], createFakeHost({ kind })))
+            .resolves.toBeUndefined();
     });
 
-    return stream;
-}
-
-// -------------------------------------------------------------------------
-// prepareRestore()
-// -------------------------------------------------------------------------
-
-describe("SQLite prepareRestore()", () => {
-    it("resolves without error (no-op)", async () => {
-        await expect(prepareRestore(buildConfig(), [], fakeHost)).resolves.toBeUndefined();
-    });
-});
-
-// -------------------------------------------------------------------------
-// restore() - local mode
-// -------------------------------------------------------------------------
-
-describe("SQLite restore() - local mode", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockFsStatPromise.mockResolvedValue({ size: 2048 });
-        mockFsExistsSync.mockReturnValue(false);
-    });
-
-    function makeReadStream() {
-        const stream = new PassThrough() as any;
-        process.nextTick(() => stream.end());
-        return stream;
-    }
-
-    it("returns success when sqlite3 exits with code 0", async () => {
-        mockSpawnProcess.mockReturnValue(makeSpawnProcess(0));
-
-        const result = await restore(buildConfig(), "/tmp/backup.sql", fakeHost);
+    it("restores through the .restore dot command", async () => {
+        const host = restoreHost(kind);
+        const result = await restore(baseConfig as never, "/tmp/in.sqlite", host);
 
         expect(result.success).toBe(true);
-        expect(mockSpawnProcess).toHaveBeenCalledWith("sqlite3", ["/data/db.sqlite", ".restore /tmp/backup.sql"]);
+        const restoreCall = host.calls.exec.find(a => dotCommandOf(a)?.startsWith(".restore"))!;
+        expect(restoreCall[1]).toBe("/data/app.sqlite");
     });
 
-    it("creates safety backup and removes existing DB file before restore", async () => {
-        mockFsExistsSync.mockReturnValue(true);
-        mockFsCopyFileSync.mockReturnValue(undefined);
-        mockFsUnlinkSync.mockReturnValue(undefined);
-        mockFsCreateReadStream.mockReturnValue(makeReadStream());
-        mockSpawnProcess.mockReturnValue(makeSpawnProcess(0));
+    it("moves an existing database aside before replacing it", async () => {
+        const host = restoreHost(kind, { files: { "/data/app.sqlite": 4096 } });
+        await restore(baseConfig as never, "/tmp/in.sqlite", host);
 
-        await restore(buildConfig({ path: "/data/db.sqlite" }), "/tmp/backup.sql", fakeHost);
-
-        expect(mockFsCopyFileSync).toHaveBeenCalledWith(
-            "/data/db.sqlite",
-            expect.stringMatching(/\.bak-\d+$/),
-        );
-        expect(mockFsUnlinkSync).toHaveBeenCalledWith("/data/db.sqlite");
+        const copy = host.calls.exec.find(a => a[0] === "cp")!;
+        expect(copy[1]).toBe("/data/app.sqlite");
+        expect(copy[2]).toMatch(/^\/data\/app\.sqlite\.bak-\d+$/);
+        expect(host.calls.exec.some(a => a[0] === "rm")).toBe(true);
     });
 
-    it("calls onProgress during restore", async () => {
-        mockFsStatPromise.mockResolvedValue({ size: 1000 });
-        const readStream = new PassThrough() as any;
-        mockFsCreateReadStream.mockReturnValue(readStream);
-        mockSpawnProcess.mockReturnValue(makeSpawnProcess(0));
+    it("skips the safety copy when there is nothing to replace", async () => {
+        const host = restoreHost(kind);
+        await restore(baseConfig as never, "/tmp/in.sqlite", host);
 
-        const progressValues: number[] = [];
-        const restorePromise = restore(buildConfig(), "/tmp/backup.sql", fakeHost, undefined, (p) => progressValues.push(p));
+        expect(host.calls.exec.some(a => a[0] === "cp")).toBe(false);
+    });
 
-        process.nextTick(() => {
-            readStream.emit("data", Buffer.alloc(500));
-            readStream.emit("data", Buffer.alloc(500));
-            readStream.end();
+    it("stops when the existing database cannot be moved aside", async () => {
+        const host = createFakeHost({
+            kind,
+            files: { "/data/app.sqlite": 4096 },
+            onExec: (argv) => argv[0] === "cp" ? { code: 1, stderr: "permission denied" } : { code: 0 },
         });
 
-        await restorePromise;
-
-        expect(progressValues.length).toBeGreaterThan(0);
-        expect(progressValues[progressValues.length - 1]).toBe(100);
-    });
-
-    it("returns failure when sqlite3 exits with non-zero code", async () => {
-        mockFsCreateReadStream.mockReturnValue(makeReadStream());
-        mockSpawnProcess.mockReturnValue(makeSpawnProcess(1));
-
-        const result = await restore(buildConfig(), "/tmp/backup.sql", fakeHost);
+        const result = await restore(baseConfig as never, "/tmp/in.sqlite", host);
 
         expect(result.success).toBe(false);
-        expect(result.error).toContain("failed with code 1");
+        expect(result.error).toContain("permission denied");
+        // The original must still be there: nothing was removed.
+        expect(host.calls.exec.some(a => a[0] === "rm")).toBe(false);
     });
 
-    it("returns failure when spawn emits an error", async () => {
-        mockFsCreateReadStream.mockReturnValue(makeReadStream());
-
-        const proc = new PassThrough() as any;
-        proc.stdout = new PassThrough();
-        proc.stderr = new PassThrough();
-        proc.stdin = new PassThrough();
-        process.nextTick(() => proc.emit("error", new Error("spawn ENOENT")));
-        mockSpawnProcess.mockReturnValue(proc);
-
-        const result = await restore(buildConfig(), "/tmp/backup.sql", fakeHost);
+    it("fails when sqlite3 exits non-zero", async () => {
+        const host = restoreHost(kind, { code: 1, stderr: "not a database" });
+        const result = await restore(baseConfig as never, "/tmp/in.sqlite", host);
 
         expect(result.success).toBe(false);
-        expect(result.error).toContain("spawn ENOENT");
+        expect(result.error).toContain("not a database");
     });
 
-    it("includes timestamps and logs in result", async () => {
-        mockFsCreateReadStream.mockReturnValue(makeReadStream());
-        mockSpawnProcess.mockReturnValue(makeSpawnProcess(0));
+    it("reports progress through to completion", async () => {
+        const seen: number[] = [];
+        await restore(baseConfig as never, "/tmp/in.sqlite", restoreHost(kind), undefined, (p) => seen.push(p));
 
-        const result = await restore(buildConfig(), "/tmp/backup.sql", fakeHost);
-
-        expect(result.startedAt).toBeInstanceOf(Date);
-        expect(result.completedAt).toBeInstanceOf(Date);
-        expect(Array.isArray(result.logs)).toBe(true);
+        expect(seen).toContain(50);
+        expect(seen).toContain(100);
     });
-});
 
-// -------------------------------------------------------------------------
-// restore() - invalid mode
-// -------------------------------------------------------------------------
-
-describe("SQLite restore() - invalid mode", () => {
-    it("returns failure for unsupported mode", async () => {
-        const config = buildConfig();
-        (config as any).mode = "ftp";
-
-        const result = await restore(config, "/tmp/backup.sql", fakeHost);
+    it("rejects a call made without a transport", async () => {
+        const result = await restore(baseConfig as never, "/tmp/in.sqlite", undefined as never);
 
         expect(result.success).toBe(false);
-        expect(result.error).toContain("Invalid mode");
-    });
-});
-
-// -------------------------------------------------------------------------
-// restore() - ssh mode
-// -------------------------------------------------------------------------
-
-describe("SQLite restore() - ssh mode", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockFsStatPromise.mockResolvedValue({ size: 1024 });
-    });
-
-    function buildSshConfig(overrides: Partial<SQLiteConfig> = {}): SQLiteConfig {
-        return buildConfig({ mode: "ssh", host: "host.example", username: "user", ...overrides });
-    }
-
-    it("returns failure when SSH config is missing", async () => {
-        mockExtractSqliteSshConfig.mockReturnValue(null);
-
-        const result = await restore(buildSshConfig(), "/tmp/backup.sql", fakeHost);
-
-        expect(result.success).toBe(false);
-        expect(result.error).toContain("SSH host and username are required");
-    });
-
-    it("returns success on successful SSH restore", async () => {
-        mockExtractSqliteSshConfig.mockReturnValue({ host: "host.example", username: "user" });
-        mockSshConnect.mockResolvedValue(undefined);
-        mockSshExec
-            .mockResolvedValueOnce({ stdout: "Backed up and removed old DB", code: 0 }) // backup cmd
-            .mockResolvedValueOnce({ stdout: "1024", code: 0 }) // size check
-            .mockResolvedValue({ stdout: "", code: 0 }); // cleanup rm -f
-        mockSshUploadFile.mockResolvedValue(undefined);
-
-        const stream = makeSshStream(0);
-        mockSshExecStream.mockImplementation((_cmd: string, cb: any) => cb(null, stream));
-
-        const result = await restore(buildSshConfig(), "/tmp/backup.sql", fakeHost);
-
-        expect(result.success).toBe(true);
-        expect(mockSshEnd).toHaveBeenCalled();
-    });
-
-    it("calls onProgress during SSH restore", async () => {
-        mockExtractSqliteSshConfig.mockReturnValue({ host: "host.example", username: "user" });
-        mockSshConnect.mockResolvedValue(undefined);
-        mockSshExec
-            .mockResolvedValueOnce({ stdout: "", code: 0 }) // backup cmd
-            .mockResolvedValueOnce({ stdout: "1024", code: 0 }) // size check
-            .mockResolvedValue({ stdout: "", code: 0 }); // cleanup
-        mockSshUploadFile.mockResolvedValue(undefined);
-
-        const stream = makeSshStream(0);
-        mockSshExecStream.mockImplementation((_cmd: string, cb: any) => cb(null, stream));
-
-        const progressValues: number[] = [];
-        await restore(buildSshConfig(), "/tmp/backup.sql", fakeHost, undefined, (p) => progressValues.push(p));
-
-        expect(progressValues).toContain(50);
-        expect(progressValues).toContain(100);
-    });
-
-    it("throws when upload size mismatches", async () => {
-        mockExtractSqliteSshConfig.mockReturnValue({ host: "host.example", username: "user" });
-        mockSshConnect.mockResolvedValue(undefined);
-        mockFsStatPromise.mockResolvedValue({ size: 2048 });
-        mockSshExec
-            .mockResolvedValueOnce({ stdout: "", code: 0 }) // backup cmd
-            .mockResolvedValueOnce({ stdout: "1024", code: 0 }); // wrong remote size
-        mockSshUploadFile.mockResolvedValue(undefined);
-        // cleanup
-        mockSshExec.mockResolvedValue({ stdout: "", code: 0 });
-
-        const result = await restore(buildSshConfig(), "/tmp/backup.sql", fakeHost);
-
-        expect(result.success).toBe(false);
-        expect(result.error).toContain("mismatch");
-    });
-
-    it("returns failure when SSH stream exits with non-zero code", async () => {
-        mockExtractSqliteSshConfig.mockReturnValue({ host: "host.example", username: "user" });
-        mockSshConnect.mockResolvedValue(undefined);
-        mockSshExec
-            .mockResolvedValueOnce({ stdout: "", code: 0 }) // backup cmd
-            .mockResolvedValueOnce({ stdout: "1024", code: 0 }) // size check
-            .mockResolvedValueOnce({ stdout: "", stderr: "restore failed", code: 1 }) // restore cmd - fails
-            .mockResolvedValue({ stdout: "", code: 0 }); // cleanup
-        mockSshUploadFile.mockResolvedValue(undefined);
-
-        const result = await restore(buildSshConfig(), "/tmp/backup.sql", fakeHost);
-
-        expect(result.success).toBe(false);
-        expect(result.error).toContain("code 1");
-    });
-
-    it("includes signal in error message when SSH stream exits with signal", async () => {
-        mockExtractSqliteSshConfig.mockReturnValue({ host: "host.example", username: "user" });
-        mockSshConnect.mockResolvedValue(undefined);
-        mockSshExec
-            .mockResolvedValueOnce({ stdout: "", code: 0 }) // backup cmd
-            .mockResolvedValueOnce({ stdout: "1024", code: 0 }) // size check
-            .mockResolvedValueOnce({ stdout: "", stderr: "process killed: SIGTERM", code: 1 }) // restore cmd - fails
-            .mockResolvedValue({ stdout: "", code: 0 }); // cleanup
-        mockSshUploadFile.mockResolvedValue(undefined);
-
-        const result = await restore(buildSshConfig(), "/tmp/backup.sql", fakeHost);
-
-        expect(result.success).toBe(false);
-        expect(result.error).toContain("SIGTERM");
-    });
-
-    it("cleans up temp file even when restore fails", async () => {
-        mockExtractSqliteSshConfig.mockReturnValue({ host: "host.example", username: "user" });
-        mockSshConnect.mockResolvedValue(undefined);
-        mockSshExec
-            .mockResolvedValueOnce({ stdout: "", code: 0 }) // backup cmd
-            .mockResolvedValueOnce({ stdout: "1024", code: 0 }) // size check
-            .mockResolvedValue({ stdout: "", code: 0 }); // cleanup
-        mockSshUploadFile.mockResolvedValue(undefined);
-
-        mockSshExecStream.mockImplementation((_cmd: string, cb: any) =>
-            cb(new Error("exec failed"), null),
-        );
-
-        await restore(buildSshConfig(), "/tmp/backup.sql", fakeHost);
-
-        // cleanup rm -f should still be called via finally block
-        const rmCall = (mockSshExec.mock.calls as any[]).find(
-            (c: any[]) => typeof c[0] === "string" && c[0].includes("rm -f"),
-        );
-        expect(rmCall).toBeDefined();
+        expect(result.error).toContain("requires an execution host");
     });
 });

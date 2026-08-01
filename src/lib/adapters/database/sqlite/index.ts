@@ -4,6 +4,7 @@ import { dump } from "./dump";
 import { restore, prepareRestore } from "./restore";
 import { test, getDatabases, getDatabasesWithStats } from "./connection";
 import { getTables, getTableData } from "./browser";
+import { sqliteTransport } from "./transport";
 
 export const SQLiteAdapter: DatabaseAdapter = {
     id: "sqlite",
@@ -11,6 +12,8 @@ export const SQLiteAdapter: DatabaseAdapter = {
     name: "SQLite",
     configSchema: SQLiteSchema,
     credentials: { ssh: "SSH_KEY" },
+    // SQLite stores mode/host/username rather than connectionMode/sshHost/sshUsername.
+    transport: sqliteTransport,
     dump,
     restore,
     prepareRestore,
