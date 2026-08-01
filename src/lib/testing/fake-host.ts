@@ -60,6 +60,12 @@ export interface FakeHost extends ExecutionHost {
     readonly calls: FakeHostCalls;
 }
 
+/** Drop keys whose value is undefined so they do not override defaults. */
+function definedOnly<T extends object>(value: T | undefined): Partial<T> {
+    if (!value) return {};
+    return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
+
 export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
     const calls: FakeHostCalls = {
         exec: [],
@@ -86,12 +92,15 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
         async exec(argv, execOptions) {
             calls.exec.push([...argv]);
             const result = options.onExec?.(argv, execOptions);
-            return { stdout: "", stderr: "", code: 0, ...result };
+            // Explicit undefined fields must not clobber the defaults: a handler
+            // that returns { stdout, code: undefined } means "successful exit",
+            // not "no exit code".
+            return { stdout: "", stderr: "", code: 0, ...definedOnly(result) };
         },
 
         async spawn(argv, spawnOptions): Promise<HostProcess> {
             calls.spawn.push([...argv]);
-            const result = options.onSpawn?.(argv, spawnOptions) ?? {};
+            const result = definedOnly(options.onSpawn?.(argv, spawnOptions));
 
             const stdout = new PassThrough();
             const stderr = new PassThrough();

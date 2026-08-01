@@ -1,288 +1,148 @@
-import { createFakeHost } from "@/lib/testing/fake-host";
-
-const fakeHost = createFakeHost();
-
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { RedisConfig } from "@/lib/adapters/definitions";
 
-// --- Hoisted mocks ---
-
-const {
-    mockExecFileCb,
-    mockFsStat,
-} = vi.hoisted(() => ({
-    mockExecFileCb: vi.fn(),
-    mockFsStat: vi.fn(),
-}));
-
-// restore.ts uses util.promisify(execFile). Mock execFile so promisify wraps the mock.
-vi.mock("child_process", () => ({
-    execFile: mockExecFileCb,
-    default: { execFile: mockExecFileCb },
-}));
+const { mockFsStat } = vi.hoisted(() => ({ mockFsStat: vi.fn() }));
 
 vi.mock("fs/promises", () => ({
-    default: { stat: (...args: any[]) => mockFsStat(...args) },
-    stat: (...args: any[]) => mockFsStat(...args),
+    default: { stat: (...args: unknown[]) => mockFsStat(...args) },
+    stat: (...args: unknown[]) => mockFsStat(...args),
 }));
 
-vi.mock("@/lib/logging/logger", () => ({
-    logger: {
-        child: vi.fn().mockReturnValue({
-            info: vi.fn(),
-            error: vi.fn(),
-            warn: vi.fn(),
-            debug: vi.fn(),
-        }),
-    },
-}));
+import { createFakeHost, type FakeHost } from "@/lib/testing/fake-host";
+import { restore, prepareRestore } from "@/lib/adapters/database/redis/restore";
+import type { HostKind } from "@/lib/transport/types";
 
-import { prepareRestore, restore } from "@/lib/adapters/database/redis/restore";
+/**
+ * Redis has no remote RDB restore, so `restore()` is a guidance flow: it reads
+ * the server's data directory and filename and prints the manual steps.
+ *
+ * Both this and prepareRestore used to run redis-cli LOCALLY against
+ * `config.host`, which in SSH mode is meant to be resolved from the SSH server.
+ * They now go through the transport, so an SSH source is actually queried.
+ */
 
-// -------------------------------------------------------------------------
-// Helpers
-// -------------------------------------------------------------------------
+const baseConfig = {
+    host: "redis.internal",
+    port: 6379,
+    password: "secret",
+    database: 0,
+};
 
-type RedisRestoreConfig = RedisConfig & { detectedVersion?: string };
-
-function buildConfig(overrides: Partial<RedisRestoreConfig> = {}): RedisRestoreConfig {
-    return {
-        host: "localhost",
-        port: 6379,
-        ...overrides,
-    } as RedisRestoreConfig;
+function commandOf(argv: string[]): string {
+    if (argv.includes("PING")) return "PING";
+    if (argv.includes("ACL")) return `ACL ${argv[argv.indexOf("ACL") + 1]}`;
+    if (argv.includes("INFO")) return "INFO";
+    if (argv.includes("CONFIG")) return `CONFIG ${argv[argv.indexOf("GET") + 1]}`;
+    return "";
 }
 
-/** Makes mockExecFileCb call its callback successfully with the given stdout. */
-function execSucceeds(stdout = "") {
-    mockExecFileCb.mockImplementation((...args: unknown[]) => {
-        const cb = args[args.length - 1] as (
-            err: null,
-            result: { stdout: string; stderr: string }
-        ) => void;
-        cb(null, { stdout, stderr: "" });
+function redisHost(kind: HostKind, replies: Record<string, { stdout?: string; code?: number }> = {}): FakeHost {
+    return createFakeHost({
+        kind,
+        onExec: (argv) => {
+            const command = commandOf(argv);
+            if (replies[command]) return replies[command];
+            if (command === "PING") return { stdout: "PONG\n" };
+            return { stdout: "" };
+        },
     });
 }
 
-/** Makes mockExecFileCb call its callback with an error. */
-function execFails(message = "command failed", stderr = "") {
-    mockExecFileCb.mockImplementation((...args: unknown[]) => {
-        const cb = args[args.length - 1] as (err: Error & { stderr?: string }) => void;
-        const err = Object.assign(new Error(message), { stderr });
-        cb(err);
-    });
-}
-
-// -------------------------------------------------------------------------
-// prepareRestore()
-// -------------------------------------------------------------------------
-
-describe("prepareRestore()", () => {
+describe.each<HostKind>(["direct", "ssh"])("Redis restore over a %s host", (kind) => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mockFsStat.mockResolvedValue({ size: 1024 });
     });
 
-    it("resolves without error when PING succeeds and user is default", async () => {
-        mockExecFileCb
-            .mockImplementationOnce((...args: unknown[]) => {
-                // PING
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "PONG\n", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                // ACL WHOAMI
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "default\n", stderr: "" });
-            });
-
-        await expect(prepareRestore(buildConfig(), [], fakeHost)).resolves.toBeUndefined();
-    });
-
-    it("resolves when user is non-default and ACL LIST contains allcommands", async () => {
-        mockExecFileCb
-            .mockImplementationOnce((...args: unknown[]) => {
-                // PING
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "PONG\n", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                // ACL WHOAMI
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "backupuser\n", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                // ACL LIST
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "user backupuser on allcommands allkeys ~* &*\n", stderr: "" });
-            });
-
-        await expect(prepareRestore(buildConfig(), [], fakeHost)).resolves.toBeUndefined();
-    });
-
-    it("resolves when user is non-default and ACL LIST is missing both allcommands and +flushall", async () => {
-        // This path logs a warning but still resolves successfully.
-        mockExecFileCb
-            .mockImplementationOnce((...args: unknown[]) => {
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "PONG\n", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "restricteduser\n", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "user restricteduser on +get +set ~* &*\n", stderr: "" });
-            });
-
-        await expect(prepareRestore(buildConfig(), [], fakeHost)).resolves.toBeUndefined();
-    });
-
-    it("throws when the PING command fails", async () => {
-        execFails("Connection refused");
-
-        await expect(prepareRestore(buildConfig(), [], fakeHost)).rejects.toThrow("Cannot connect to Redis");
-    });
-
-    it("includes a String-coerced value in the error when PING rejects with a non-Error", async () => {
-        // Reject with a plain string to cover the `String(error)` branch.
-        mockExecFileCb.mockImplementationOnce((...args: unknown[]) => {
-            const cb = args[args.length - 1] as (err: unknown) => void;
-            cb("plain string error");
+    describe("prepareRestore()", () => {
+        it("accepts a server that answers PING", async () => {
+            await expect(prepareRestore(baseConfig as never, [], redisHost(kind)))
+                .resolves.toBeUndefined();
         });
 
-        await expect(prepareRestore(buildConfig(), [], fakeHost)).rejects.toThrow("plain string error");
+        it("rejects a server that cannot be reached", async () => {
+            const host = redisHost(kind, { PING: { code: 1, stdout: "" } });
+            await expect(prepareRestore(baseConfig as never, [], host))
+                .rejects.toThrow(/Cannot connect to Redis\/Valkey/);
+        });
+
+        it("rejects a reply that is not PONG", async () => {
+            const host = redisHost(kind, { PING: { stdout: "NOAUTH Authentication required\n" } });
+            await expect(prepareRestore(baseConfig as never, [], host))
+                .rejects.toThrow(/Cannot connect to Redis\/Valkey/);
+        });
+
+        it("continues when ACL commands are unavailable", async () => {
+            // ACL does not exist before Redis 6, which is not a reason to stop.
+            const host = redisHost(kind, { "ACL WHOAMI": { code: 1, stdout: "" } });
+            await expect(prepareRestore(baseConfig as never, [], host)).resolves.toBeUndefined();
+        });
+
+        it("skips the permission probe for the default user", async () => {
+            const host = redisHost(kind, { "ACL WHOAMI": { stdout: "default\n" } });
+            await prepareRestore(baseConfig as never, [], host);
+
+            expect(host.calls.exec.some(a => a.includes("LIST"))).toBe(false);
+        });
+
+        it("checks the ACL list for a non-default user", async () => {
+            const host = redisHost(kind, { "ACL WHOAMI": { stdout: "backup\n" } });
+            await prepareRestore(baseConfig as never, [], host);
+
+            expect(host.calls.exec.some(a => a.includes("LIST"))).toBe(true);
+        });
     });
 
-    it("resolves when ACL commands are unavailable (Redis < 6 catch block)", async () => {
-        mockExecFileCb
-            .mockImplementationOnce((...args: unknown[]) => {
-                // PING succeeds
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "PONG\n", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                // ACL WHOAMI throws (Redis < 6)
-                const cb = args[args.length - 1] as (err: Error) => void;
-                cb(new Error("ERR unknown command 'ACL'"));
+    describe("restore()", () => {
+        it("reports the server data directory and RDB filename", async () => {
+            const host = redisHost(kind, {
+                "CONFIG dir": { stdout: "dir\n/var/lib/redis\n" },
+                "CONFIG dbfilename": { stdout: "dbfilename\nsnapshot.rdb\n" },
             });
 
-        await expect(prepareRestore(buildConfig(), [], fakeHost)).resolves.toBeUndefined();
-    });
-});
+            const result = await restore(baseConfig as never, "/tmp/backup.rdb", host);
 
-// -------------------------------------------------------------------------
-// restore()
-// -------------------------------------------------------------------------
-
-describe("restore()", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockFsStat.mockResolvedValue({ size: 4096 });
-    });
-
-    it("returns success with manual-steps metadata when all steps succeed", async () => {
-        mockExecFileCb
-            .mockImplementationOnce((...args: unknown[]) => {
-                // INFO server (engine detection)
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "redis_version:7.0.0\n", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                // CONFIG GET dir
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "dir\n/var/lib/redis\n", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                // CONFIG GET dbfilename
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "dbfilename\ndump.rdb\n", stderr: "" });
+            expect(result.success).toBe(true);
+            expect(result.metadata).toMatchObject({
+                requiresManualSteps: true,
+                dataDir: "/var/lib/redis",
+                rdbFilename: "snapshot.rdb",
             });
+        });
 
-        const result = await restore(buildConfig(), "/tmp/backup.rdb", fakeHost);
+        it("falls back to conventional paths when the server does not say", async () => {
+            const result = await restore(baseConfig as never, "/tmp/backup.rdb", redisHost(kind));
 
-        expect(result.success).toBe(true);
-        expect(result.metadata?.requiresManualSteps).toBe(true);
-        expect(result.metadata?.dataDir).toBe("/var/lib/redis");
-        expect(result.metadata?.rdbFilename).toBe("dump.rdb");
-    });
-
-    it("uses fallback dataDir and rdbFilename when CONFIG GET returns only the key line", async () => {
-        // Simulates "dir\n" with no second line (lines[1] is empty -> fallback).
-        mockExecFileCb
-            .mockImplementationOnce((...args: unknown[]) => {
-                // INFO server (engine detection)
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "redis_version:7.0.0\n", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "dir\n", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "dbfilename\n", stderr: "" });
+            expect(result.metadata).toMatchObject({
+                dataDir: "/var/lib/redis",
+                rdbFilename: "dump.rdb",
             });
+        });
 
-        const result = await restore(buildConfig(), "/tmp/backup.rdb", fakeHost);
+        it("names Valkey when the server reports a Valkey version", async () => {
+            const host = redisHost(kind, { INFO: { stdout: "valkey_version:8.0.1\r\n" } });
+            const logs: string[] = [];
 
-        expect(result.success).toBe(true);
-        expect(result.metadata?.dataDir).toBe("/var/lib/redis");
-        expect(result.metadata?.rdbFilename).toBe("dump.rdb");
-    });
+            await restore(baseConfig as never, "/tmp/backup.rdb", host, (m: string) => logs.push(m));
 
-    it("invokes the onLog callback with progress messages", async () => {
-        execSucceeds("dir\n/data\n");
-        mockExecFileCb
-            .mockImplementationOnce((...args: unknown[]) => {
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "dir\n/data\n", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "dbfilename\ndump.rdb\n", stderr: "" });
-            });
+            expect(logs.join("\n")).toContain("VALKEY RESTORE REQUIRES MANUAL STEPS");
+        });
 
-        const logs: string[] = [];
-        await restore(buildConfig(), "/tmp/backup.rdb", fakeHost, (msg) => logs.push(msg));
+        it("defaults to Redis when the version cannot be read", async () => {
+            const host = redisHost(kind, { INFO: { code: 1, stdout: "" } });
+            const logs: string[] = [];
 
-        expect(logs.some((l) => l.includes("restore"))).toBe(true);
-    });
+            await restore(baseConfig as never, "/tmp/backup.rdb", host, (m: string) => logs.push(m));
 
-    it("returns failure when the source file does not exist (stat throws)", async () => {
-        mockFsStat.mockRejectedValue(new Error("ENOENT: no such file or directory"));
+            expect(logs.join("\n")).toContain("REDIS RESTORE REQUIRES MANUAL STEPS");
+        });
 
-        const result = await restore(buildConfig(), "/tmp/missing.rdb", fakeHost);
+        it("fails when the backup file cannot be read", async () => {
+            mockFsStat.mockRejectedValue(new Error("ENOENT: no such file"));
 
-        expect(result.success).toBe(false);
-        expect(result.error).toContain("ENOENT");
-    });
+            const result = await restore(baseConfig as never, "/tmp/missing.rdb", redisHost(kind));
 
-    it("returns failure when CONFIG GET dir command fails", async () => {
-        mockExecFileCb
-            .mockImplementationOnce((...args: unknown[]) => {
-                // INFO server (engine detection)
-                const cb = args[args.length - 1] as (err: null, r: { stdout: string; stderr: string }) => void;
-                cb(null, { stdout: "redis_version:7.0.0\n", stderr: "" });
-            })
-            .mockImplementationOnce((...args: unknown[]) => {
-                const cb = args[args.length - 1] as (err: Error) => void;
-                cb(new Error("ERR CONFIG disabled"));
-            });
-
-        const result = await restore(buildConfig(), "/tmp/backup.rdb", fakeHost);
-
-        expect(result.success).toBe(false);
-        expect(result.error).toContain("ERR CONFIG disabled");
-    });
-
-    it("handles a non-Error rejection and coerces it to a string (String() branch)", async () => {
-        // Reject with a plain string to cover the `String(error)` branch in the catch block.
-        mockFsStat.mockRejectedValue("disk quota exceeded");
-
-        const result = await restore(buildConfig(), "/tmp/backup.rdb", fakeHost);
-
-        expect(result.success).toBe(false);
-        expect(result.error).toContain("disk quota exceeded");
+            expect(result.success).toBe(false);
+            expect(result.error).toContain("ENOENT");
+        });
     });
 });

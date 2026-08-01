@@ -22,6 +22,8 @@ All notable changes to DBackup are documented here.
 ### 🐛 Bug Fixes
 
 - **mysql**: Restoring a database under a new name over SSH no longer corrupts the dump when the name contains a slash, backslash or ampersand. The rename was performed by a remote `sed` expression that the database names were pasted into; it now runs as a stream rewrite, the same one direct restores already used.
+- **redis**: Restore preparation on an SSH source queried the wrong server. It ran `redis-cli` from DBackup against the host field, which in SSH mode describes the database as seen from the SSH server, so the reported data directory and RDB filename were wrong or the step failed outright.
+- **redis**: Browsing keys over SSH no longer breaks on key names containing quotes or spaces. The key list was pasted into a remote shell command and is now passed as separate arguments.
 
 ### 🧪 Tests
 
