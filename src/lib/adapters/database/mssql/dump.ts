@@ -155,7 +155,22 @@ export async function dump(
                 }
 
                 log(`Downloading: ${f.server} → ${f.local}`);
-                await host.getFile(f.server, f.local);
+                try {
+                    await host.getFile(f.server, f.local);
+                } catch (error: unknown) {
+                    // SQL Server reported this backup as written, so the file is
+                    // missing only in the sense that this connection looks at a
+                    // different filesystem than SQL Server does. The raw "No such
+                    // file" gives no hint of that, and it is the single most
+                    // common way this mode is misconfigured.
+                    const detail = error instanceof Error ? error.message : String(error);
+                    throw new Error(
+                        `${detail}. SQL Server reported the backup as written to ${f.server}, so that path ` +
+                        `is not the same directory on the machine this connection reaches. Usual causes: ` +
+                        `SQL Server runs in a container and the path is not bind-mounted to the identical ` +
+                        `path on the host, or the SSH connection goes to a different machine than SQL Server.`
+                    );
+                }
                 log(`Downloaded: ${path.basename(f.server)}`);
             }
 
@@ -231,7 +246,10 @@ export async function dump(
         }
     } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
-        log(`Dump failed: ${message}`, "error");
+        // Not logged here: the caller turns this into a thrown
+        // `Dump failed: <message>` that the runner reports. Logging it
+        // too put the same failure in the run log twice, which the
+        // other database adapters never did.
         return {
             success: false,
             logs,

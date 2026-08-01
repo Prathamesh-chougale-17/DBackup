@@ -5,7 +5,7 @@ import type { DatabaseAdapter } from "@/lib/core/interfaces";
 import { headers } from "next/headers";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
-import { checkBackupPath } from "@/lib/adapters/database/mssql/preflight";
+import { checkBackupPath, checkBackupPathShared } from "@/lib/adapters/database/mssql/preflight";
 import { MSSQLConfig } from "@/lib/adapters/definitions";
 import { overlayCredentialsOnConfig } from "@/lib/adapters/config-resolver";
 import { registerAdapters } from "@/lib/adapters";
@@ -166,9 +166,27 @@ async function testMssqlSsh(
             });
         }
 
+        // Reachable and writable is not the same as "the directory SQL Server
+        // writes into". Ask the server itself before reporting success, so a
+        // containerized SQL Server with its own copy of this path is caught
+        // here rather than halfway through the first backup.
+        const shared = await checkBackupPathShared(config, host, backupPath).catch(() => null);
+
+        if (shared && !shared.shared) {
+            return NextResponse.json({
+                success: false,
+                message:
+                    `SSH connection to ${sshHost}:${sshPort} successful, and ${backupPath} exists over SSH, ` +
+                    `but SQL Server does not see the same directory. This is what happens when SQL Server ` +
+                    `runs in a container and ${backupPath} is not bind-mounted to the same path on the host. ` +
+                    `Use a path that is identical inside the container and on the host.`,
+            });
+        }
+
+        const verified = shared ? " and shared with SQL Server" : "";
         return NextResponse.json({
             success: true,
-            message: `SSH connection to ${sshHost}:${sshPort} successful - backup path ${backupPath} is readable and writable`,
+            message: `SSH connection to ${sshHost}:${sshPort} successful - backup path ${backupPath} is readable, writable${verified}`,
         });
     } catch (connectError: unknown) {
         const message = connectError instanceof Error ? connectError.message : "SSH connection failed";

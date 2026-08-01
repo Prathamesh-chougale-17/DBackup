@@ -25,6 +25,8 @@ All notable changes to DBackup are documented here.
 
 ### 🐛 Bug Fixes
 
+- **backup**: A failed run wrote its error into the log twice, and the second copy was styled as ordinary output because it carried an `ERROR:` prefix instead of the error level.
+- **MSSQL**: Testing an SQL Server connection now verifies that SQL Server and the SSH account mean the same backup directory, rather than only checking that the path exists over SSH. A containerized SQL Server writing into its own copy of that path passed the test and then failed the backup with nothing but "No such file", which the download error now explains too.
 - **mysql**: Restoring a database under a new name over SSH no longer corrupts the dump when the name contains a slash, backslash or ampersand. The rename was performed by a remote `sed` expression that the database names were pasted into; it now runs as a stream rewrite, the same one direct restores already used.
 - **redis**: Restore preparation on an SSH source queried the wrong server. It ran `redis-cli` from DBackup against the host field, which in SSH mode describes the database as seen from the SSH server, so the reported data directory and RDB filename were wrong or the step failed outright.
 - **redis**: Browsing keys over SSH no longer breaks on key names containing quotes or spaces. The key list was pasted into a remote shell command and is now passed as separate arguments.

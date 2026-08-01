@@ -38,6 +38,23 @@ Sources created before SSH mode existed keep working exactly as they did. They s
 
 SSH mode requires an `SSH_KEY` [Credential Profile](/user-guide/security/credential-profiles) and an SSH account on the SQL Server host. That account needs read and write access to the **Backup Path**, but no SQL Server privileges - the database login is still what authenticates against SQL Server.
 
+::: warning The SSH account and SQL Server must share the backup directory
+SQL Server writes the `.bak` file, and DBackup fetches it over SSH. Both must mean the **same physical directory**.
+
+This is the usual thing to get wrong when SQL Server runs in a container: `/var/opt/mssql/backup` exists inside the container **and** on the host, but they are two different directories. The backup then succeeds and the download fails with "No such file".
+
+Bind-mount a path that is identical on both sides and set **Backup Path** to it:
+
+```yaml
+services:
+  mssql:
+    volumes:
+      - /data/mssql-backups:/data/mssql-backups
+```
+
+**Test Connection** checks this for you: it creates a file over SSH and asks SQL Server whether it can see it, so a mismatch is reported before the first backup runs.
+:::
+
 ## Configuration
 
 ::: info Credential Profiles required

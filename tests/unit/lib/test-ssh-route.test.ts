@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
     headers: vi.fn(),
     registryGet: vi.fn(),
     checkBackupPath: vi.fn(),
+    checkBackupPathShared: vi.fn(),
     exec: vi.fn(),
     dispose: vi.fn(),
 }));
@@ -29,6 +30,7 @@ vi.mock("@/lib/adapters/config-resolver", () => ({
 
 vi.mock("@/lib/adapters/database/mssql/preflight", () => ({
     checkBackupPath: (...args: unknown[]) => mocks.checkBackupPath(...args),
+    checkBackupPathShared: (...args: unknown[]) => mocks.checkBackupPathShared(...args),
 }));
 
 vi.mock("@/lib/logging/logger", () => ({
@@ -73,6 +75,7 @@ describe("POST /api/adapters/test-ssh", () => {
         mocks.exec.mockResolvedValue({ code: 0, stdout: "connected\n", stderr: "" });
         mocks.dispose.mockResolvedValue(undefined);
         mocks.checkBackupPath.mockResolvedValue({ readable: false, writable: false, error: "Path not found" });
+        mocks.checkBackupPathShared.mockResolvedValue({ shared: true });
     });
 
     it("does not check the SQL Server backup path for other adapters", async () => {
@@ -113,6 +116,42 @@ describe("POST /api/adapters/test-ssh", () => {
         expect(mocks.checkBackupPath).toHaveBeenCalled();
         expect(body.success).toBe(false);
         expect(body.message).toContain("backup path is not accessible");
+    });
+
+    it("fails when SQL Server cannot see the directory the SSH account can", async () => {
+        // A containerized SQL Server writes into its own /var/opt/mssql/backup.
+        // Both sides then pass their own checks and the backup dies on the
+        // download, which is the failure this cross-check exists to move
+        // forward into the connection test.
+        mocks.registryGet.mockReturnValue({ id: "mssql" });
+        mocks.checkBackupPath.mockResolvedValue({ readable: true, writable: true });
+        mocks.checkBackupPathShared.mockResolvedValue({ shared: false });
+
+        const response = await POST(request({
+            config: { ...sshConfig, backupPath: "/var/opt/mssql/backup" },
+            adapterId: "mssql",
+        }));
+        const body = await response.json();
+
+        expect(body.success).toBe(false);
+        expect(body.message).toContain("does not see the same directory");
+    });
+
+    it("still reports success when the shared check cannot answer", async () => {
+        // xp_fileexist is undocumented and a locked-down login may not run it.
+        // Not being able to ask is not a reason to fail a working connection.
+        mocks.registryGet.mockReturnValue({ id: "mssql" });
+        mocks.checkBackupPath.mockResolvedValue({ readable: true, writable: true });
+        mocks.checkBackupPathShared.mockResolvedValue(null);
+
+        const response = await POST(request({
+            config: { ...sshConfig, backupPath: "/var/opt/mssql/backup" },
+            adapterId: "mssql",
+        }));
+        const body = await response.json();
+
+        expect(body.success).toBe(true);
+        expect(body.message).not.toContain("shared with SQL Server");
     });
 
     it("still checks it for a direct MSSQL source using SSH file transfer", async () => {

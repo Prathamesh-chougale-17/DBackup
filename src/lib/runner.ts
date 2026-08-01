@@ -300,7 +300,10 @@ export async function performExecution(executionId: string, jobId: string) {
             jobLog.info("Execution cancelled by user");
         } else {
             ctx.status = "Failed";
-            logEntry(`ERROR: ${wrapped.message}`);
+            // Error level, not an "ERROR:" prefix on an info line. The prefix
+            // was doing the level's job, which left the run's own failure
+            // rendered as ordinary output.
+            logEntry(wrapped.message, "error");
             jobLog.error("Execution failed", {}, wrapped);
         }
         await flusher.flush();

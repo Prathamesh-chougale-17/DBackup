@@ -196,7 +196,10 @@ export async function dump(
 
     } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
-        log(`Dump failed: ${message}`, 'error');
+        // Not logged here: the caller turns this into a thrown
+        // `Dump failed: <message>` that the runner reports. Logging it
+        // too put the same failure in the run log twice, which the
+        // other database adapters never did.
         return {
             success: false,
             logs,
