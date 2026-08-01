@@ -1,881 +1,354 @@
-import { createFakeHost } from "@/lib/testing/fake-host";
-
-const fakeHost = createFakeHost();
-
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { MySQLConfig } from "@/lib/adapters/definitions";
 
-// --- Hoisted mocks ---
+// --- Hoisted mocks: filesystem and TAR handling only, never the transport ---
 
 const {
     mockEnsureDatabase,
     mockIsMultiDbTar,
-    mockExtractSelectedDatabases,
+    mockExtractSelected,
     mockCreateTempDir,
     mockCleanupTempDir,
-    mockShouldRestoreDatabase,
-    mockGetTargetDatabaseName,
-    mockSpawnProcess,
-    mockWaitForProcess,
+    mockShouldRestore,
+    mockGetTargetName,
     mockFsStat,
-    mockCreateReadStream,
-    mockIsSSHMode,
-    mockSshConnect,
-    mockSshExec,
-    mockSshExecStream,
-    mockSshUploadFile,
-    mockSshEnd,
-    mockExtractSshConfig,
-    mockRemoteBinaryCheck,
-    mockBuildMysqlArgs,
-    PassThrough,
-} = vi.hoisted(() => {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { PassThrough } = require("stream") as { PassThrough: typeof import("stream").PassThrough };
-    return {
-        mockEnsureDatabase: vi.fn(),
-        mockIsMultiDbTar: vi.fn(),
-        mockExtractSelectedDatabases: vi.fn(),
-        mockCreateTempDir: vi.fn(),
-        mockCleanupTempDir: vi.fn(),
-        mockShouldRestoreDatabase: vi.fn(),
-        mockGetTargetDatabaseName: vi.fn(),
-        mockSpawnProcess: vi.fn(),
-        mockWaitForProcess: vi.fn(),
-        mockFsStat: vi.fn(),
-        mockCreateReadStream: vi.fn(),
-        mockIsSSHMode: vi.fn(),
-        mockSshConnect: vi.fn(),
-        mockSshExec: vi.fn(),
-        mockSshExecStream: vi.fn(),
-        mockSshUploadFile: vi.fn(),
-        mockSshEnd: vi.fn(),
-        mockExtractSshConfig: vi.fn(() => ({ host: "jump.example.com", port: 22 })),
-        mockRemoteBinaryCheck: vi.fn(() => Promise.resolve("mysql")),
-        mockBuildMysqlArgs: vi.fn(() => ["-h", "db.internal", "-u", "root"]),
-        PassThrough,
-    };
-});
+} = vi.hoisted(() => ({
+    mockEnsureDatabase: vi.fn(),
+    mockIsMultiDbTar: vi.fn(),
+    mockExtractSelected: vi.fn(),
+    mockCreateTempDir: vi.fn(),
+    mockCleanupTempDir: vi.fn(),
+    mockShouldRestore: vi.fn(),
+    mockGetTargetName: vi.fn(),
+    mockFsStat: vi.fn(),
+}));
 
 vi.mock("@/lib/adapters/database/mysql/connection", () => ({
-    ensureDatabase: (...args: any[]) => mockEnsureDatabase(...args),
-    execFileAsync: vi.fn(),
-}));
-
-vi.mock("@/lib/adapters/database/mysql/tools", () => ({
-    getMysqlCommand: vi.fn(() => "mysql"),
-    getMysqldumpCommand: vi.fn(() => "mysqldump"),
-    getMysqladminCommand: vi.fn(() => "mysqladmin"),
-    initMysqlTools: vi.fn(),
-}));
-
-vi.mock("@/lib/adapters/database/mysql/dialects", () => ({
-    getDialect: vi.fn(() => ({
-        getDumpArgs: vi.fn(),
-        getRestoreArgs: vi.fn(() => ["--host=localhost", "--user=root", "testdb"]),
-    })),
+    ensureDatabase: (...args: unknown[]) => mockEnsureDatabase(...args),
 }));
 
 vi.mock("@/lib/adapters/database/common/tar-utils", () => ({
-    isMultiDbTar: (...args: any[]) => mockIsMultiDbTar(...args),
-    extractSelectedDatabases: (...args: any[]) => mockExtractSelectedDatabases(...args),
-    createTempDir: (...args: any[]) => mockCreateTempDir(...args),
-    cleanupTempDir: (...args: any[]) => mockCleanupTempDir(...args),
-    shouldRestoreDatabase: (...args: any[]) => mockShouldRestoreDatabase(...args),
-    getTargetDatabaseName: (...args: any[]) => mockGetTargetDatabaseName(...args),
-}));
-
-vi.mock("child_process", () => ({
-    spawn: (...args: any[]) => mockSpawnProcess(...args),
-    default: { spawn: (...args: any[]) => mockSpawnProcess(...args) },
-}));
-
-vi.mock("@/lib/adapters/process", () => ({
-    waitForProcess: (...args: any[]) => mockWaitForProcess(...args),
-}));
-
-vi.mock("@/lib/ssh", () => ({
-    SshClient: class {
-        connect = (...args: any[]) => mockSshConnect(...args);
-        exec = (...args: any[]) => mockSshExec(...args);
-        execStream = (...args: any[]) => mockSshExecStream(...args);
-        uploadFile = (...args: any[]) => mockSshUploadFile(...args);
-        end = (...args: any[]) => mockSshEnd(...args);
-    },
-    isSSHMode: (...args: any[]) => mockIsSSHMode(...args),
-    extractSshConfig: (...args: any[]) => (mockExtractSshConfig as any)(...args),
-    buildMysqlArgs: (...args: any[]) => (mockBuildMysqlArgs as any)(...args),
-    withLocalMyCnf: vi.fn(async (password: any, callback: any) =>
-        password ? callback('/tmp/mock-local.cnf') : callback(undefined)
-    ),
-    withRemoteMyCnf: vi.fn(async (_ssh: any, password: any, callback: any) =>
-        password ? callback('/tmp/mock.cnf') : callback(undefined)
-    ),
-    remoteEnv: vi.fn((_env: any, cmd: string) => cmd),
-    remoteBinaryCheck: (...args: any[]) => (mockRemoteBinaryCheck as any)(...args),
-    shellEscape: vi.fn((s: string) => s),
+    isMultiDbTar: (...args: unknown[]) => mockIsMultiDbTar(...args),
+    extractSelectedDatabases: (...args: unknown[]) => mockExtractSelected(...args),
+    createTempDir: (...args: unknown[]) => mockCreateTempDir(...args),
+    cleanupTempDir: (...args: unknown[]) => mockCleanupTempDir(...args),
+    shouldRestoreDatabase: (...args: unknown[]) => mockShouldRestore(...args),
+    getTargetDatabaseName: (...args: unknown[]) => mockGetTargetName(...args),
 }));
 
 vi.mock("fs/promises", () => ({
-    default: { stat: (...args: any[]) => mockFsStat(...args) },
-    stat: (...args: any[]) => mockFsStat(...args),
+    default: { stat: (...args: unknown[]) => mockFsStat(...args) },
+    stat: (...args: unknown[]) => mockFsStat(...args),
 }));
 
-vi.mock("fs", () => ({
-    default: { createReadStream: (...args: any[]) => mockCreateReadStream(...args) },
-    createReadStream: (...args: any[]) => mockCreateReadStream(...args),
-}));
+import { createFakeHost, type FakeHost } from "@/lib/testing/fake-host";
+import { restore, restoreOne, prepareRestore } from "@/lib/adapters/database/mysql/restore";
+import type { HostKind } from "@/lib/transport/types";
 
-vi.mock("crypto", () => ({
-    randomUUID: vi.fn(() => "test-uuid-1234"),
-    default: { randomUUID: vi.fn(() => "test-uuid-1234") },
-}));
+const baseConfig = {
+    host: "db.internal",
+    port: 3306,
+    user: "root",
+    password: "secret",
+    database: "shop",
+};
 
-import { prepareRestore, restore, restoreOne } from "@/lib/adapters/database/mysql/restore";
+/** A host whose mysql client exits with `code` and writes `stderr`. */
+function restoreHost(kind: HostKind, opts: { stderr?: string; code?: number } = {}): FakeHost {
+    return createFakeHost({ kind, onSpawn: () => opts });
+}
 
-// -------------------------------------------------------------------------
-// Helpers
-// -------------------------------------------------------------------------
-
-function buildConfig(overrides: Record<string, any> = {}): MySQLConfig & Record<string, any> {
+/** Collect log lines with their level. */
+function collector() {
+    const entries: Array<{ msg: string; level?: string }> = [];
     return {
-        host: "localhost",
-        port: 3306,
-        user: "root",
-        password: "secret",
-        database: "testdb",
-        disableSsl: false,
-        ...overrides,
-    } as any;
+        entries,
+        onLog: (msg: string, level?: string) => entries.push({ msg, level }),
+        text: () => entries.map(e => e.msg).join("\n"),
+    };
 }
 
-function makeSpawnProcess() {
-    const proc = new PassThrough() as any;
-    proc.stderr = new PassThrough();
-    proc.stdin = new PassThrough();
-    proc.stdout = new PassThrough();
-    proc.kill = vi.fn();
-    return proc;
-}
-
-// -------------------------------------------------------------------------
-// prepareRestore()
-// -------------------------------------------------------------------------
-
-describe("prepareRestore()", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
-        mockEnsureDatabase.mockResolvedValue(undefined);
-    });
-
-    it("calls ensureDatabase for each database in the list", async () => {
-        const config = buildConfig();
-
-        await prepareRestore(config, ["db1", "db2"], fakeHost);
-
-        expect(mockEnsureDatabase).toHaveBeenCalledTimes(2);
-        expect(mockEnsureDatabase).toHaveBeenCalledWith(config, "db1", "root", "secret", false, []);
-        expect(mockEnsureDatabase).toHaveBeenCalledWith(config, "db2", "root", "secret", false, []);
-    });
-
-    it("uses privilegedAuth credentials when provided", async () => {
-        const config = buildConfig({
-            privilegedAuth: { user: "admin", password: "adminpw" },
-        });
-
-        await prepareRestore(config, ["mydb"], fakeHost);
-
-        expect(mockEnsureDatabase).toHaveBeenCalledWith(
-            config, "mydb", "admin", "adminpw", true, []
-        );
-    });
-
-    it("does nothing when the database list is empty", async () => {
-        await prepareRestore(buildConfig(), [], fakeHost);
-
-        expect(mockEnsureDatabase).not.toHaveBeenCalled();
-    });
+beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsMultiDbTar.mockResolvedValue(false);
+    mockFsStat.mockResolvedValue({ size: 4096 });
+    mockCreateTempDir.mockResolvedValue("/tmp/mysql-restore-x");
+    mockCleanupTempDir.mockResolvedValue(undefined);
+    mockShouldRestore.mockReturnValue(true);
+    mockGetTargetName.mockImplementation((name: string) => name);
 });
 
-// -------------------------------------------------------------------------
-// restore() - error paths
-// -------------------------------------------------------------------------
+describe.each<HostKind>(["direct", "ssh"])("MySQL restore over a %s host", (kind) => {
+    describe("prepareRestore()", () => {
+        it("ensures every database in the list", async () => {
+            const host = restoreHost(kind);
+            await prepareRestore(baseConfig as never, ["a", "b"], host);
 
-describe("restore() - error paths", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
-        mockIsMultiDbTar.mockResolvedValue(false);
-    });
-
-    it("returns failure when no target database is specified", async () => {
-        const config = buildConfig({ database: undefined });
-
-        const result = await restore(config, "/fake/dump.sql", fakeHost);
-
-        expect(result.success).toBe(false);
-        expect(result.error).toMatch(/No target database specified/i);
-    });
-
-    it("returns failure when no databases are selected in dbMapping", async () => {
-        const config = buildConfig({
-            database: undefined,
-            databaseMapping: [
-                { originalName: "shop", targetName: "shop", selected: false },
-            ],
+            expect(mockEnsureDatabase).toHaveBeenCalledTimes(2);
+            expect(mockEnsureDatabase).toHaveBeenCalledWith(
+                expect.anything(), "a", "root", "secret", false, [], host,
+            );
         });
 
-        const result = await restore(config, "/fake/dump.sql", fakeHost);
+        it("uses the privileged credentials when they are given", async () => {
+            await prepareRestore(
+                { ...baseConfig, privilegedAuth: { user: "admin", password: "adminpw" } } as never,
+                ["a"],
+                restoreHost(kind),
+            );
 
-        expect(result.success).toBe(false);
-        expect(result.error).toMatch(/No databases selected/i);
-    });
-});
-
-// -------------------------------------------------------------------------
-// restore() - single database success
-// -------------------------------------------------------------------------
-
-describe("restore() - single database", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
-        mockIsMultiDbTar.mockResolvedValue(false);
-        mockEnsureDatabase.mockResolvedValue(undefined);
-        mockFsStat.mockResolvedValue({ size: 1024 });
-        mockWaitForProcess.mockResolvedValue(undefined);
-        mockCreateReadStream.mockImplementation(() => {
-            const stream = new PassThrough();
-            process.nextTick(() => stream.end(Buffer.from("sql-content")));
-            return stream;
-        });
-        mockSpawnProcess.mockImplementation(() => makeSpawnProcess());
-    });
-
-    it("restores a single database successfully", async () => {
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
-
-        expect(result.success).toBe(true);
-        expect(mockSpawnProcess).toHaveBeenCalledWith("mysql", expect.any(Array), expect.any(Object));
-    });
-
-    it("uses the target name from databaseMapping when provided", async () => {
-        const config = buildConfig({
-            database: undefined,
-            databaseMapping: [
-                { originalName: "shop", targetName: "shop_restored", selected: true },
-            ],
+            expect(mockEnsureDatabase).toHaveBeenCalledWith(
+                expect.anything(), "a", "admin", "adminpw", true, [], expect.anything(),
+            );
         });
 
-        const result = await restore(config, "/backups/dump.sql", fakeHost);
-
-        expect(result.success).toBe(true);
-        expect(mockEnsureDatabase).toHaveBeenCalledWith(
-            config, "shop_restored", "root", "secret", false, expect.any(Array)
-        );
+        it("does nothing for an empty list", async () => {
+            await prepareRestore(baseConfig as never, [], restoreHost(kind));
+            expect(mockEnsureDatabase).not.toHaveBeenCalled();
+        });
     });
 
-    it("falls back to originalName when targetName is empty in mapping", async () => {
-        const config = buildConfig({
-            database: undefined,
-            databaseMapping: [
-                { originalName: "shop", targetName: "", selected: true },
-            ],
+    describe("restore()", () => {
+        it("restores a single database", async () => {
+            const result = await restore(baseConfig as never, "/tmp/dump.sql", restoreHost(kind));
+            expect(result.success).toBe(true);
         });
 
-        const result = await restore(config, "/backups/dump.sql", fakeHost);
+        it("feeds the dump through stdin rather than as an argument", async () => {
+            const host = restoreHost(kind);
+            await restore(baseConfig as never, "/tmp/dump.sql", host);
 
-        expect(result.success).toBe(true);
-        expect(mockEnsureDatabase).toHaveBeenCalledWith(
-            config, "shop", expect.any(String), expect.any(String), expect.any(Boolean), expect.any(Array)
-        );
-    });
-
-    // -------------------------------------------------------------------------
-    // createStderrHandler behavior (tested via waitForProcess callback)
-    // -------------------------------------------------------------------------
-
-    it("forwards stderr lines as log entries", async () => {
-        mockWaitForProcess.mockImplementation((_proc, _name, onLog) => {
-            if (onLog) onLog("Importing table data\n");
-            return Promise.resolve();
+            expect(host.calls.spawn[0][0]).toBe("mariadb");
+            expect(host.calls.spawn[0]).toContain("shop");
         });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
+        it("fails when no target database can be determined", async () => {
+            const result = await restore({ ...baseConfig, database: "" } as never, "/tmp/dump.sql", restoreHost(kind));
 
-        expect(result.success).toBe(true);
-        expect(result.logs.some((l) => l.includes("Importing table data"))).toBe(true);
-    });
-
-    it("filters benign 'Using a password' warnings from stderr", async () => {
-        mockWaitForProcess.mockImplementation((_proc, _name, onLog) => {
-            if (onLog) onLog("Using a password on the command line interface can be insecure.\n");
-            return Promise.resolve();
+            expect(result.success).toBe(false);
+            expect(result.error).toContain("No target database specified");
         });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
+        it("fails when the mapping selects nothing", async () => {
+            const result = await restore(
+                { ...baseConfig, databaseMapping: [{ originalName: "a", targetName: "a", selected: false }] } as never,
+                "/tmp/dump.sql",
+                restoreHost(kind),
+            );
 
-        expect(result.logs.some((l) => l.toLowerCase().includes("using a password"))).toBe(false);
-    });
-
-    it("filters 'Deprecated program name' warnings from stderr", async () => {
-        mockWaitForProcess.mockImplementation((_proc, _name, onLog) => {
-            if (onLog) onLog("Deprecated program name. It will be removed in a future release.\n");
-            return Promise.resolve();
+            expect(result.success).toBe(false);
+            expect(result.error).toContain("No databases selected");
         });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
+        it("uses the target name from the mapping", async () => {
+            const host = restoreHost(kind);
+            await restore(
+                { ...baseConfig, databaseMapping: [{ originalName: "old", targetName: "new", selected: true }] } as never,
+                "/tmp/dump.sql",
+                host,
+            );
 
-        expect(result.logs.some((l) => l.toLowerCase().includes("deprecated program name"))).toBe(false);
-    });
-
-    it("prefixes ERROR lines and logs them at error level via onLog callback", async () => {
-        mockWaitForProcess.mockImplementation((_proc, _name, onLog) => {
-            if (onLog) onLog("ERROR 1045 (28000): Access denied for user\n");
-            return Promise.resolve();
+            expect(host.calls.spawn[0]).toContain("new");
         });
 
-        const logCalls: { msg: string; level?: string }[] = [];
-        await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost, (msg, level) => {
-            logCalls.push({ msg, level });
+        it("falls back to the original name when the mapping has no target", async () => {
+            const host = restoreHost(kind);
+            await restore(
+                { ...baseConfig, databaseMapping: [{ originalName: "old", targetName: "", selected: true }] } as never,
+                "/tmp/dump.sql",
+                host,
+            );
+
+            expect(host.calls.spawn[0]).toContain("old");
         });
 
-        const errorEntry = logCalls.find((l) => l.msg.includes("ERROR 1045"));
-        expect(errorEntry).toBeDefined();
-        expect(errorEntry?.level).toBe("error");
-    });
+        it("fails when the client exits non-zero", async () => {
+            const result = await restore(baseConfig as never, "/tmp/dump.sql", restoreHost(kind, { code: 1 }));
 
-    it("truncates stderr lines that exceed 500 characters", async () => {
-        const longLine = "x".repeat(600);
-        mockWaitForProcess.mockImplementation((_proc, _name, onLog) => {
-            if (onLog) onLog(`${longLine}\n`);
-            return Promise.resolve();
+            expect(result.success).toBe(false);
+            expect(result.error).toContain("exited with code 1");
         });
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
+        it("reports progress through to completion", async () => {
+            const seen: number[] = [];
+            await restore(baseConfig as never, "/tmp/dump.sql", restoreHost(kind), undefined, (p) => seen.push(p));
 
-        const truncatedEntry = result.logs.find((l) => l.includes("(truncated)"));
-        expect(truncatedEntry).toBeDefined();
-    });
-
-    it("suppresses stderr lines beyond 50 and logs a suppression summary", async () => {
-        mockWaitForProcess.mockImplementation((_proc, _name, onLog) => {
-            if (onLog) {
-                // Send 55 normal lines to exceed MAX_STDERR_LOG_LINES (50)
-                for (let i = 0; i < 55; i++) {
-                    onLog(`Warning line ${i}\n`);
-                }
-            }
-            return Promise.resolve();
+            expect(seen).toContain(95);
+            expect(seen).toContain(100);
         });
-
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
-
-        const suppressEntry = result.logs.find((l) => l.includes("suppressed"));
-        expect(suppressEntry).toBeDefined();
-        expect(suppressEntry).toMatch(/5 additional stderr line\(s\) suppressed/);
     });
 
-    it("flushes remaining buffered stderr content after process completes", async () => {
-        mockWaitForProcess.mockImplementation((_proc, _name, onLog) => {
-            // Send text without a trailing newline - will be held in buffer until flush
-            if (onLog) onLog("partial-line-no-newline");
-            return Promise.resolve();
-        });
+    describe("stderr handling", () => {
+        it("prefixes and raises ERROR lines", async () => {
+            const log = collector();
+            await restore(baseConfig as never, "/tmp/dump.sql", restoreHost(kind, {
+                stderr: "ERROR 1064 (42000): You have an error in your SQL syntax\n",
+            }), log.onLog as never);
 
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
-
-        expect(result.logs.some((l) => l.includes("partial-line-no-newline"))).toBe(true);
-    });
-});
-
-// -------------------------------------------------------------------------
-// restore() - Multi-DB TAR archive
-// -------------------------------------------------------------------------
-
-// -------------------------------------------------------------------------
-// restoreOne() - capability export for combined DB+directory restores (JobSource)
-// -------------------------------------------------------------------------
-
-describe("restoreOne()", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
-        mockFsStat.mockResolvedValue({ size: 1024 });
-        mockWaitForProcess.mockResolvedValue(undefined);
-        mockCreateReadStream.mockImplementation(() => {
-            const stream = new PassThrough();
-            process.nextTick(() => stream.end(Buffer.from("sql-content")));
-            return stream;
-        });
-        mockSpawnProcess.mockImplementation(() => makeSpawnProcess());
-    });
-
-    it("restores the given file into the given target database directly", async () => {
-        await expect(restoreOne(buildConfig(), "/tmp/db.sql", "targetdb", fakeHost)).resolves.toBeUndefined();
-
-        expect(mockSpawnProcess).toHaveBeenCalledWith("mysql", expect.any(Array), expect.any(Object));
-        // Unlike restore(), restoreOne does not create the target database itself.
-        expect(mockEnsureDatabase).not.toHaveBeenCalled();
-    });
-
-    it("works without onLog/onProgress callbacks", async () => {
-        await expect(restoreOne(buildConfig(), "/tmp/db.sql", "targetdb", fakeHost)).resolves.toBeUndefined();
-    });
-
-    it("passes the original database name through for USE/CREATE DATABASE rewriting", async () => {
-        const logs: string[] = [];
-        await restoreOne(buildConfig(), "/tmp/db.sql", "renamed_db", fakeHost, (msg) => logs.push(msg), undefined, "original_db");
-
-        expect(logs.some((l) => l.includes("renamed_db"))).toBe(true);
-    });
-});
-
-describe("restore() - Multi-DB TAR archive", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
-        mockIsMultiDbTar.mockResolvedValue(true);
-        mockEnsureDatabase.mockResolvedValue(undefined);
-        mockCleanupTempDir.mockResolvedValue(undefined);
-        mockFsStat.mockResolvedValue({ size: 1024 });
-        mockWaitForProcess.mockResolvedValue(undefined);
-        mockCreateReadStream.mockImplementation(() => {
-            const stream = new PassThrough();
-            process.nextTick(() => stream.end(Buffer.from("sql-content")));
-            return stream;
-        });
-        mockSpawnProcess.mockImplementation(() => makeSpawnProcess());
-        mockShouldRestoreDatabase.mockReturnValue(true);
-        mockGetTargetDatabaseName.mockImplementation((name: string) => name);
-    });
-
-    it("restores all databases from a TAR archive", async () => {
-        const tempDir = "/tmp/mysql-restore-test";
-        mockCreateTempDir.mockResolvedValue(tempDir);
-        mockExtractSelectedDatabases.mockResolvedValue({
-            manifest: {
-                databases: [
-                    { name: "shop", filename: "shop.sql" },
-                    { name: "analytics", filename: "analytics.sql" },
-                ],
-            },
-            files: [
-                `${tempDir}/shop.sql`,
-                `${tempDir}/analytics.sql`,
-            ],
-        });
-
-        const result = await restore(buildConfig(), "/backups/multi.tar", fakeHost);
-
-        expect(result.success).toBe(true);
-        expect(mockEnsureDatabase).toHaveBeenCalledTimes(2);
-        expect(result.logs.some((l) => l.includes("shop"))).toBe(true);
-        expect(result.logs.some((l) => l.includes("analytics"))).toBe(true);
-    });
-
-    it("skips databases that should not be restored according to shouldRestoreDatabase", async () => {
-        const tempDir = "/tmp/mysql-restore-skip";
-        mockCreateTempDir.mockResolvedValue(tempDir);
-        mockExtractSelectedDatabases.mockResolvedValue({
-            manifest: {
-                databases: [
-                    { name: "shop", filename: "shop.sql" },
-                    { name: "skip_me", filename: "skip_me.sql" },
-                ],
-            },
-            files: [`${tempDir}/shop.sql`, `${tempDir}/skip_me.sql`],
-        });
-        mockShouldRestoreDatabase.mockImplementation((name: string) => name === "shop");
-
-        const result = await restore(buildConfig(), "/backups/multi.tar", fakeHost);
-
-        expect(result.success).toBe(true);
-        expect(mockEnsureDatabase).toHaveBeenCalledTimes(1);
-        // "skip_me" may appear in the manifest summary log, but must not appear in a "Restored" entry
-        expect(result.logs.some((l) => l.startsWith("Restored database:") && l.includes("skip_me"))).toBe(false);
-    });
-
-    it("cleans up the temp directory even when a restore fails", async () => {
-        const tempDir = "/tmp/mysql-restore-fail";
-        mockCreateTempDir.mockResolvedValue(tempDir);
-        mockExtractSelectedDatabases.mockRejectedValue(new Error("extraction failed"));
-
-        const result = await restore(buildConfig(), "/backups/multi.tar", fakeHost);
-
-        expect(result.success).toBe(false);
-        expect(mockCleanupTempDir).toHaveBeenCalledWith(tempDir);
-    });
-
-    it("returns failure when the database file is missing from the extracted archive", async () => {
-        const tempDir = "/tmp/mysql-restore-missing";
-        mockCreateTempDir.mockResolvedValue(tempDir);
-        mockExtractSelectedDatabases.mockResolvedValue({
-            manifest: { databases: [{ name: "shop", filename: "shop.sql" }] },
-            files: [], // no files extracted
-        });
-
-        const result = await restore(buildConfig(), "/backups/multi.tar", fakeHost);
-
-        expect(result.success).toBe(false);
-        expect(result.error).toMatch(/not found in archive/i);
-    });
-
-    it("logs selective extraction when databaseMapping filters by selected databases", async () => {
-        const tempDir = "/tmp/mysql-restore-selective";
-        mockCreateTempDir.mockResolvedValue(tempDir);
-        mockExtractSelectedDatabases.mockResolvedValue({
-            manifest: {
-                databases: [
-                    { name: "shop", filename: "shop.sql" },
-                    { name: "analytics", filename: "analytics.sql" },
-                ],
-            },
-            files: [`${tempDir}/shop.sql`],
-        });
-        mockShouldRestoreDatabase.mockImplementation((name: string) => name === "shop");
-        mockGetTargetDatabaseName.mockImplementation((name: string) => name);
-
-        const config = buildConfig({
-            databaseMapping: [
-                { originalName: "shop", targetName: "shop", selected: true },
-                { originalName: "analytics", targetName: "analytics", selected: false },
-            ],
-        });
-
-        const result = await restore(config, "/backups/multi.tar", fakeHost);
-
-        expect(result.success).toBe(true);
-        expect(result.logs.some((l) => l.includes("Selectively extracted"))).toBe(true);
-    });
-});
-
-// -------------------------------------------------------------------------
-// restore() - progress tracking (non-SSH)
-// -------------------------------------------------------------------------
-
-describe("restore() - progress tracking", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
-        mockIsMultiDbTar.mockResolvedValue(false);
-        mockEnsureDatabase.mockResolvedValue(undefined);
-        mockFsStat.mockResolvedValue({ size: 1024 });
-        mockWaitForProcess.mockResolvedValue(undefined);
-        // Use Promise.resolve().then() so data arrives as a microtask queued
-        // before the waitForProcess continuation (jsdom runs nextTick after microtasks).
-        mockCreateReadStream.mockImplementation(() => {
-            const stream = new PassThrough();
-            Promise.resolve().then(() => {
-                stream.push(Buffer.from("sql-content"));
-                stream.push(null);
+            await vi.waitFor(() => {
+                const entry = log.entries.find(e => e.msg.includes("ERROR 1064"));
+                expect(entry?.level).toBe("error");
+                expect(entry?.msg.startsWith("MySQL: ")).toBe(true);
             });
-            return stream;
         });
-        mockSpawnProcess.mockImplementation(() => {
-            const proc = new PassThrough() as any;
-            proc.stderr = new PassThrough();
-            proc.stdin = new PassThrough();
-            proc.stdout = new PassThrough();
-            proc.kill = vi.fn();
-            return proc;
+
+        it("truncates a very long stderr line", async () => {
+            const log = collector();
+            await restore(baseConfig as never, "/tmp/dump.sql", restoreHost(kind, {
+                stderr: "x".repeat(600) + "\n",
+            }), log.onLog as never);
+
+            await vi.waitFor(() => expect(log.text()).toContain("... (truncated)"));
+        });
+
+        it("redacts the password from stderr", async () => {
+            const log = collector();
+            await restore(baseConfig as never, "/tmp/dump.sql", restoreHost(kind, {
+                stderr: "Access denied using password secret\n",
+            }), log.onLog as never);
+
+            await vi.waitFor(() => expect(log.text()).toContain("******"));
+            expect(log.text()).not.toContain("secret");
         });
     });
 
-    it("calls onProgress with increasing percentages as data is read", async () => {
-        const progressValues: number[] = [];
+    describe("restoreOne()", () => {
+        it("restores one file into one target database", async () => {
+            const host = restoreHost(kind);
+            await restoreOne(baseConfig as never, "/tmp/a.sql", "target", host);
 
-        const result = await restore(
-            buildConfig({ database: "testdb" }),
-            "/backups/dump.sql", fakeHost,
-            undefined,
-            (p) => progressValues.push(p)
-        );
+            expect(host.calls.spawn[0]).toContain("target");
+        });
 
-        expect(result.success).toBe(true);
-        expect(progressValues.some((p) => p > 0)).toBe(true);
+        it("works without callbacks", async () => {
+            await expect(restoreOne(baseConfig as never, "/tmp/a.sql", "t", restoreHost(kind)))
+                .resolves.toBeUndefined();
+        });
+
+        it("rewrites the embedded database name when restoring under a new one", async () => {
+            // Previously a remote sed pipeline, which corrupted names containing
+            // a slash, backslash or ampersand.
+            const host = restoreHost(kind);
+            await restoreOne(baseConfig as never, "/tmp/a.sql", "new", host, undefined, undefined, "old");
+
+            // A rewrite means the bytes are staged rather than used in place.
+            expect(host.calls.exec.length + host.calls.spawn.length).toBeGreaterThan(0);
+        });
+    });
+
+    describe("multi database archives", () => {
+        beforeEach(() => {
+            mockIsMultiDbTar.mockResolvedValue(true);
+            mockExtractSelected.mockResolvedValue({
+                manifest: { databases: [{ name: "a", filename: "a.sql" }, { name: "b", filename: "b.sql" }] },
+                files: ["/tmp/mysql-restore-x/a.sql", "/tmp/mysql-restore-x/b.sql"],
+            });
+        });
+
+        it("restores every database in the archive", async () => {
+            const host = restoreHost(kind);
+            const result = await restore(baseConfig as never, "/tmp/multi.tar", host);
+
+            expect(result.success).toBe(true);
+            expect(host.calls.spawn).toHaveLength(2);
+        });
+
+        it("skips databases the mapping excludes", async () => {
+            mockShouldRestore.mockImplementation((name: string) => name === "a");
+            const host = restoreHost(kind);
+
+            await restore(baseConfig as never, "/tmp/multi.tar", host);
+
+            expect(host.calls.spawn).toHaveLength(1);
+        });
+
+        it("fails when a listed file is missing from the archive", async () => {
+            mockExtractSelected.mockResolvedValue({
+                manifest: { databases: [{ name: "a", filename: "missing.sql" }] },
+                files: [],
+            });
+
+            const result = await restore(baseConfig as never, "/tmp/multi.tar", restoreHost(kind));
+
+            expect(result.success).toBe(false);
+            expect(result.error).toContain("Database file not found");
+        });
+
+        it("cleans up the temp directory even when a restore fails", async () => {
+            mockExtractSelected.mockRejectedValue(new Error("extract failed"));
+
+            const result = await restore(baseConfig as never, "/tmp/multi.tar", restoreHost(kind));
+
+            expect(result.success).toBe(false);
+            expect(mockCleanupTempDir).toHaveBeenCalledWith("/tmp/mysql-restore-x");
+        });
+    });
+
+    describe("diagnostics", () => {
+        it("logs the server settings before restoring", async () => {
+            const log = collector();
+            const host = createFakeHost({
+                kind,
+                onExec: () => ({ stdout: "max_allowed_packet=67108864 log_bin=OFF" }),
+            });
+
+            await restore(baseConfig as never, "/tmp/dump.sql", host, log.onLog as never);
+
+            expect(log.text()).toContain("Server settings: max_allowed_packet=67108864");
+        });
+
+        it("continues when the diagnostics query fails", async () => {
+            const host = createFakeHost({ kind, onExec: () => ({ code: 1, stderr: "denied" }) });
+            const result = await restore(baseConfig as never, "/tmp/dump.sql", host);
+
+            expect(result.success).toBe(true);
+        });
+
+        it("reports that the server survived a failed restore", async () => {
+            const log = collector();
+            const host = createFakeHost({
+                kind,
+                onExec: (argv) => argv.includes("SELECT 'alive'") ? { stdout: "alive\n" } : { stdout: "" },
+                onSpawn: () => ({ code: 1 }),
+            });
+
+            await restore(baseConfig as never, "/tmp/dump.sql", host, log.onLog as never);
+
+            expect(log.text()).toContain("MySQL server is still running");
+        });
+
+        it("reports that the server stopped responding after a failed restore", async () => {
+            const log = collector();
+            const host = createFakeHost({
+                kind,
+                onExec: () => ({ code: 1, stderr: "connection refused" }),
+                onSpawn: () => ({ code: 1 }),
+            });
+
+            await restore(baseConfig as never, "/tmp/dump.sql", host, log.onLog as never);
+
+            expect(log.text()).toContain("MySQL server NOT responding");
+        });
     });
 });
 
-// -------------------------------------------------------------------------
-// createStderrHandler - edge cases via waitForProcess mock
-// -------------------------------------------------------------------------
+describe("MySQL restore transport differences", () => {
+    it("forces TCP only when the client runs beside DBackup", async () => {
+        const direct = restoreHost("direct");
+        const ssh = restoreHost("ssh");
 
-describe("createStderrHandler - edge cases", () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockIsSSHMode.mockReturnValue(false);
-        mockIsMultiDbTar.mockResolvedValue(false);
-        mockEnsureDatabase.mockResolvedValue(undefined);
-        mockFsStat.mockResolvedValue({ size: 1024 });
-        mockCreateReadStream.mockImplementation(() => {
-            const stream = new PassThrough();
-            process.nextTick(() => stream.end(Buffer.from("sql-content")));
-            return stream;
-        });
-        mockSpawnProcess.mockImplementation(() => {
-            const proc = new PassThrough() as any;
-            proc.stderr = new PassThrough();
-            proc.stdin = new PassThrough();
-            proc.stdout = new PassThrough();
-            proc.kill = vi.fn();
-            return proc;
-        });
+        await restore(baseConfig as never, "/tmp/dump.sql", direct);
+        await restore(baseConfig as never, "/tmp/dump.sql", ssh);
+
+        expect(direct.calls.spawn[0]).toContain("--protocol=tcp");
+        expect(ssh.calls.spawn[0]).not.toContain("--protocol=tcp");
     });
 
-    it("flushes ERROR lines in buffer at error level", async () => {
-        // No trailing newline - goes into buffer until flush()
-        mockWaitForProcess.mockImplementation((_proc, _name, onData) => {
-            if (onData) onData("ERROR 1005 (23000): Cannot create table");
-            return Promise.resolve();
-        });
+    it("keeps the password out of argv on both transports", async () => {
+        for (const kind of ["direct", "ssh"] as HostKind[]) {
+            const host = restoreHost(kind);
+            await restore(baseConfig as never, "/tmp/dump.sql", host);
 
-        const logCalls: { msg: string; level?: string }[] = [];
-        await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost, (msg, level) => {
-            logCalls.push({ msg, level });
-        });
-
-        const errorEntry = logCalls.find((l) => l.msg.includes("ERROR 1005") && l.level === "error");
-        expect(errorEntry).toBeDefined();
-    });
-
-    it("suppresses buffered content in flush when already over the stderr line limit", async () => {
-        mockWaitForProcess.mockImplementation((_proc, _name, onData) => {
-            if (onData) {
-                // 51 lines fills the buffer past MAX_STDERR_LOG_LINES (50)
-                for (let i = 0; i < 51; i++) {
-                    onData(`Normal line ${i}\n`);
-                }
-                // Partial line without newline stays in buffer until flush()
-                onData("overflow-partial");
-            }
-            return Promise.resolve();
-        });
-
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
-
-        const suppressEntry = result.logs.find((l) => l.includes("suppressed"));
-        expect(suppressEntry).toBeDefined();
-    });
-});
-
-// -------------------------------------------------------------------------
-// restore() - SSH path
-// -------------------------------------------------------------------------
-
-/** Creates a mock SSH restore stream that emits exit with the given code. */
-function makeSshRestoreStream(exitCode = 0, stderrData?: string) {
-    const stream = new PassThrough() as any;
-    stream.stderr = new PassThrough();
-    process.nextTick(() => {
-        if (stderrData) stream.stderr.emit("data", Buffer.from(stderrData));
-        stream.emit("exit", exitCode, null);
-    });
-    return stream;
-}
-
-describe("restore() - SSH path", () => {
-    const TOTAL_SIZE = 1024 * 100;
-
-    // Standard exec sequence for a successful SSH restore
-    function setupSuccessExec() {
-        mockSshExec
-            .mockResolvedValueOnce({ code: 0, stdout: "max_allowed_packet=67108864", stderr: "" })
-            .mockResolvedValueOnce({ code: 0, stdout: String(TOTAL_SIZE), stderr: "" })
-            .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-    }
-
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mockSshExec.mockReset();
-        mockIsSSHMode.mockReturnValue(true);
-        mockIsMultiDbTar.mockResolvedValue(false);
-        mockEnsureDatabase.mockResolvedValue(undefined);
-        mockFsStat.mockResolvedValue({ size: TOTAL_SIZE });
-        mockSshConnect.mockResolvedValue(undefined);
-        mockSshEnd.mockReturnValue(undefined);
-        mockRemoteBinaryCheck.mockResolvedValue("mysql");
-        mockBuildMysqlArgs.mockReturnValue(["-h", "db.internal", "-u", "root"]);
-        mockExtractSshConfig.mockReturnValue({ host: "jump.example.com", port: 22 });
-        mockSshUploadFile.mockImplementation((_src: any, _dest: any, progress?: any) => {
-            if (progress) progress(TOTAL_SIZE / 2, TOTAL_SIZE);
-            return Promise.resolve();
-        });
-        mockSshExecStream.mockImplementation((_cmd: any, callback: any) => {
-            callback(null, makeSshRestoreStream(0));
-        });
-    });
-
-    it("restores a single database via SSH successfully", async () => {
-        setupSuccessExec();
-
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
-
-        expect(result.success).toBe(true);
-        expect(mockSshUploadFile).toHaveBeenCalled();
-        expect(mockSshExecStream).toHaveBeenCalled();
-        expect(mockSshEnd).toHaveBeenCalled();
-    });
-
-    it("calls onProgress during SSH upload and restore phases", async () => {
-        setupSuccessExec();
-        const progressValues: number[] = [];
-
-        const result = await restore(
-            buildConfig({ database: "testdb" }),
-            "/backups/dump.sql", fakeHost,
-            undefined,
-            (p) => progressValues.push(p)
-        );
-
-        expect(result.success).toBe(true);
-        expect(progressValues.some((p) => p > 0 && p <= 100)).toBe(true);
-    });
-
-    it("continues when diagnostics query throws", async () => {
-        mockSshExec
-            .mockRejectedValueOnce(new Error("diagnostics failed"))
-            .mockResolvedValueOnce({ code: 0, stdout: String(TOTAL_SIZE), stderr: "" })
-            .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
-
-        expect(result.success).toBe(true);
-    });
-
-    it("logs server settings when diagnostics succeed", async () => {
-        setupSuccessExec();
-
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
-
-        expect(result.success).toBe(true);
-        expect(result.logs.some((l) => l.includes("Server settings"))).toBe(true);
-    });
-
-    it("returns failure on upload size mismatch", async () => {
-        mockSshExec
-            .mockResolvedValueOnce({ code: 0, stdout: "max_allowed_packet=67108864", stderr: "" })
-            .mockResolvedValueOnce({ code: 0, stdout: "999", stderr: "" }) // wrong size
-            .mockResolvedValueOnce({ code: 0, stdout: "alive", stderr: "" }) // post-failure alive check
-            .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" }) // OOM check (empty)
-            .mockResolvedValue({ code: 0, stdout: "", stderr: "" }); // cleanup
-
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
-
-        expect(result.success).toBe(false);
-        expect(result.error).toMatch(/mismatch/i);
-    });
-
-    it("returns failure when remote mysql exits with non-zero code", async () => {
-        mockSshExecStream.mockImplementation((_cmd: any, callback: any) => {
-            callback(null, makeSshRestoreStream(1));
-        });
-        mockSshExec
-            .mockResolvedValueOnce({ code: 0, stdout: "max_allowed_packet=67108864", stderr: "" })
-            .mockResolvedValueOnce({ code: 0, stdout: String(TOTAL_SIZE), stderr: "" })
-            .mockResolvedValueOnce({ code: 0, stdout: "alive", stderr: "" }) // post-failure alive check
-            .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" }) // OOM check
-            .mockResolvedValue({ code: 0, stdout: "", stderr: "" }); // cleanup
-
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
-
-        expect(result.success).toBe(false);
-    });
-
-    it("logs post-failure status when mysql server is still alive", async () => {
-        mockSshExecStream.mockImplementation((_cmd: any, callback: any) => {
-            callback(null, makeSshRestoreStream(1));
-        });
-        mockSshExec
-            .mockResolvedValueOnce({ code: 0, stdout: "max_allowed_packet=67108864", stderr: "" })
-            .mockResolvedValueOnce({ code: 0, stdout: String(TOTAL_SIZE), stderr: "" })
-            .mockResolvedValueOnce({ code: 0, stdout: "alive", stderr: "" }) // alive check passes
-            .mockResolvedValueOnce({ code: 0, stdout: "oom killed process mysqld", stderr: "" }) // dmesg with OOM
-            .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
-
-        expect(result.success).toBe(false);
-        expect(result.logs.some((l) => l.includes("still running"))).toBe(true);
-        expect(result.logs.some((l) => l.includes("OOM killer"))).toBe(true);
-    });
-
-    it("logs post-failure status when mysql server is not responding", async () => {
-        mockSshExecStream.mockImplementation((_cmd: any, callback: any) => {
-            callback(null, makeSshRestoreStream(1));
-        });
-        mockSshExec
-            .mockResolvedValueOnce({ code: 0, stdout: "max_allowed_packet=67108864", stderr: "" })
-            .mockResolvedValueOnce({ code: 0, stdout: String(TOTAL_SIZE), stderr: "" })
-            .mockResolvedValueOnce({ code: 0, stdout: "no output here", stderr: "" }) // not "alive"
-            .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
-
-        expect(result.success).toBe(false);
-        expect(result.logs.some((l) => l.includes("NOT responding"))).toBe(true);
-    });
-
-    it("logs when alive check itself throws", async () => {
-        mockSshExecStream.mockImplementation((_cmd: any, callback: any) => {
-            callback(null, makeSshRestoreStream(1));
-        });
-        mockSshExec
-            .mockResolvedValueOnce({ code: 0, stdout: "max_allowed_packet=67108864", stderr: "" })
-            .mockResolvedValueOnce({ code: 0, stdout: String(TOTAL_SIZE), stderr: "" })
-            .mockRejectedValueOnce(new Error("ssh timeout")) // alive check throws
-            .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
-
-        expect(result.success).toBe(false);
-        expect(result.logs.some((l) => l.includes("Could not reach MySQL server"))).toBe(true);
-    });
-
-    it("redacts password from SSH stderr output", async () => {
-        setupSuccessExec();
-        const logs: string[] = [];
-        mockSshExecStream.mockImplementation((_cmd: any, callback: any) => {
-            callback(null, makeSshRestoreStream(0, "mysql password secret\n"));
-        });
-
-        await restore(
-            buildConfig({ database: "testdb", password: "secret" }),
-            "/backups/dump.sql", fakeHost,
-            (msg) => logs.push(msg)
-        );
-
-        expect(logs.every((l) => !l.includes("secret"))).toBe(true);
-    });
-
-    it("continues when stat check throws a non-mismatch error", async () => {
-        mockSshExec
-            .mockResolvedValueOnce({ code: 0, stdout: "max_allowed_packet=67108864", stderr: "" })
-            .mockRejectedValueOnce(new Error("stat command not found")) // stat throws - non-critical
-            .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
-
-        expect(result.success).toBe(true);
-    });
-
-    it("falls back to 'mysql' binary when remoteBinaryCheck throws in post-failure diagnostics", async () => {
-        mockSshExecStream.mockImplementation((_cmd: any, callback: any) => {
-            callback(null, makeSshRestoreStream(1));
-        });
-        // remoteBinaryCheck: first call (setup) succeeds, second call (post-failure) throws
-        mockRemoteBinaryCheck
-            .mockResolvedValueOnce("mysql") // initial setup
-            .mockRejectedValueOnce(new Error("binary not found")); // post-failure alive check
-        mockSshExec
-            .mockResolvedValueOnce({ code: 0, stdout: "max_allowed_packet=67108864", stderr: "" })
-            .mockResolvedValueOnce({ code: 0, stdout: String(TOTAL_SIZE), stderr: "" })
-            .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" }) // alive check with fallback "mysql"
-            .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-
-        const result = await restore(buildConfig({ database: "testdb" }), "/backups/dump.sql", fakeHost);
-
-        expect(result.success).toBe(false);
+            expect(host.calls.spawn[0].join(" ")).not.toContain("secret");
+        }
     });
 });

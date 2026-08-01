@@ -1,4 +1,4 @@
-import { execFileAsync } from "./connection";
+import { execFileAsync } from "@/lib/adapters/process";
 import { isMultiDbTar, readTarManifest } from "../common/tar-utils";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";

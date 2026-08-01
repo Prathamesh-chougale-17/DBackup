@@ -1,13 +1,12 @@
 import { BaseDialect } from "../../common/dialect";
 import { MySQLConfig } from "@/lib/adapters/definitions";
+import type { ExecutionHost } from "@/lib/transport";
+import { buildConnectionArgs } from "../args";
 
 export class MySQLBaseDialect extends BaseDialect {
-    getDumpArgs(config: MySQLConfig, databases: string[]): string[] {
+    getDumpArgs(config: MySQLConfig, databases: string[], host?: ExecutionHost): string[] {
         const args = [
-            '-h', config.host,
-            '-P', String(config.port),
-            '-u', config.user,
-            '--protocol=tcp', // Always use TCP to avoid socket issues in containers
+            ...buildConnectionArgs(config, host, { includeSsl: false }),
             '--net-buffer-length=16384' // Limit INSERT size to ~16KB to prevent OOM during restore
         ];
 
@@ -25,12 +24,9 @@ export class MySQLBaseDialect extends BaseDialect {
         return args;
     }
 
-    getRestoreArgs(config: MySQLConfig, targetDatabase?: string): string[] {
+    getRestoreArgs(config: MySQLConfig, targetDatabase?: string, host?: ExecutionHost): string[] {
         const args = [
-            '-h', config.host,
-            '-P', String(config.port),
-            '-u', config.user,
-            '--protocol=tcp',
+            ...buildConnectionArgs(config, host, { includeSsl: false }),
             '--max-allowed-packet=64M',
         ];
 

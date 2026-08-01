@@ -3,11 +3,9 @@ import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { MySQLConfig, MariaDBConfig } from "@/lib/adapters/definitions";
 import { getDialect } from "./dialects";
-import { getMysqldumpCommand } from "./tools";
 import { getDatabases } from "./connection";
 import fs from "fs/promises";
 import path from "path";
-import { spawn } from "child_process";
 import { createWriteStream } from "fs";
 import {
     createMultiDbTar,
@@ -15,16 +13,7 @@ import {
     cleanupTempDir,
 } from "../common/tar-utils";
 import { TarFileEntry } from "../common/types";
-import {
-    SshClient,
-    isSSHMode,
-    extractSshConfig,
-    buildMysqlArgs,
-    withLocalMyCnf,
-    withRemoteMyCnf,
-    remoteBinaryCheck,
-    shellEscape,
-} from "@/lib/ssh";
+import { MYSQL_DUMP, withAuthArgs } from "./args";
 
 /** Extended config with runtime fields */
 type MySQLDumpConfig = (MySQLConfig | MariaDBConfig) & {
@@ -39,115 +28,53 @@ async function dumpSingleDatabase(
     config: MySQLDumpConfig,
     dbName: string,
     destinationPath: string,
+    host: ExecutionHost,
     onLog: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<{ success: boolean; size: number }> {
-    if (isSSHMode(config)) {
-        return dumpSingleDatabaseSSH(config, dbName, destinationPath, onLog);
-    }
-
+    const dumpBin = await host.which(...MYSQL_DUMP);
     const dialect = getDialect(config.type === 'mariadb' ? 'mariadb' : 'mysql', config.detectedVersion);
-    const args = dialect.getDumpArgs(config, [dbName]);
+    // Both transports now get the version-aware dialect flags. The SSH path used
+    // to hand-roll a smaller argument set and miss them entirely.
+    const args = dialect.getDumpArgs(config, [dbName], host);
 
-    const safeCmd = `${getMysqldumpCommand()} ${args.join(' ').replace(config.password || '___NONE___', '******')}`;
+    const safeCmd = `${dumpBin} ${args.join(' ').replace(config.password || '___NONE___', '******')}`;
     onLog(`Dumping database: ${dbName}`, 'info', 'command', safeCmd);
 
-    return withLocalMyCnf(config.password, async (cnfPath) => {
-        const finalArgs = cnfPath ? [`--defaults-file=${cnfPath}`, ...args] : args;
-        const dumpProcess = spawn(getMysqldumpCommand(), finalArgs);
-        const writeStream = createWriteStream(destinationPath);
+    await withAuthArgs(host, config.password, async (authArgs) => {
+        await host.captureOutput(destinationPath, {}, async (hostPath) => {
+            const proc = await host.spawn([dumpBin, ...authArgs, ...args]);
+            const writeStream = createWriteStream(hostPath);
 
-        dumpProcess.stdout.pipe(writeStream);
-
-        dumpProcess.stderr.on('data', (data) => {
-            const msg = data.toString().trim();
-            // Filter benign warnings from MariaDB tools
-            if (msg.includes("Using a password") || msg.includes("Deprecated program name")) return;
-            onLog(msg);
-        });
-
-        await new Promise<void>((resolve, reject) => {
-            dumpProcess.on('close', (code) => {
-                if (code === 0) resolve();
-                else reject(new Error(`${getMysqldumpCommand()} exited with code ${code}`));
+            proc.stdout.pipe(writeStream);
+            proc.stderr.on('data', (data: Buffer) => {
+                const msg = data.toString().trim();
+                // Benign noise from the MariaDB tools.
+                if (msg.includes("Using a password") || msg.includes("Deprecated program name")) return;
+                onLog(msg);
             });
-            dumpProcess.on('error', (err) => reject(err));
-            writeStream.on('error', (err: Error) => reject(err));
-        });
-
-        const stats = await fs.stat(destinationPath);
-        if (stats.size === 0) {
-            throw new Error(`Dump file for ${dbName} is empty. Check logs/permissions.`);
-        }
-
-        return { success: true, size: stats.size };
-    });
-}
-
-/**
- * SSH variant: run mysqldump on the remote server and stream output to a local file.
- */
-async function dumpSingleDatabaseSSH(
-    config: MySQLDumpConfig,
-    dbName: string,
-    destinationPath: string,
-    onLog: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
-): Promise<{ success: boolean; size: number }> {
-    const sshConfig = extractSshConfig(config)!;
-    const ssh = new SshClient();
-    await ssh.connect(sshConfig);
-
-    try {
-        const dumpBin = await remoteBinaryCheck(ssh, "mariadb-dump", "mysqldump");
-        const args = buildMysqlArgs(config);
-
-        // Limit INSERT size to ~16KB to prevent OOM during restore on low-memory servers
-        args.push("--net-buffer-length=16384");
-
-        // Add dump-specific options
-        if ((config as any).options) {
-            args.push(...(config as any).options.split(' ').filter((s: string) => s.trim().length > 0));
-        }
-        args.push("--databases", shellEscape(dbName));
-
-        const writeStream = createWriteStream(destinationPath);
-
-        await withRemoteMyCnf(ssh, config.password, async (cnfPath) => {
-            const cnfPrefix = cnfPath ? `--defaults-file=${shellEscape(cnfPath)} ` : "";
-            const cmd = `${dumpBin} ${cnfPrefix}${args.join(" ")}`;
-            onLog(`Dumping database (SSH): ${dbName}`, 'info', 'command', `${dumpBin} ${args.join(" ")}`);
 
             await new Promise<void>((resolve, reject) => {
-                ssh.execStream(cmd, (err, stream) => {
-                    if (err) return reject(err);
-
-                    stream.pipe(writeStream);
-
-                    stream.stderr.on('data', (data: any) => {
-                        const msg = data.toString().trim();
-                        if (msg.includes("Using a password") || msg.includes("Deprecated program name")) return;
-                        onLog(msg);
-                    });
-
-                    stream.on('exit', (code: number | null, signal?: string) => {
-                        if (code === 0) resolve();
-                        else reject(new Error(`Remote mysqldump exited with code ${code ?? 'null'}${signal ? ` (signal: ${signal})` : ''}`));
-                    });
-
-                    stream.on('error', (err: Error) => reject(err));
-                    writeStream.on('error', (err: Error) => reject(err));
-                });
+                writeStream.on('error', reject);
+                writeStream.on('finish', resolve);
+                proc.exit().then(
+                    ({ code, signal }) => {
+                        if (code !== 0) {
+                            writeStream.destroy();
+                            reject(new Error(`${dumpBin} exited with code ${code ?? 'null'}${signal ? ` (signal: ${signal})` : ''}`));
+                        }
+                    },
+                    reject,
+                );
             });
         });
+    });
 
-        const stats = await fs.stat(destinationPath);
-        if (stats.size === 0) {
-            throw new Error(`Dump file for ${dbName} is empty. Check logs/permissions.`);
-        }
-
-        return { success: true, size: stats.size };
-    } finally {
-        ssh.end();
+    const stats = await fs.stat(destinationPath);
+    if (stats.size === 0) {
+        throw new Error(`Dump file for ${dbName} is empty. Check logs/permissions.`);
     }
+
+    return { success: true, size: stats.size };
 }
 
 /**
@@ -162,7 +89,7 @@ export async function dumpOne(
     _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<{ size: number }> {
-    const result = await dumpSingleDatabase(config, dbName, destinationPath, onLog ?? (() => {}));
+    const result = await dumpSingleDatabase(config, dbName, destinationPath, _host, onLog ?? (() => {}));
     return { size: result.size };
 }
 
@@ -193,7 +120,7 @@ export async function dump(config: MySQLDumpConfig, destinationPath: string, _ho
 
         // Single DB: Direct dump (no TAR needed)
         if (dbs.length === 1) {
-            const result = await dumpSingleDatabase(config, dbs[0], destinationPath, log);
+            const result = await dumpSingleDatabase(config, dbs[0], destinationPath, _host, log);
 
             const sizeMB = (result.size / 1024 / 1024).toFixed(2);
             log(`Dump finished successfully. Size: ${sizeMB} MB`);
@@ -219,7 +146,7 @@ export async function dump(config: MySQLDumpConfig, destinationPath: string, _ho
                 const dbFileName = `${dbName}.sql`;
                 const dbFilePath = path.join(tempDir, dbFileName);
 
-                await dumpSingleDatabase(config, dbName, dbFilePath, log);
+                await dumpSingleDatabase(config, dbName, dbFilePath, _host, log);
 
                 dbFiles.push({
                     name: dbFileName,

@@ -15,10 +15,17 @@ All notable changes to DBackup are documented here.
 - **ssh**: Added a transport layer that models direct and SSH connections as interchangeable implementations of one interface. Commands are now described as argument lists rather than assembled shell strings, so remote quoting lives in a single tested place instead of being repeated at every call site.
 - **ssh**: A backup or restore now opens one SSH connection for the whole run instead of one per adapter call. A combined backup of ten databases previously performed twelve separate handshakes against the same server.
 - **health check**: The per-adapter timeout now runs inside the connection scope. Previously a check that timed out while still connecting left its socket open, once a minute for every unreachable source.
+- **mysql**: SSH-mode dumps now use the same version-aware options as direct dumps. Previously the SSH path built a smaller set of arguments by hand and missed them, so a MySQL 8 dump taken over SSH did not get `--default-character-set=utf8mb4`.
+- **mysql**: Listing databases with sizes now falls back to a plain listing when `information_schema` is unreadable. A least-privilege backup user previously saw an error instead of the database list in direct mode.
+
+### 🐛 Bug Fixes
+
+- **mysql**: Restoring a database under a new name over SSH no longer corrupts the dump when the name contains a slash, backslash or ampersand. The rename was performed by a remote `sed` expression that the database names were pasted into; it now runs as a stream rewrite, the same one direct restores already used.
 
 ### 🧪 Tests
 
 - **paths**: Added coverage that slash trimming matches what the regular expressions produced and stays linear on a pathological run of slashes.
+- **mysql**: The adapter suites now run every expectation against both connection modes from one table and assert on argument lists rather than assembled command strings.
 - **ssh**: New transport test suite covering both connection modes. Argument quoting is verified by round-tripping hostile values (command substitution, embedded quotes, newlines, non-ASCII) through a real shell and comparing the recovered arguments against the originals.
 
 ### 🐳 Docker

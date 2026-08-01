@@ -47,8 +47,11 @@ export interface FakeHostOptions {
     onExec?: (argv: string[], options?: ExecOptions) => Partial<ExecResult> | undefined;
     /** Streams for a spawned process. stdout defaults to empty, exit code to 0. */
     onSpawn?: (argv: string[], options?: SpawnOptions) => { stdout?: string; stderr?: string; code?: number } | undefined;
-    /** Binary resolution. Defaults to the first candidate. */
-    onWhich?: (candidates: string[]) => string | undefined;
+    /**
+     * Binary resolution. Return undefined to accept the default (the first
+     * candidate), or null to simulate a binary that is not installed.
+     */
+    onWhich?: (candidates: string[]) => string | null | undefined;
     /** Sizes reported by stat(), keyed by path. */
     files?: Record<string, number>;
 }
@@ -114,11 +117,11 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 
         which(...candidates) {
             calls.which.push([...candidates]);
-            const resolved = options.onWhich?.(candidates) ?? candidates[0];
-            if (!resolved) {
+            const requested = options.onWhich?.(candidates);
+            if (requested === null) {
                 return Promise.reject(new Error(`No binary found: ${candidates.join(", ")}`));
             }
-            return Promise.resolve(resolved);
+            return Promise.resolve(requested ?? candidates[0]);
         },
 
         async withTempFile(tempOptions: TempFileOptions, fn) {
