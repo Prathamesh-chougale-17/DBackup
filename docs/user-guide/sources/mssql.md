@@ -53,6 +53,8 @@ services:
 ```
 
 **Test Connection** checks this for you: it creates a file over SSH and asks SQL Server whether it can see it, so a mismatch is reported before the first backup runs.
+
+Mounting the path is only half of it - SQL Server also has to be allowed to write there, and in a container it does not run as root. See [Backup Permission Denied](#backup-permission-denied).
 :::
 
 ## Configuration
@@ -278,16 +280,35 @@ Login failed. The login is from an untrusted domain
 Cannot open backup device. Operating system error 5 (Access denied)
 ```
 
-This error occurs when the **SQL Server service account** (typically `mssql`) cannot write to the backup directory.
+The **SQL Server service account** cannot write to the backup directory. The directory usually exists and looks fine from your own shell, because you are checking it as a different user than SQL Server runs as.
 
-**Solutions**:
-1. Ensure the `mssql` user has write access to the backup path:
-   ```bash
-   sudo chown mssql:mssql /path/to/backup-dir
-   sudo chmod 770 /path/to/backup-dir
-   ```
-2. **Docker**: Verify the volume mount exists and the container user has write permissions
-3. Verify the backup directory exists on the SQL Server - it is **not** created automatically
+<details>
+<summary><b>Docker</b> - the common case, and the one where the obvious fix does not work</summary>
+
+The official SQL Server image runs as the user `mssql` with **UID 10001**, not as root. A bind mount passes the host's ownership straight through, so a directory owned by `root` on the host is owned by `root` inside the container too, and SQL Server cannot write to it. Mounting the path correctly is not enough.
+
+There is no `mssql` user on the host, so `chown mssql:mssql` fails or points at the wrong account. Use the numeric ID:
+
+```bash
+sudo chown -R 10001:0 /var/opt/mssql/backup
+```
+
+No container restart is needed, the mount is live. Confirm the ID first if you use a different image:
+
+```bash
+docker exec mssql id
+```
+
+</details>
+
+**SQL Server installed directly on the host:**
+
+```bash
+sudo chown mssql:mssql /path/to/backup-dir
+sudo chmod 770 /path/to/backup-dir
+```
+
+Also verify the backup directory exists on the SQL Server - it is **not** created automatically.
 
 ### File Not Found After Backup (Local Mode)
 

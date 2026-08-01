@@ -38,6 +38,7 @@ All notable changes to DBackup are documented here.
 ### 📝 Documentation
 
 - **MSSQL**: The SQL Server guide now documents the new SSH connection mode, and states which settings apply to direct connections only. The supported-engine tables listed SQL Server as direct-only with SSH available for file transfer.
+- **MSSQL**: The "Backup Permission Denied" fix now covers containers, where SQL Server runs as UID 10001 and the advice to grant the `mssql` user access does not apply.
 - **sources**: The connection mode overview was missing Firebird from the list of adapters that support SSH mode.
 - **wiki**: The developer guide now documents the transport layer, replacing the sections that described the removed SSH client.
 
