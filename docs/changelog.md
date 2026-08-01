@@ -24,7 +24,7 @@ All notable changes to DBackup are documented here.
 ### 🔒 Security
 
 - **restore**: Trimming trailing slashes off a restore target path used a regular expression that runs in quadratic time on a long run of slashes, letting a crafted target path occupy the server. Reported by CodeQL as `js/polynomial-redos`.
-- **MSSQL**: The SSH connection test now rejects a backup path that is not an absolute path, or that carries control characters, instead of passing whatever the request sent on to the server. It also probes the directory with the same file transfer the backup uses, rather than a remote shell command, so the check exercises what has to work and the path never reaches a command line. Remote arguments were already quoted, so this closes no known hole.
+- **MSSQL**: The SSH connection test now rejects a backup path that is empty or carries control characters, instead of passing whatever the request sent on to the server. It also probes the directory with the same file transfer the backup uses, rather than a remote shell command, so the check exercises what has to work and the path never reaches a command line. Remote arguments were already quoted, so this closes no known hole.
 - **storage**: The same quadratic slash trimming was still in use for the S3 path prefix, the Dropbox and OneDrive folder path, the SMB share, directory downloads, file exclusion patterns, and the ntfy and Gotify server URLs. All seventeen now use the linear-time helper.
 
 ### 🎨 Improvements

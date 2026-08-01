@@ -155,12 +155,11 @@ describe("POST /api/adapters/test-ssh", () => {
     });
 
     it.each([
-        ["a relative path", "var/opt/mssql/backup"],
         ["an embedded newline", "/var/opt/mssql/backup\nrm -rf /"],
         ["a carriage return", "/var/opt\r/backup"],
         ["a NUL byte", "/var/opt/mssql/backup\0"],
         ["an empty string", ""],
-    ])("rejects a backup path with %s before it reaches a command", async (_label, backupPath) => {
+    ])("rejects a backup path with %s", async (_label, backupPath) => {
         mocks.registryGet.mockReturnValue({ id: "mssql" });
 
         const response = await POST(request({
@@ -174,14 +173,20 @@ describe("POST /api/adapters/test-ssh", () => {
         expect(mocks.checkBackupPath).not.toHaveBeenCalled();
     });
 
-    it("accepts an absolute path containing spaces", async () => {
-        // Spaces are legal in a directory name and the transport quotes them,
-        // so the boundary must not reject them.
+    it.each([
+        ["spaces", "/var/opt/sql server/backup"],
+        // Not required to be absolute. SQL Server on Windows takes this, and the
+        // adapter joins it with path.posix, so refusing it would narrow what
+        // works today without protecting anything - the path never reaches a
+        // command line.
+        ["a Windows drive letter", "C:/Backups"],
+        ["a relative path", "backups/mssql"],
+    ])("accepts a backup path with %s", async (_label, backupPath) => {
         mocks.registryGet.mockReturnValue({ id: "mssql" });
         mocks.checkBackupPath.mockResolvedValue({ readable: true, writable: true });
 
         const response = await POST(request({
-            config: { ...sshConfig, backupPath: "/var/opt/sql server/backup" },
+            config: { ...sshConfig, backupPath },
             adapterId: "mssql",
         }));
 
