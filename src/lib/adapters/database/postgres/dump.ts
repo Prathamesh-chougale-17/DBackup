@@ -83,33 +83,37 @@ async function dumpSingleDatabase(
 
     log(`Dumping database: ${dbName}`, 'info', 'command', `${pgDump} ${args.join(' ')}`);
 
-    await host.captureOutput(outputPath, {}, async (hostPath) => {
-        const proc = await host.spawn([pgDump, ...args], { env: pgEnv(config.password) });
-        const writeStream = createWriteStream(hostPath);
+    // pg_dump writes to stdout, and a host process delivers stdout to this
+    // machine whatever the transport is. The bytes are already local, so they
+    // are written straight to the destination. captureOutput would name a path
+    // on the remote host and then write it with the local fs, which happens to
+    // work in direct mode because the two are the same path, and fails over
+    // SSH with "No such file" on the download.
+    const proc = await host.spawn([pgDump, ...args], { env: pgEnv(config.password) });
+    const writeStream = createWriteStream(outputPath);
 
-        proc.stdout.pipe(writeStream);
-        proc.stderr.on('data', (data: Buffer) => {
-            const msg = data.toString().trim();
-            if (msg && !msg.includes('NOTICE:')) {
-                log(msg, 'info');
-            }
-        });
+    proc.stdout.pipe(writeStream);
+    proc.stderr.on('data', (data: Buffer) => {
+        const msg = data.toString().trim();
+        if (msg && !msg.includes('NOTICE:')) {
+            log(msg, 'info');
+        }
+    });
 
-        await new Promise<void>((resolve, reject) => {
-            writeStream.on('error', reject);
-            writeStream.on('finish', resolve);
-            proc.exit().then(
-                ({ code, signal }) => {
-                    if (code !== 0) {
-                        writeStream.destroy();
-                        reject(new Error(
-                            `pg_dump for ${dbName} exited with code ${code ?? 'null'}${signal ? ` (signal: ${signal})` : ''}`,
-                        ));
-                    }
-                },
-                reject,
-            );
-        });
+    await new Promise<void>((resolve, reject) => {
+        writeStream.on('error', reject);
+        writeStream.on('finish', resolve);
+        proc.exit().then(
+            ({ code, signal }) => {
+                if (code !== 0) {
+                    writeStream.destroy();
+                    reject(new Error(
+                        `pg_dump for ${dbName} exited with code ${code ?? 'null'}${signal ? ` (signal: ${signal})` : ''}`,
+                    ));
+                }
+            },
+            reject,
+        );
     });
 }
 

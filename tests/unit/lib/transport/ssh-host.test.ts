@@ -205,3 +205,77 @@ describe("SshHost", () => {
         expect(host.label).not.toContain("hunter2");
     });
 });
+
+/**
+ * Channel event timing.
+ *
+ * ssh2 delivers a short command's output, exit status and close in the same
+ * batch. Anything the caller does after an `await` therefore happens too late
+ * to observe them, which is what these two tests pin down. The bugs they cover
+ * both looked the same from the outside: a command that plainly succeeded was
+ * reported as a failure.
+ */
+describe("SshHost channel timing", () => {
+    let client: FakeClient;
+
+    function mountClient(exec: FakeClient["exec"]) {
+        client = Object.assign(new EventEmitter(), {
+            connect: vi.fn(() => setImmediate(() => client.emit("ready"))),
+            exec,
+            sftp: vi.fn(),
+            end: vi.fn(),
+        }) as FakeClient;
+        MockClient.mockImplementation(function () {
+            return client;
+        });
+    }
+
+    it("keeps the exit status when it arrives inside the exec callback", async () => {
+        // The exit status is emitted before an awaiting caller could resume.
+        // Losing it left exec() reporting `code: null` for a successful
+        // command, which every `code !== 0` check in the adapters reads as a
+        // failure - it surfaced as "binary not found" for a binary that exists.
+        mountClient(vi.fn((_command: string, cb: (err: undefined, ch: FakeChannel) => void) => {
+            const channel = new FakeChannel();
+            setImmediate(() => {
+                cb(undefined, channel);
+                channel.write('/usr/bin/psql\n');
+                channel.emit('exit', 0);
+                setImmediate(() => {
+                    channel.end();
+                    channel.emit('close');
+                });
+            });
+        }));
+
+        const host = new SshHost(config);
+        const result = await host.exec(['command', '-v', 'psql']);
+
+        expect(result.code).toBe(0);
+        expect(result.stdout).toBe('/usr/bin/psql\n');
+    });
+
+    it("does not hang when a stream closes without ever ending", async () => {
+        // `close` was observed arriving before `end`, so the output is read
+        // only after the streams settle. That wait has to stay bounded: a
+        // channel's stderr can close without ever ending, and kill() leaves a
+        // destroyed stream behind. Waiting for `end` unconditionally would
+        // deadlock every command that hits either case.
+        mountClient(vi.fn((_command: string, cb: (err: undefined, ch: FakeChannel) => void) => {
+            const channel = new FakeChannel();
+            setImmediate(() => {
+                cb(undefined, channel);
+                channel.write('one\ntwo\nthree\n');
+                channel.emit('exit', 0);
+                // Only `close`, and stderr is left dangling on purpose.
+                setImmediate(() => channel.emit('close'));
+            });
+        }));
+
+        const host = new SshHost(config);
+        const result = await host.exec(['mysql', '-e', 'SHOW DATABASES']);
+
+        expect(result.code).toBe(0);
+        expect(result.stdout).toBe('one\ntwo\nthree\n');
+    });
+});

@@ -22,6 +22,18 @@ import type {
 /** Buffer ceiling per stream for exec(). Exceeding it fails rather than truncating. */
 const DEFAULT_MAX_BUFFER = 16 * 1024 * 1024;
 
+/** Event-loop turns exec() waits for output still queued when a command exits. */
+const DRAIN_GRACE_TURNS = 3;
+
+/** Yield n turns of the event loop. Costs no wall-clock time, unlike a timer. */
+function yieldTurns(turns: number): Promise<void> {
+    return new Promise((resolve) => {
+        let left = turns;
+        const step = () => (left-- <= 0 ? resolve() : setImmediate(step));
+        step();
+    });
+}
+
 /**
  * Shared behaviour for every transport.
  *
@@ -80,7 +92,7 @@ export abstract class BaseHost implements ExecutionHost {
         });
 
         let overflow: Error | null = null;
-        const collect = (stream: NodeJS.ReadableStream, label: string): Buffer[] => {
+        const collect = (stream: NodeJS.ReadableStream, label: string) => {
             const chunks: Buffer[] = [];
             let size = 0;
             stream.on("data", (chunk: Buffer | string) => {
@@ -96,11 +108,29 @@ export abstract class BaseHost implements ExecutionHost {
                 }
                 chunks.push(buf);
             });
-            return chunks;
+
+            // Process exit and stream exhaustion are separate events. An SSH
+            // channel can report the command as finished while data already in
+            // flight is delivered on later ticks, and `close` was observed
+            // arriving before `end` - so reading the chunks at exit time can
+            // miss the tail, or all of it. That would silently truncate a
+            // database listing into a backup that skips databases.
+            //
+            // `end` means every byte was delivered, so it wins. `close` is
+            // accepted too, but only after one turn of the event loop, which
+            // lets data already sitting in the stream's buffer be emitted
+            // first.
+            const drained = new Promise<void>((resolve) => {
+                stream.once("end", () => resolve());
+                stream.once("error", () => resolve());
+                stream.once("close", () => setImmediate(resolve));
+            });
+
+            return { chunks, drained };
         };
 
-        const stdoutChunks = collect(proc.stdout, "stdout");
-        const stderrChunks = collect(proc.stderr, "stderr");
+        const stdout = collect(proc.stdout, "stdout");
+        const stderr = collect(proc.stderr, "stderr");
 
         if (options.stdin !== undefined && proc.stdin) {
             proc.stdin.end(options.stdin);
@@ -117,13 +147,22 @@ export abstract class BaseHost implements ExecutionHost {
 
         try {
             const { code, signal } = await proc.exit();
+            // Bounded on purpose. A stream that reports nothing at all must
+            // not be able to deadlock a command that already finished, and a
+            // channel's stderr does exactly that when the command wrote
+            // nothing to it. Yielding a few turns costs no wall-clock time and
+            // is enough to flush what the exit left queued.
+            await Promise.race([
+                Promise.all([stdout.drained, stderr.drained]),
+                yieldTurns(DRAIN_GRACE_TURNS),
+            ]);
             if (overflow) throw overflow;
             if (timedOut) {
                 throw new Error(`Command timed out after ${options.timeoutMs} ms: ${argv[0]}`);
             }
             return {
-                stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-                stderr: Buffer.concat(stderrChunks).toString("utf8"),
+                stdout: Buffer.concat(stdout.chunks).toString("utf8"),
+                stderr: Buffer.concat(stderr.chunks).toString("utf8"),
                 code,
                 signal,
             };

@@ -39,6 +39,7 @@ All notable changes to DBackup are documented here.
 
 ### 🧪 Tests
 
+- **ssh**: SSH mode is now covered by automated integration tests against a real SSH server, for MySQL, MariaDB, PostgreSQL, Redis, Valkey and SQLite. It previously had none, and every SSH code path was rewritten in this release.
 - **ssh**: Added a lint guard that rejects transport branching in adapter code, direct process spawning and hand-written escaping, and checks that every source offering SSH credentials actually resolves a transport.
 - **paths**: Added coverage that slash trimming matches what the regular expressions produced and stays linear on a pathological run of slashes.
 - **mysql**: The adapter suites now run every expectation against both connection modes from one table and assert on argument lists rather than assembled command strings.

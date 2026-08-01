@@ -25,7 +25,7 @@ describe('Integration Tests: Database Connectivity', () => {
                 let result;
                 for(let i=0; i<3; i++) {
                     if (!adapter.test) throw new Error("Adapter does not implement test method");
-                    result = await adapter.test(config as any);
+                    result = await withHost(adapter, config, (host) => adapter.test!(config as any, host));
                     if(result.success) break;
                     await new Promise(r => setTimeout(r, 2000)); // Wait 2s before retry
                 }

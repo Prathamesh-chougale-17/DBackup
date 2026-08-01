@@ -112,17 +112,25 @@ export class SshHost extends BaseHost {
         const client = await this.client();
         const release = await this.acquireChannel();
 
-        let channel: ClientChannel;
-        try {
-            channel = await new Promise<ClientChannel>((resolve, reject) => {
-                client.exec(command, (err, ch) => (err ? reject(err) : resolve(ch)));
+        // The channel is wrapped inside the callback, synchronously.
+        //
+        // Awaiting the channel first and wrapping afterwards loses events: the
+        // await yields, and ssh2 can deliver exit, data and close for a short
+        // command in that same batch, before any listener exists. The exit
+        // status then never arrives, exec() reports `code: null` for a command
+        // that succeeded, and every `code !== 0` check in the adapters reads it
+        // as a failure. It showed up as an intermittent "binary not found" for
+        // a binary that is plainly there.
+        return await new Promise<HostProcess>((resolve, reject) => {
+            client.exec(command, (err, ch) => {
+                if (err) {
+                    release();
+                    reject(err);
+                    return;
+                }
+                resolve(wrapChannel(ch, options.stdin === true, release));
             });
-        } catch (error) {
-            release();
-            throw error;
-        }
-
-        return wrapChannel(channel, options.stdin === true, release);
+        });
     }
 
     // Not `async`, so the memoized promise is returned by identity. See DirectHost.

@@ -314,6 +314,38 @@ describe("transport lint guards", () => {
         ).toEqual([]);
     });
 
+    it("passes a host to every adapter call in the integration tests", () => {
+        // `test` and `ping` keep an optional host on BaseAdapter, because
+        // requiring one there would have forced a host through 180 storage and
+        // notification call sites that have no transport. The cost is that
+        // forgetting one here compiles: the adapter then answers "requires an
+        // execution host" and the test reads it as a failed connection.
+        const files = findFiles(path.resolve(__dirname, "../../integration"));
+        const call = /\badapter\.(test|ping|getDatabases|getDatabasesWithStats|dump|restore)!?\s*\(/;
+
+        const violations: Violation[] = [];
+        for (const file of files) {
+            const lines = stripNonCode(fs.readFileSync(file, "utf8"));
+            lines.forEach((line, index) => {
+                if (call.test(line) && !line.includes("host")) {
+                    violations.push({
+                        file: path.relative(path.resolve(__dirname, "../../.."), file),
+                        line: index + 1,
+                        content: line.trim(),
+                        rule: "adapter call without a host",
+                    });
+                }
+            });
+        }
+
+        const rule: Rule[] = [{
+            name: "adapter call without a host",
+            pattern: call,
+            reason: "Wrap the call in withHost(adapter, config, (host) => ...) so it uses the configured transport.",
+        }];
+        expect(violations, formatViolationReport(violations, rule)).toEqual([]);
+    });
+
     it("confines ssh2 to the transport layer", () => {
         const files = findFiles(SRC_DIR, ["transport"]);
         const offenders = files.filter((file) => {
