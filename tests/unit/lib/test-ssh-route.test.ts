@@ -154,6 +154,41 @@ describe("POST /api/adapters/test-ssh", () => {
         expect(body.message).not.toContain("shared with SQL Server");
     });
 
+    it.each([
+        ["a relative path", "var/opt/mssql/backup"],
+        ["an embedded newline", "/var/opt/mssql/backup\nrm -rf /"],
+        ["a carriage return", "/var/opt\r/backup"],
+        ["a NUL byte", "/var/opt/mssql/backup\0"],
+        ["an empty string", ""],
+    ])("rejects a backup path with %s before it reaches a command", async (_label, backupPath) => {
+        mocks.registryGet.mockReturnValue({ id: "mssql" });
+
+        const response = await POST(request({
+            config: { ...sshConfig, backupPath },
+            adapterId: "mssql",
+        }));
+        const body = await response.json();
+
+        expect(response.status).toBe(400);
+        expect(body.success).toBe(false);
+        expect(mocks.checkBackupPath).not.toHaveBeenCalled();
+    });
+
+    it("accepts an absolute path containing spaces", async () => {
+        // Spaces are legal in a directory name and the transport quotes them,
+        // so the boundary must not reject them.
+        mocks.registryGet.mockReturnValue({ id: "mssql" });
+        mocks.checkBackupPath.mockResolvedValue({ readable: true, writable: true });
+
+        const response = await POST(request({
+            config: { ...sshConfig, backupPath: "/var/opt/sql server/backup" },
+            adapterId: "mssql",
+        }));
+
+        expect((await response.json()).success).toBe(true);
+        expect(mocks.checkBackupPath).toHaveBeenCalled();
+    });
+
     it("still checks it for a direct MSSQL source using SSH file transfer", async () => {
         mocks.registryGet.mockReturnValue({ id: "mssql" });
         mocks.checkBackupPath.mockResolvedValue({ readable: true, writable: true });

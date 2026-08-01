@@ -16,6 +16,14 @@ registerAdapters();
 
 const log = logger.child({ route: "adapters/test-ssh" });
 
+/**
+ * An absolute path, no control characters, bounded length.
+ *
+ * Anchored at both ends around one character class, so it cannot backtrack -
+ * the same reason path handling elsewhere uses loops instead of `/\/+$/`.
+ */
+const VALID_BACKUP_PATH = /^\/[^\0\n\r]{0,4095}$/;
+
 export async function POST(req: NextRequest) {
     const ctx = await getAuthContext(await headers());
 
@@ -92,6 +100,18 @@ export async function POST(req: NextRequest) {
         // SSH mode, so a MySQL or PostgreSQL source was told its SQL Server
         // backup path was missing.
         if (adapterId === "mssql") {
+            // `backupPath` is the only value from this request body that ends up
+            // in a remote command line, so it is checked here rather than trusted
+            // from the body. The transport quotes it either way, but a boundary
+            // that accepts an absolute path and nothing else is one less thing
+            // resting on that.
+            const backupPath = resolvedConfig.backupPath;
+            if (backupPath !== undefined && !VALID_BACKUP_PATH.test(String(backupPath))) {
+                return NextResponse.json(
+                    { success: false, message: "Backup path must be an absolute path without control characters." },
+                    { status: 400 },
+                );
+            }
             return testMssqlSsh(resolvedConfig as MSSQLConfig, spec, sshHost, sshPort);
         }
 

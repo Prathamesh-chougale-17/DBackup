@@ -108,6 +108,19 @@ export class SshHost extends BaseHost {
     }
 
     async spawn(argv: string[], options: SpawnOptions = {}): Promise<HostProcess> {
+        // SSH has no argv form: the protocol's exec request carries one string
+        // that the remote shell interprets, so a command string has to be built.
+        // buildRemoteCommand is the only thing that builds one, and it puts every
+        // argument, environment value, cwd and stdin path through shellEscape,
+        // which single-quotes it and rejects NUL. ssh-escape.test.ts proves that
+        // by round-tripping hostile values - `a'; rm -rf /; echo '`, `$(id)`,
+        // backticks, newlines - through a real shell and comparing the arguments
+        // that come back out.
+        //
+        // CodeQL flags the client.exec call below as js/command-line-injection.
+        // It sees config data reaching an exec sink and cannot model shellEscape
+        // as a sanitizer. Anything that builds a command by concatenation instead
+        // of going through here would be a real finding.
         const command = buildRemoteCommand(argv, options);
         const client = await this.client();
         const release = await this.acquireChannel();
