@@ -12,13 +12,25 @@ function hostWithDirectory(path = "/var/opt/mssql/backup") {
 }
 
 describe("checkBackupPath", () => {
-    it("puts the probe inside the backup directory", async () => {
+    it("writes the probe into the backup directory over the file transfer", async () => {
+        // Deliberately not a remote `touch`. The backup fetches the .bak over
+        // SFTP, so probing with the transfer tests what actually has to work -
+        // and keeps the path out of a shell command entirely.
         const host = hostWithDirectory();
 
         const result = await checkBackupPath(host, "/var/opt/mssql/backup");
 
         expect(result).toEqual({ readable: true, writable: true });
-        expect(host.calls.exec[0]).toEqual(["touch", "/var/opt/mssql/backup/.dbackup_probe"]);
+        expect(host.calls.putFile[0].hostPath).toBe("/var/opt/mssql/backup/.dbackup_probe");
+        expect(host.calls.exec).toEqual([]);
+    });
+
+    it("removes the probe again", async () => {
+        const host = hostWithDirectory();
+
+        await checkBackupPath(host, "/var/opt/mssql/backup");
+
+        expect(host.calls.removed).toContain("/var/opt/mssql/backup/.dbackup_probe");
     });
 
     it("does not double the separator when the path ends in slashes", async () => {
@@ -32,7 +44,7 @@ describe("checkBackupPath", () => {
 
         await checkBackupPath(host, "/var/opt/mssql/backup///");
 
-        expect(host.calls.exec[0]).toEqual(["touch", "/var/opt/mssql/backup/.dbackup_probe"]);
+        expect(host.calls.putFile[0].hostPath).toBe("/var/opt/mssql/backup/.dbackup_probe");
     });
 
     it("stays fast on a pathological run of slashes", async () => {
@@ -56,15 +68,12 @@ describe("checkBackupPath", () => {
 
         expect(result.readable).toBe(false);
         expect(result.error).toContain("Path not found");
-        expect(host.calls.exec).toEqual([]);
+        expect(host.calls.putFile).toEqual([]);
     });
 
     it("reports a directory it cannot write to", async () => {
-        const host = createFakeHost({
-            kind: "ssh",
-            directories: ["/var/opt/mssql/backup"],
-            onExec: () => ({ code: 1, stderr: "touch: cannot touch: Permission denied" }),
-        });
+        const host = hostWithDirectory();
+        vi.spyOn(host, "putFile").mockRejectedValue(new Error("Permission denied"));
 
         const result = await checkBackupPath(host, "/var/opt/mssql/backup");
 
