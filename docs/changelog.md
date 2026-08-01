@@ -26,6 +26,8 @@ All notable changes to DBackup are documented here.
 - **redis**: Browsing keys over SSH no longer breaks on key names containing quotes or spaces. The key list was pasted into a remote shell command and is now passed as separate arguments.
 - **firebird**: The health check on an SSH source reported the connection as healthy whenever SSH itself worked, even when the Firebird server behind it was down. It now opens the database port as reachable from the SSH host.
 - **sqlite**: Browsing tables over SSH no longer fails on a database path or table name containing a quote or a space. The path and the query were assembled into a remote shell command and are now passed as separate arguments.
+- **mongodb**: Listing collections and browsing documents over SSH no longer break on a database or collection name containing a single quote. The query script was pasted into a quoted remote shell command and is now passed as one argument.
+- **mongodb**: A single-database restore no longer streams the archive through the client's standard input. It reads the archive from a path, the same way multi-database restores already did, which removes a source of truncated restores on large archives.
 
 ### 🧪 Tests
 

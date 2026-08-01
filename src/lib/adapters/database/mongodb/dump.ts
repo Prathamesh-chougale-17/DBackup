@@ -1,9 +1,8 @@
 import type { ExecutionHost } from "@/lib/transport";
+import { MONGODUMP, buildConnectionArgs } from "./args";
+import { maskSecrets } from "../redis/args";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
-import { spawn } from "child_process";
-import { createWriteStream } from "fs";
-import { waitForProcess } from "@/lib/adapters/process";
 import fs from "fs/promises";
 import path from "path";
 import {
@@ -14,14 +13,6 @@ import {
 import { TarFileEntry, TarManifest } from "../common/types";
 import { MongoDBConfig } from "@/lib/adapters/definitions";
 import { getDatabases } from "./connection";
-import {
-    SshClient,
-    isSSHMode,
-    extractSshConfig,
-    buildMongoArgs,
-    remoteBinaryCheck,
-    shellEscape,
-} from "@/lib/ssh";
 
 /**
  * Extended MongoDB config for dump operations with runtime fields
@@ -31,133 +22,60 @@ type MongoDBDumpConfig = MongoDBConfig & {
 };
 
 /**
- * Dump a single MongoDB database using mongodump --archive --gzip
+ * Dump a single MongoDB database with mongodump --archive --gzip.
+ *
+ * mongodump writes the archive to a path, so the destination is requested from
+ * the transport: on a direct host that is the final file, over SSH it is a
+ * remote temp file whose bytes are fetched and cleaned up afterwards. The SSH
+ * path used to ask for --archive on stdout and stream it back instead.
  */
 async function dumpSingleDatabase(
     dbName: string,
     outputPath: string,
     config: MongoDBDumpConfig,
+    host: ExecutionHost,
     log: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<void> {
-    if (isSSHMode(config)) {
-        return dumpSingleDatabaseSSH(dbName, outputPath, config, log);
-    }
+    const mongodump = await host.which(...MONGODUMP);
 
-    const args: string[] = [];
-
-    if (config.uri) {
-        args.push(`--uri=${config.uri}`);
-    } else {
-        args.push('--host', config.host);
-        args.push('--port', String(config.port));
-
-        if (config.user && config.password) {
-            args.push('--username', config.user);
-            args.push('--password', config.password);
-            args.push('--authenticationDatabase', config.authenticationDatabase || 'admin');
-        }
-    }
-
-    args.push('--db', dbName);
-    args.push(`--archive=${outputPath}`);
-    args.push('--gzip');
-
-    // Add custom options
-    if (config.options) {
-        const parts = config.options.match(/[^\s"']+|"([^"]*)"|'([^']*)'/g) || [];
-        for (const part of parts) {
-            if (part.startsWith('"') && part.endsWith('"')) args.push(part.slice(1, -1));
-            else if (part.startsWith("'") && part.endsWith("'")) args.push(part.slice(1, -1));
-            else args.push(part);
-        }
-    }
-
-    // Mask password in logs
-    const logArgs = args.map(arg => {
-        if (arg.startsWith('--password')) return '--password=******';
-        if (arg.startsWith('mongodb')) return 'mongodb://...';
-        return arg;
-    });
-
-    log(`Dumping database: ${dbName}`, 'info', 'command', `mongodump ${logArgs.join(' ')}`);
-
-    const dumpProcess = spawn('mongodump', args);
-    const stderrBuffer: string[] = [];
-
-    dumpProcess.stderr.on('data', (data) => {
-        const msg = data.toString().trim();
-        if (msg) stderrBuffer.push(msg);
-    });
-
-    await waitForProcess(dumpProcess, 'mongodump');
-
-    if (stderrBuffer.length > 0) {
-        log(`mongodump output`, 'info', 'command', stderrBuffer.join('\n'));
-    }
-}
-
-/**
- * SSH variant: run mongodump on the remote server with --archive to stdout, stream back.
- */
-async function dumpSingleDatabaseSSH(
-    dbName: string,
-    outputPath: string,
-    config: MongoDBDumpConfig,
-    log: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
-): Promise<void> {
-    const sshConfig = extractSshConfig(config)!;
-    const ssh = new SshClient();
-    await ssh.connect(sshConfig);
-
-    try {
-        const mongodumpBin = await remoteBinaryCheck(ssh, "mongodump");
-        const args = buildMongoArgs(config);
-
-        args.push("--db", shellEscape(dbName));
-        args.push("--archive"); // stdout mode
-        args.push("--gzip");
+    await host.captureOutput(outputPath, {}, async (hostPath) => {
+        const args = [
+            ...buildConnectionArgs(config),
+            "--db", dbName,
+            `--archive=${hostPath}`,
+            "--gzip",
+        ];
 
         if (config.options) {
-            const parts = config.options.match(/[^\s"']+|"([^"]*)"|'([^']*)'/g) || [];
-            for (const part of parts) {
-                if (part.startsWith('"') && part.endsWith('"')) args.push(part.slice(1, -1));
-                else if (part.startsWith("'") && part.endsWith("'")) args.push(part.slice(1, -1));
-                else args.push(part);
-            }
+            args.push(...parseOptionString(config.options));
         }
 
-        const cmd = `${mongodumpBin} ${args.join(" ")}`;
-        log(`Dumping database (SSH): ${dbName}`, 'info', 'command', `mongodump ${args.join(' ').replace(config.password || '___NONE___', '******')}`);
+        log(`Dumping database: ${dbName}`, "info", "command", `${mongodump} ${maskSecrets(args, config.password)}`);
 
-        const writeStream = createWriteStream(outputPath);
-
-        await new Promise<void>((resolve, reject) => {
-            ssh.execStream(cmd, (err, stream) => {
-                if (err) return reject(err);
-
-                stream.pipe(writeStream);
-
-                const stderrChunks: string[] = [];
-                stream.stderr.on('data', (data: any) => {
-                    const msg = data.toString().trim();
-                    if (msg) stderrChunks.push(msg);
-                });
-
-                stream.on('exit', (code: number | null, signal?: string) => {
-                    if (stderrChunks.length > 0) {
-                        log(`mongodump output`, 'info', 'command', stderrChunks.join('\n'));
-                    }
-                    if (code === 0) resolve();
-                    else reject(new Error(`Remote mongodump exited with code ${code ?? 'null'}${signal ? ` (signal: ${signal})` : ''}`));
-                });
-
-                stream.on('error', (err: Error) => reject(err));
-                writeStream.on('error', (err: Error) => reject(err));
-            });
+        const proc = await host.spawn([mongodump, ...args]);
+        proc.stdout.on("data", () => { /* mongodump writes progress to stderr */ });
+        proc.stderr.on("data", (data: Buffer) => {
+            const msg = data.toString().trim();
+            if (msg) log(`[mongodump] ${msg}`, "info");
         });
-    } finally {
-        ssh.end();
-    }
+
+        const { code, signal } = await proc.exit();
+        if (code !== 0) {
+            throw new Error(
+                `mongodump exited with code ${code ?? "null"}${signal ? ` (signal: ${signal})` : ""}`,
+            );
+        }
+    });
+}
+
+/** Split a user-supplied option string, honouring single and double quotes. */
+function parseOptionString(options: string): string[] {
+    const parts = options.match(/[^\s"']+|"([^"]*)"|'([^']*)'/g) || [];
+    return parts.map((part) => {
+        if (part.startsWith('"') && part.endsWith('"')) return part.slice(1, -1);
+        if (part.startsWith("'") && part.endsWith("'")) return part.slice(1, -1);
+        return part;
+    });
 }
 
 /**
@@ -172,7 +90,7 @@ export async function dumpOne(
     _host: ExecutionHost,
     onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
 ): Promise<{ size: number }> {
-    await dumpSingleDatabase(dbName, destinationPath, config, onLog ?? (() => {}));
+    await dumpSingleDatabase(dbName, destinationPath, config, _host, onLog ?? (() => {}));
     const stats = await fs.stat(destinationPath);
     return { size: stats.size };
 }
@@ -224,7 +142,7 @@ export async function dump(
         // Case 1: Single Database or ALL - Direct archive dump
         if (dbs.length <= 1) {
             log(`Starting single-database dump (archive format)`, 'info');
-            await dumpSingleDatabase(dbs[0] || '', destinationPath, config, log);
+            await dumpSingleDatabase(dbs[0] || '', destinationPath, config, _host, log);
         }
         // Case 2: Multiple Databases - TAR archive with individual mongodump per DB
         else {
@@ -239,7 +157,7 @@ export async function dump(
                 const dumpFilename = `${dbName}.archive`;
                 const dumpPath = path.join(tempDir, dumpFilename);
 
-                await dumpSingleDatabase(dbName, dumpPath, config, log);
+                await dumpSingleDatabase(dbName, dumpPath, config, _host, log);
                 log(`Database ${dbName} dumped successfully`, 'success');
 
                 tarFiles.push({
