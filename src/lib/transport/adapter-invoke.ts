@@ -1,6 +1,6 @@
 import type { BaseAdapter } from "@/lib/core/interfaces";
 import { withHost } from "./factory";
-import type { ExecutionHost, TransportResolver } from "./types";
+import type { TransportResolver } from "./types";
 
 /**
  * The single entry point for calling `ping()` / `test()` on an adapter of
@@ -65,22 +65,6 @@ export async function runAdapterTest(
         if (!options.timeoutMs) return call;
         return withTimeoutInsideScope(call, options.timeoutMs, options.label ?? adapter.id);
     });
-}
-
-/**
- * Call `test()` on an adapter using a host the caller already owns.
- *
- * For code that is already inside a `withHost` scope and must not open a second
- * connection, such as the dump step probing the server version between listing
- * databases and dumping them.
- */
-export function testWithHost(
-    adapter: CheckableAdapter,
-    config: unknown,
-    host: ExecutionHost,
-): Promise<ConnectivityResult> | null {
-    if (!adapter.test) return null;
-    return adapter.test(config, host);
 }
 
 function withTimeoutInsideScope<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {

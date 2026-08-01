@@ -55,10 +55,12 @@ DBackup supports two connection modes for most database types:
 
 In SSH mode, DBackup connects to the remote server via SSH and executes database CLI tools (e.g., `mysqldump`, `pg_dump`) **directly on that server**. The backup output is streamed back to DBackup over the SSH connection. This is **not** an SSH tunnel - the database tools run remotely.
 
-**Supported adapters:** MySQL, MariaDB, PostgreSQL, MongoDB, Redis, Valkey, SQLite
+**Supported adapters:** MySQL, MariaDB, PostgreSQL, MongoDB, Redis, Valkey, SQLite, Firebird, MSSQL
 
 ::: warning Required: Database CLI Tools on Remote Host
 When using SSH mode, the required database client tools **must be installed on the remote SSH server**. DBackup does not transfer or install any tools - it only executes them. See the individual adapter pages for the specific tools required.
+
+[MSSQL](/user-guide/sources/mssql) is the exception and needs no tools installed: SQL Server writes the backup itself through a T-SQL command, so SSH mode tunnels that connection instead of running anything remotely. It is the only adapter that works this way.
 :::
 
 ### SSH Configuration Fields

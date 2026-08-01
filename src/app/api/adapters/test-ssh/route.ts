@@ -86,8 +86,12 @@ export async function POST(req: NextRequest) {
         const sshHost = spec.ssh.host;
         const sshPort = spec.ssh.port ?? 22;
 
-        // MSSQL uses SFTP-based SSH test (backup path check)
-        if (resolvedConfig.fileTransferMode === "ssh" || resolvedConfig.connectionMode === "ssh") {
+        // Only SQL Server has a backup directory that both the server and the
+        // SSH account have to reach. Testing that here used to key off
+        // `connectionMode === "ssh"` alone, which is true for every adapter in
+        // SSH mode, so a MySQL or PostgreSQL source was told its SQL Server
+        // backup path was missing.
+        if (adapterId === "mssql") {
             return testMssqlSsh(resolvedConfig as MSSQLConfig, spec, sshHost, sshPort);
         }
 

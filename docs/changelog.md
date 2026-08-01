@@ -35,7 +35,9 @@ All notable changes to DBackup are documented here.
 
 ### 📝 Documentation
 
-- **wiki**: The database adapter developer guide now documents the transport layer, replacing the SSH section that described the removed client.
+- **MSSQL**: The SQL Server guide now documents the new SSH connection mode, and states which settings apply to direct connections only. The supported-engine tables listed SQL Server as direct-only with SSH available for file transfer.
+- **sources**: The connection mode overview was missing Firebird from the list of adapters that support SSH mode.
+- **wiki**: The developer guide now documents the transport layer, replacing the sections that described the removed SSH client.
 
 ### 🧪 Tests
 

@@ -1,0 +1,137 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => ({
+    getAuthContext: vi.fn(),
+    checkPermissionWithContext: vi.fn(),
+    headers: vi.fn(),
+    registryGet: vi.fn(),
+    checkBackupPath: vi.fn(),
+    exec: vi.fn(),
+    dispose: vi.fn(),
+}));
+
+vi.mock("next/headers", () => ({ headers: () => mocks.headers() }));
+
+vi.mock("@/lib/auth/access-control", () => ({
+    getAuthContext: (...args: unknown[]) => mocks.getAuthContext(...args),
+    checkPermissionWithContext: (...args: unknown[]) => mocks.checkPermissionWithContext(...args),
+}));
+
+vi.mock("@/lib/core/registry", () => ({
+    registry: { get: (...args: unknown[]) => mocks.registryGet(...args) },
+}));
+
+vi.mock("@/lib/adapters", () => ({ registerAdapters: vi.fn() }));
+
+vi.mock("@/lib/adapters/config-resolver", () => ({
+    overlayCredentialsOnConfig: vi.fn(),
+}));
+
+vi.mock("@/lib/adapters/database/mssql/preflight", () => ({
+    checkBackupPath: (...args: unknown[]) => mocks.checkBackupPath(...args),
+}));
+
+vi.mock("@/lib/logging/logger", () => ({
+    logger: { child: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }) },
+}));
+
+vi.mock("@/lib/transport", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("@/lib/transport")>();
+    class FakeSshHost {
+        exec = (...args: unknown[]) => mocks.exec(...args);
+        dispose = () => mocks.dispose();
+    }
+    return {
+        ...actual,
+        SshHost: FakeSshHost,
+        createHost: () => new FakeSshHost(),
+    };
+});
+
+import { POST } from "@/app/api/adapters/test-ssh/route";
+
+function request(body: unknown) {
+    return { json: async () => body } as never;
+}
+
+const sshConfig = {
+    connectionMode: "ssh",
+    sshHost: "192.168.252.4",
+    sshPort: 22,
+    sshUsername: "ubuntu",
+    sshAuthType: "privateKey",
+    sshPrivateKey: "key",
+};
+
+describe("POST /api/adapters/test-ssh", () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mocks.getAuthContext.mockResolvedValue({ userId: "u1" });
+        mocks.checkPermissionWithContext.mockResolvedValue(undefined);
+        mocks.headers.mockResolvedValue(new Headers());
+        mocks.registryGet.mockReturnValue({ id: "mysql" });
+        mocks.exec.mockResolvedValue({ code: 0, stdout: "connected\n", stderr: "" });
+        mocks.dispose.mockResolvedValue(undefined);
+        mocks.checkBackupPath.mockResolvedValue({ readable: false, writable: false, error: "Path not found" });
+    });
+
+    it("does not check the SQL Server backup path for other adapters", async () => {
+        // The condition used to be `connectionMode === "ssh"`, which is true for
+        // every adapter in SSH mode. A MySQL source was told its SQL Server
+        // backup path was missing on a host that never ran SQL Server.
+        const response = await POST(request({ config: sshConfig, adapterId: "mysql" }));
+        const body = await response.json();
+
+        expect(mocks.checkBackupPath).not.toHaveBeenCalled();
+        expect(body.success).toBe(true);
+        expect(body.message).not.toContain("backup path");
+    });
+
+    it("does not check it for a SQLite source either", async () => {
+        // SQLite stores `mode` and unprefixed SSH keys, so it needs its own
+        // resolver to be reachable at all.
+        const { sqliteTransport } = await import("@/lib/adapters/database/sqlite/transport");
+        mocks.registryGet.mockReturnValue({ id: "sqlite", transport: sqliteTransport });
+        const response = await POST(request({
+            config: { mode: "ssh", host: "10.0.0.4", username: "ops", authType: "privateKey", privateKey: "key" },
+            adapterId: "sqlite",
+        }));
+        const body = await response.json();
+
+        expect(mocks.checkBackupPath).not.toHaveBeenCalled();
+        expect(body.success).toBe(true);
+    });
+
+    it("checks the backup path for MSSQL, where the SSH account needs that directory", async () => {
+        mocks.registryGet.mockReturnValue({ id: "mssql" });
+        const response = await POST(request({
+            config: { ...sshConfig, backupPath: "/var/opt/mssql/backup" },
+            adapterId: "mssql",
+        }));
+        const body = await response.json();
+
+        expect(mocks.checkBackupPath).toHaveBeenCalled();
+        expect(body.success).toBe(false);
+        expect(body.message).toContain("backup path is not accessible");
+    });
+
+    it("still checks it for a direct MSSQL source using SSH file transfer", async () => {
+        mocks.registryGet.mockReturnValue({ id: "mssql" });
+        mocks.checkBackupPath.mockResolvedValue({ readable: true, writable: true });
+        const response = await POST(request({
+            config: {
+                fileTransferMode: "ssh",
+                sshHost: "10.0.0.4",
+                sshUsername: "ops",
+                sshAuthType: "privateKey",
+                sshPrivateKey: "key",
+                backupPath: "/var/opt/mssql/backup",
+            },
+            adapterId: "mssql",
+        }));
+        const body = await response.json();
+
+        expect(mocks.checkBackupPath).toHaveBeenCalled();
+        expect(body.success).toBe(true);
+    });
+});

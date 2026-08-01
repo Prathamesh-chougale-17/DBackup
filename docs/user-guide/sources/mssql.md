@@ -21,20 +21,40 @@ Unlike other database adapters that use CLI dump tools, SQL Server backup uses:
 
 This means the backup file is created **on the SQL Server** first, then transferred to DBackup.
 
+## Connection Modes
+
+| Mode | SQL Server connection | `.bak` transfer |
+| :--- | :--- | :--- |
+| **Direct** | Straight to the SQL Server port | Shared volume or SSH, chosen under [File Transfer Modes](#file-transfer-modes) |
+| **SSH** | Tunnelled through the SSH connection | The same SSH connection, nothing to configure |
+
+**SSH mode** is the simpler setup and the better choice when the SQL Server port is not reachable from DBackup. DBackup opens one SSH connection to the server and sends the SQL Server protocol through it, so **port 1433 does not have to be exposed at all**. The `.bak` file travels back over that same connection, which is why SSH mode has no File Transfer settings.
+
+Certificate validation still applies through the tunnel: DBackup validates against the hostname in the **Host** field, not against the tunnel endpoint. Encryption settings behave exactly as in direct mode.
+
+::: tip Existing sources are unaffected
+Sources created before SSH mode existed keep working exactly as they did. They stay in direct mode, and their File Transfer settings are untouched. There is nothing to migrate.
+:::
+
+SSH mode requires an `SSH_KEY` [Credential Profile](/user-guide/security/credential-profiles) and an SSH account on the SQL Server host. That account needs read and write access to the **Backup Path**, but no SQL Server privileges - the database login is still what authenticates against SQL Server.
+
 ## Configuration
 
 ::: info Credential Profiles required
-Microsoft SQL Server requires a [Credential Profile](/user-guide/security/credential-profiles). Create an `USERNAME_PASSWORD` profile in **Settings → Vault → Credentials** before saving the source. SSH file transfer mode additionally requires an `SSH_KEY` profile.
+Microsoft SQL Server requires a [Credential Profile](/user-guide/security/credential-profiles). Create an `USERNAME_PASSWORD` profile in **Settings → Vault → Credentials** before saving the source. SSH connection mode, and SSH file transfer mode in direct connections, additionally require an `SSH_KEY` profile.
 :::
 
 ### Connection Settings
 
 | Field | Description | Default |
 | :--- | :--- | :--- |
+| **Connection Mode** | `Direct` or `SSH` (see [Connection Modes](#connection-modes)) | `Direct` |
 | **Host** | SQL Server hostname | `localhost` |
 | **Port** | SQL Server port | `1433` |
 | **Primary Credential** | `USERNAME_PASSWORD` credential profile (SQL Server login + password) | Required |
 | **Database** | Database name(s) to backup | Required |
+
+In SSH mode, **Host** and **Port** describe the SQL Server as reachable **from the SSH host**. `localhost:1433` is the usual value when SQL Server runs on that machine.
 
 ### Configuration Settings
 
@@ -47,6 +67,8 @@ Microsoft SQL Server requires a [Credential Profile](/user-guide/security/creden
 
 ### File Transfer Settings
 
+These apply to **direct** connection mode only. In SSH mode the `.bak` file travels over the SSH connection and none of these fields are shown.
+
 | Field | Description | Default |
 | :--- | :--- | :--- |
 | **Backup Path (Server)** | Server-side backup directory | `/var/opt/mssql/backup` |
@@ -58,9 +80,13 @@ Microsoft SQL Server requires a [Credential Profile](/user-guide/security/creden
 
 ## File Transfer Modes
 
+::: info Direct connection mode only
+These modes describe how a **direct** connection reaches the `.bak` file. In SSH connection mode the file comes back over the SSH connection already, so there is nothing to choose here. See [Connection Modes](#connection-modes).
+:::
+
 DBackup supports two modes to access the `.bak` files that SQL Server creates on its filesystem.
 
-### Local Mode (Shared Volume)
+### Local File Transfer (Shared Volume)
 
 Use this when DBackup and SQL Server share a filesystem - typically via Docker volume mounts or NFS shares.
 
@@ -88,7 +114,7 @@ services:
 4. DBackup processes (compress/encrypt) and uploads to destination
 5. Cleanup: Original `.bak` file is deleted
 
-### SSH Mode (Remote Server)
+### SSH File Transfer (Remote Server)
 
 Use this when SQL Server runs on a remote host (bare-metal, VM, or remote Docker) and there is no shared filesystem. DBackup connects via SSH/SFTP to download/upload `.bak` files.
 
