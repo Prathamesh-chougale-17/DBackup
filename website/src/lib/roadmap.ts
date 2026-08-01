@@ -30,6 +30,30 @@ export interface RoadmapItem {
 
 export const ROADMAP_ITEMS: RoadmapItem[] = [
   {
+    slug: "docker-volume-backups",
+    title: "Docker Volume Backups",
+    description:
+      "Docker volumes as a backup source, listed from the target host the way databases already are, so you pick them instead of typing paths. Containers using a selected volume are stopped for the export and started again afterwards, which you can turn off per job when the data is safe to copy live.",
+    status: "planned",
+    category: "backup-engine",
+  },
+  {
+    slug: "dbackup-agent",
+    title: "DBackup Agent",
+    description:
+      "A small container on the target host that DBackup talks to instead of opening an SSH session, for hosts where SSH access is not an option. Dumps still stream back to DBackup for compression and encryption, so the encryption key and the storage credentials never leave it.",
+    status: "planned",
+    category: "backup-engine",
+  },
+  {
+    slug: "sync-jobs",
+    title: "Sync Jobs",
+    description:
+      "A second kind of job next to backups: keep a target in step with a source on its own schedule. Copy a file or database backup onto another host, or replicate one database into another, without building a backup and restoring it by hand every time.",
+    status: "planned",
+    category: "backup-engine",
+  },
+  {
     slug: "stream-based-backup-pipeline",
     title: "Stream-based Backup Pipeline",
     description:
@@ -43,7 +67,7 @@ export const ROADMAP_ITEMS: RoadmapItem[] = [
     title: "Runner Resilience",
     description:
       "Exponential backoff retry logic for transient errors, plus a dead letter queue for jobs that fail repeatedly and need investigation.",
-    status: "planned",
+    status: "idea",
     category: "backup-engine",
   },
   {
