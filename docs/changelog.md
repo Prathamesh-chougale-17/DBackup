@@ -2,6 +2,26 @@
 
 All notable changes to DBackup are documented here.
 
+## vNEXT
+*Release: In Progress*
+
+### 🎨 Improvements
+
+- **transport**: Execution hosts can now open a stream to a Unix domain socket on the target machine, over SSH as well as locally. This is groundwork for reaching a container runtime that listens on a socket rather than a port, and has no effect on its own yet.
+- **transport**: Both execution hosts now key their binary lookup cache on a separator that no binary name can contain, so two different candidate lists can no longer share an entry. One of them held that separator as a raw null byte in the source file, which made the file read as binary to `grep` and every other text tool.
+
+### 🧪 Tests
+
+- **transport**: Socket connections are covered for both execution hosts, including that a forwarding channel does not compete with command channels for the SSH session limit, and that a server refusing to forward reports which setting to change.
+
+### 🐳 Docker
+
+- **Image**: `skyfay/dbackup:vNEXT`
+- **Also tagged as**: `latest`, `vNEXT`
+- **CI Image**: `skyfay/dbackup:ci`
+- **Platforms**: linux/amd64, linux/arm64
+
+
 ## v3.1.0 - SSH Connection Mode for MSSQL, SSH Transport rewrite, and Bug Fixes
 *Released: Aug 1, 2026*
 

@@ -53,6 +53,10 @@ export class CompositeHost extends BaseHost {
         return this.execHost.connect(remoteHost, remotePort);
     }
 
+    connectSocket(socketPath: string): Promise<Duplex> {
+        return this.execHost.connectSocket(socketPath);
+    }
+
     forwardPort(remoteHost: string, remotePort: number): Promise<PortForward> {
         return this.execHost.forwardPort(remoteHost, remotePort);
     }

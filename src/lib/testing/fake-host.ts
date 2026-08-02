@@ -36,6 +36,8 @@ export interface FakeHostCalls {
     tempFiles: Array<{ path: string; content: string; mode?: number }>;
     removed: string[];
     forwards: Array<{ host: string; port: number }>;
+    /** Socket paths passed to connectSocket(), in order. */
+    sockets: string[];
     disposed: number;
 }
 
@@ -78,6 +80,7 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
         tempFiles: [],
         removed: [],
         forwards: [],
+        sockets: [],
         disposed: 0,
     };
 
@@ -183,6 +186,11 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
         },
 
         async connect(): Promise<Duplex> {
+            return new PassThrough();
+        },
+
+        async connectSocket(socketPath): Promise<Duplex> {
+            calls.sockets.push(socketPath);
             return new PassThrough();
         },
 

@@ -53,6 +53,7 @@ export abstract class BaseHost implements ExecutionHost {
     abstract removeFile(hostPath: string): Promise<void>;
     abstract stat(hostPath: string): Promise<HostStat | null>;
     abstract connect(remoteHost: string, remotePort: number): Promise<Duplex>;
+    abstract connectSocket(socketPath: string): Promise<Duplex>;
     abstract forwardPort(remoteHost: string, remotePort: number): Promise<PortForward>;
     abstract dispose(): Promise<void>;
 

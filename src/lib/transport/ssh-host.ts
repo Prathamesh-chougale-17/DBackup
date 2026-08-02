@@ -151,7 +151,7 @@ export class SshHost extends BaseHost {
         if (candidates.length === 0) {
             return Promise.reject(new Error("which() needs at least one candidate."));
         }
-        const key = candidates.join(" ");
+        const key = candidates.join("\0");
         let pending = this.whichCache.get(key);
         if (!pending) {
             pending = this.resolveBinary(candidates);
@@ -280,6 +280,37 @@ export class SshHost extends BaseHost {
             client.forwardOut("127.0.0.1", 0, remoteHost, remotePort, (err, channel) =>
                 err ? reject(err) : resolve(channel),
             );
+        });
+    }
+
+    /**
+     * A `direct-streamlocal@openssh.com` channel to a socket on the target machine.
+     *
+     * Takes no slot from the channel limiter, and that is not an oversight:
+     * OpenSSH counts only shell, login and subsystem channels against
+     * MaxSessions, so a forwarding channel does not compete with `spawn` or SFTP.
+     * `connect` and `forwardPort` skip it for the same reason.
+     *
+     * The failure gets its own message because ssh2 reports a refused forward as
+     * a bare channel-open failure, which names neither of the two causes that
+     * actually occur: an sshd older than 6.7, which has no such channel type at
+     * all, and `AllowStreamLocalForwarding no`.
+     */
+    async connectSocket(socketPath: string): Promise<Duplex> {
+        const client = await this.client();
+        return new Promise((resolve, reject) => {
+            client.openssh_forwardOutStreamLocal(socketPath, (err, channel) => {
+                if (err) {
+                    reject(
+                        new Error(
+                            `${this.label} would not forward the socket ${socketPath}: ${err.message}. ` +
+                            `This needs OpenSSH 6.7 or newer with AllowStreamLocalForwarding enabled.`,
+                        ),
+                    );
+                    return;
+                }
+                resolve(channel);
+            });
         });
     }
 
