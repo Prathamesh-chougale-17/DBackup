@@ -584,6 +584,18 @@ export interface DirectoryBrowseEntry {
  * which runs in the runner's `finally` - so a snapshot outlives neither a failure nor a
  * cancellation.
  */
+/** Per-group choices the job carries into a snapshot. */
+export interface SnapshotOptions {
+    /**
+     * Whether the adapter may stop whatever is holding the sources open, for the duration.
+     *
+     * Set per job source. Uniform within a group by construction: a source that says no is
+     * always planned into a group of its own, so an adapter never has to reconcile a group
+     * where half the sources allow it and half do not.
+     */
+    stopContainers?: boolean;
+}
+
 export interface SnapshotHandle {
     /** Opaque id the adapter needs to release this snapshot again. */
     id: string;
@@ -742,8 +754,43 @@ export interface StorageAdapter extends BaseAdapter {
      */
     supportsSnapshot?(config: AdapterConfig, remotePath: string): Promise<{ supported: boolean; message: string }>;
 
-    /** Creates and exposes a snapshot. The caller must release it, whatever else happens. */
-    createSnapshot?(config: AdapterConfig, remotePath: string): Promise<SnapshotHandle>;
+    /**
+     * Groups this adapter's sources within one run, so preparation they share happens once
+     * and is undone as soon as the last of them is collected.
+     *
+     * Without it every source is its own group and the run behaves exactly as it always
+     * did. It exists for sources whose preparation reaches beyond the source itself: backing
+     * up a container volume means stopping the containers holding it, two volumes of the
+     * same container have to stop it once rather than twice, and a container whose volumes
+     * are done should start again without waiting for the rest of the job.
+     *
+     * Returns the given paths partitioned into groups, in the order they should be
+     * collected. Every input path must appear exactly once - the caller checks, because a
+     * dropped path is a file missing from a backup that still reports success.
+     */
+    planSourceGroups?(config: AdapterConfig, remotePaths: string[]): Promise<string[][]>;
+
+    /**
+     * Prepare unconditionally, rather than only when the source config asks for a snapshot.
+     *
+     * `useVss` makes shadow copies an option a user turns on for a share that supports them.
+     * An adapter that cannot be read at all without preparing first - a volume needs a
+     * container to expose it - sets this instead, and its `stopContainers`-style choices
+     * become options on createSnapshot rather than a reason to skip it.
+     */
+    alwaysSnapshot?: true;
+
+    /**
+     * Creates and exposes a snapshot. The caller must release it, whatever else happens.
+     *
+     * Takes the whole group's paths: an adapter that implements `planSourceGroups` gets one
+     * preparation covering all of them. Adapters that do not are called with exactly one.
+     */
+    createSnapshot?(
+        config: AdapterConfig,
+        remotePaths: string[],
+        options?: SnapshotOptions
+    ): Promise<SnapshotHandle>;
 
     /** Releases a snapshot. Must tolerate one that is already gone. */
     releaseSnapshot?(config: AdapterConfig, handle: SnapshotHandle): Promise<void>;

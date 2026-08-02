@@ -53,6 +53,10 @@ export async function stepCleanup(ctx: RunnerContext) {
     // failure is logged rather than thrown - it must not turn an otherwise good backup
     // into a failed one.
     for (const shadow of ctx.shadowCopies ?? []) {
+        // The collection releases each group the moment it is done, so most snapshots are
+        // already gone by the time this runs. Only the ones it could not release - and every
+        // one at all when the run died mid-collection - are still open here.
+        if (shadow.released) continue;
         try {
             await shadow.adapter.releaseSnapshot?.(shadow.config, shadow.handle);
             ctx.log(`[${shadow.configName}] Shadow copy released`, 'info', 'storage');
@@ -65,6 +69,17 @@ export async function stepCleanup(ctx: RunnerContext) {
         }
     }
     ctx.shadowCopies = [];
+
+    // 3. Close whatever the run opened outside a snapshot's lifetime.
+    for (const disposable of ctx.disposables ?? []) {
+        try {
+            await disposable.dispose();
+        } catch (e: unknown) {
+            const message = e instanceof Error ? e.message : String(e);
+            ctx.log(`Could not close ${disposable.label}: ${message}`, 'warning', 'storage');
+        }
+    }
+    ctx.disposables = [];
 }
 
 export async function stepFinalize(ctx: RunnerContext) {

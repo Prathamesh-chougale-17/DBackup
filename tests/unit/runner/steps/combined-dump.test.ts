@@ -560,6 +560,204 @@ describe('executeCombinedDump - shadow copies', () => {
         expect(createSnapshot).not.toHaveBeenCalled();
         expect(ctx.shadowCopies ?? []).toHaveLength(0);
     });
+
+    it('releases the snapshot as soon as its source is collected, not at the end of the run', async () => {
+        // The point of grouping: whatever the preparation holds - a shadow copy, a stopped
+        // container - is given back the moment it is no longer needed, rather than being
+        // held for however long the rest of the job takes.
+        const { adapter, releaseSnapshot } = snapshotSource();
+        const ctx = makeCtx({
+            sourceAdapter: undefined,
+            sources: [makeDirectorySource({ adapter, config: { address: '//server/share', useVss: true } })],
+            job: makeJob({ source: null }),
+        });
+
+        await executeCombinedDump(ctx);
+        createdTempFiles.push(ctx.tempFile!);
+
+        expect(releaseSnapshot).toHaveBeenCalledTimes(1);
+        // Still registered, so a run that dies before this point is cleaned up by
+        // stepCleanup exactly as before - but marked, so cleanup does not release it twice.
+        expect(ctx.shadowCopies).toHaveLength(1);
+        expect(ctx.shadowCopies![0].released).toBe(true);
+    });
+
+    it('leaves the snapshot for cleanup when the early release fails', async () => {
+        // A failed release must not be marked done, or the run's last chance to give it
+        // back would be skipped and the shadow copy would sit on the server.
+        const releaseSnapshot = vi.fn().mockRejectedValue(new Error('RPC server unavailable'));
+        const { adapter } = snapshotSource({ releaseSnapshot });
+        const ctx = makeCtx({
+            sourceAdapter: undefined,
+            sources: [makeDirectorySource({ adapter, config: { address: '//server/share', useVss: true } })],
+            job: makeJob({ source: null }),
+        });
+
+        await executeCombinedDump(ctx);
+        createdTempFiles.push(ctx.tempFile!);
+
+        expect(ctx.shadowCopies![0].released).toBeFalsy();
+    });
+
+    it('releases the snapshot even when collecting the source throws', async () => {
+        const { adapter, releaseSnapshot } = snapshotSource();
+        adapter.downloadDirectory = vi.fn().mockRejectedValue(new Error('share went away'));
+        const ctx = makeCtx({
+            sourceAdapter: undefined,
+            sources: [makeDirectorySource({ adapter, config: { address: '//server/share', useVss: true } })],
+            job: makeJob({ source: null }),
+        });
+
+        await expect(executeCombinedDump(ctx)).rejects.toThrow('share went away');
+        expect(releaseSnapshot).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('executeCombinedDump - grouped collection', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        planChainMock.mockResolvedValue({
+            type: 'full', chainId: 'chain-1', index: 0, chainDir: 'chain-2026-07-22T03-00-00',
+        });
+    });
+
+    /**
+     * An adapter that groups all its paths together and prepares them with one snapshot,
+     * standing in for two volumes hanging off the same container.
+     */
+    function groupingAdapter() {
+        const base = makeFakeStorageAdapter({ 'a.txt': 'AAAA' });
+        const createSnapshot = vi.fn().mockResolvedValue({
+            id: 'temp-container-1', configOverride: { exposedAt: '/vol' }, label: 'temp container',
+        });
+        const releaseSnapshot = vi.fn().mockResolvedValue(undefined);
+        const adapter = {
+            ...base,
+            alwaysSnapshot: true,
+            planSourceGroups: vi.fn(async (_c: unknown, paths: string[]) => [paths]),
+            supportsSnapshot: vi.fn().mockResolvedValue({ supported: true, message: 'ok' }),
+            createSnapshot,
+            releaseSnapshot,
+        } as any;
+        return { adapter, createSnapshot, releaseSnapshot };
+    }
+
+    it('prepares a group once and hands the adapter every path in it', async () => {
+        const { adapter, createSnapshot, releaseSnapshot } = groupingAdapter();
+        const ctx = makeCtx({
+            sourceAdapter: undefined,
+            sources: [
+                makeDirectorySource({ adapter, jobSourceId: 'js-a', remotePath: '/v-web' }),
+                makeDirectorySource({ adapter, jobSourceId: 'js-b', remotePath: '/v-cache' }),
+            ],
+            job: makeJob({ source: null }),
+        });
+
+        await executeCombinedDump(ctx);
+        createdTempFiles.push(ctx.tempFile!);
+
+        // One preparation, one teardown, both volumes named in it. Two preparations would
+        // mean stopping the shared container twice.
+        expect(createSnapshot).toHaveBeenCalledTimes(1);
+        expect(createSnapshot).toHaveBeenCalledWith(expect.anything(), ['/v-web', '/v-cache'], { stopContainers: true });
+        expect(releaseSnapshot).toHaveBeenCalledTimes(1);
+        expect(adapter.downloadDirectory).toHaveBeenCalledTimes(2);
+    });
+
+    it('prepares without asking, where the adapter cannot be read otherwise', async () => {
+        // useVss is an option a user turns on. alwaysSnapshot is an adapter saying it has no
+        // live path at all, so the preparation is not optional.
+        const { adapter, createSnapshot } = groupingAdapter();
+        const ctx = makeCtx({
+            sourceAdapter: undefined,
+            sources: [makeDirectorySource({ adapter, config: {} })],
+            job: makeJob({ source: null }),
+        });
+
+        await executeCombinedDump(ctx);
+        createdTempFiles.push(ctx.tempFile!);
+
+        expect(createSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('carries the per-source stop choice into the preparation', async () => {
+        const { adapter, createSnapshot } = groupingAdapter();
+        const ctx = makeCtx({
+            sourceAdapter: undefined,
+            sources: [makeDirectorySource({ adapter, remotePath: '/v-live', stopContainers: false })],
+            job: makeJob({ source: null }),
+        });
+
+        await executeCombinedDump(ctx);
+        createdTempFiles.push(ctx.tempFile!);
+
+        expect(createSnapshot).toHaveBeenCalledWith(expect.anything(), ['/v-live'], { stopContainers: false });
+    });
+
+    it('gives each group its own preparation, released before the next begins', async () => {
+        // Two containers: the first has to be back up before the second is touched, which
+        // is the whole reason groups are collected one after another rather than together.
+        const order: string[] = [];
+        const base = makeFakeStorageAdapter({ 'a.txt': 'AAAA' });
+        const adapter = {
+            ...base,
+            alwaysSnapshot: true,
+            planSourceGroups: vi.fn(async () => [['/v-web'], ['/v-db']]),
+            supportsSnapshot: vi.fn().mockResolvedValue({ supported: true, message: 'ok' }),
+            createSnapshot: vi.fn(async (_c: unknown, paths: string[]) => {
+                order.push(`prepare ${paths.join(',')}`);
+                return { id: paths[0], configOverride: {}, label: paths[0] };
+            }),
+            releaseSnapshot: vi.fn(async (_c: unknown, handle: { id: string }) => {
+                order.push(`release ${handle.id}`);
+            }),
+        } as any;
+        adapter.downloadDirectory = vi.fn(async (_c: unknown, remotePath: string, localPath: string) => {
+            order.push(`collect ${remotePath}`);
+            await fs.mkdir(localPath, { recursive: true });
+            await fs.writeFile(path.join(localPath, 'a.txt'), 'AAAA');
+            return {
+                files: 1, bytes: 4, failures: [],
+                entries: [{ relativePath: 'a.txt', size: 4, lastModified: new Date('2026-01-01') }],
+            };
+        });
+
+        const ctx = makeCtx({
+            sourceAdapter: undefined,
+            sources: [
+                makeDirectorySource({ adapter, jobSourceId: 'js-web', remotePath: '/v-web' }),
+                makeDirectorySource({ adapter, jobSourceId: 'js-db', remotePath: '/v-db' }),
+            ],
+            job: makeJob({ source: null }),
+        });
+
+        await executeCombinedDump(ctx);
+        createdTempFiles.push(ctx.tempFile!);
+
+        expect(order).toEqual([
+            'prepare /v-web', 'collect /v-web', 'release /v-web',
+            'prepare /v-db', 'collect /v-db', 'release /v-db',
+        ]);
+    });
+
+    it('fails the run before collecting anything when the grouping drops a source', async () => {
+        // A dropped path is a directory missing from a backup that would otherwise report
+        // success, so it has to fail, and it has to fail before any bytes move.
+        const { adapter } = groupingAdapter();
+        adapter.planSourceGroups = vi.fn(async () => [['/v-web']]);
+        const ctx = makeCtx({
+            sourceAdapter: undefined,
+            sources: [
+                makeDirectorySource({ adapter, jobSourceId: 'js-a', remotePath: '/v-web' }),
+                makeDirectorySource({ adapter, jobSourceId: 'js-b', remotePath: '/v-cache' }),
+            ],
+            job: makeJob({ source: null }),
+        });
+
+        await expect(executeCombinedDump(ctx)).rejects.toThrow(/left 1 source\(s\) out/);
+        expect(adapter.downloadDirectory).not.toHaveBeenCalled();
+        expect(adapter.createSnapshot).not.toHaveBeenCalled();
+    });
 });
 
 describe('executeCombinedDump - incremental change detection', () => {

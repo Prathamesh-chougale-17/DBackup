@@ -106,4 +106,68 @@ describe('stepCleanup - shadow copy release', () => {
         const ctx = makeCtx();
         await expect(stepCleanup(ctx)).resolves.toBeUndefined();
     });
+
+    it('skips a snapshot the collection already released', async () => {
+        // Groups are released as soon as they are collected, so by the time cleanup runs
+        // most snapshots are gone. Releasing again would be a wasted round trip and a
+        // second "released" line in a history someone has to read.
+        const release = vi.fn().mockResolvedValue(undefined);
+        const ctx = makeCtx({ shadowCopies: [{ ...makeShadow(release), released: true }] });
+
+        await stepCleanup(ctx);
+
+        expect(release).not.toHaveBeenCalled();
+    });
+
+    it('still releases one whose early release failed', async () => {
+        // The reason a failed early release stays unmarked: this is its second chance.
+        const release = vi.fn().mockResolvedValue(undefined);
+        const ctx = makeCtx({ shadowCopies: [{ ...makeShadow(release), released: false }] });
+
+        await stepCleanup(ctx);
+
+        expect(release).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('stepCleanup - run-scoped disposables', () => {
+    beforeEach(() => vi.clearAllMocks());
+
+    it('closes everything the run left open', async () => {
+        // Preparation can start before the first snapshot exists: an adapter that plans
+        // source groups reaches its server to decide, and that connection has to be closed
+        // even if the run fails immediately afterwards.
+        const first = vi.fn().mockResolvedValue(undefined);
+        const second = vi.fn().mockResolvedValue(undefined);
+        const ctx = makeCtx({
+            disposables: [
+                { label: 'the Docker connection', dispose: first },
+                { label: 'the second one', dispose: second },
+            ],
+        });
+
+        await stepCleanup(ctx);
+
+        expect(first).toHaveBeenCalledTimes(1);
+        expect(second).toHaveBeenCalledTimes(1);
+        expect(ctx.disposables).toEqual([]);
+    });
+
+    it('closes the rest when one of them throws, and says which failed', async () => {
+        const failing = vi.fn().mockRejectedValue(new Error('socket already gone'));
+        const other = vi.fn().mockResolvedValue(undefined);
+        const ctx = makeCtx({
+            disposables: [
+                { label: 'the Docker connection', dispose: failing },
+                { label: 'the second one', dispose: other },
+            ],
+        });
+
+        await expect(stepCleanup(ctx)).resolves.toBeUndefined();
+
+        expect(other).toHaveBeenCalledTimes(1);
+        const logged = (ctx.log as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0])).join('\n');
+        expect(logged).toContain('Could not close the Docker connection');
+        expect(logged).toContain('socket already gone');
+    });
 });

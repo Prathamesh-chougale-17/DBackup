@@ -4,22 +4,19 @@ import fs from "fs/promises";
 import { RunnerContext } from "../types";
 import { createHost, resolveTransport, type ExecutionHost } from "@/lib/transport";
 import { resolveAdapterConfig } from "@/lib/adapters/config-resolver";
-import { downloadDirectory } from "@/lib/adapters/storage/common/download-directory";
 import { createTempDir, cleanupTempDir } from "@/lib/adapters/database/common/tar-utils";
 import { createArchive } from "@/lib/archive/writer";
-import { ArchiveSourceEntry, DumpFormat, FileMetadata, SourceFileEntry } from "@/lib/archive/types";
+import { ArchiveSourceEntry, DumpFormat, FileMetadata } from "@/lib/archive/types";
 import { DIRECTORY_ONLY_SOURCE_TYPE, INDEX_SIDECAR_SUFFIX } from "@/lib/archive/format";
 import { getProfileMasterKey } from "@/services/backup/encryption-service";
 import { planChain } from "@/services/backup/chain-planner";
-import { carryForward, fileKey } from "@/lib/archive/chain";
+import { carryForward } from "@/lib/archive/chain";
 import { resolveBackupFilename, parseJobDatabases } from "./dump-helpers";
+import { collectDirectories } from "./collect-directories";
 import { formatBytes } from "@/lib/utils";
-import { calculateFileChecksum } from "@/lib/crypto/checksum";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { PIPELINE_STAGES } from "@/lib/core/logs";
-import { resolveTransferConcurrency } from "@/lib/adapters/transfer-concurrency";
-import { mapWithConcurrency } from "@/lib/concurrency";
 
 const log = logger.child({ step: "combined-dump" });
 
@@ -36,22 +33,10 @@ const DB_FORMAT_BY_ADAPTER: Record<string, DumpFormat> = {
 const NATIVE_COMPRESSION_ADAPTERS = new Set(["postgres"]);
 
 /**
- * How many collected files are hashed at once.
- *
- * A mix of disk reads and SHA-256, so it scales with cores, and it is capped for the same
- * reason the archive writer caps its own: the work is bursty and the machine is also serving
- * the application.
- */
-const HASH_CONCURRENCY = Math.max(2, Math.min(8, os.cpus().length || 4));
-
-/** How often the hashing phase refreshes its progress text. */
-const HASH_PROGRESS_EVERY = 25;
-
-/**
  * Combined dump path for jobs that have directory sources (JobSource), used instead of the
  * unchanged single-adapter path in 02-dump.ts. Dumps every selected database individually via
  * dumpOne() (no limit on count - Multi-DB is fully supported here, exactly as in a DB-only job),
- * downloads every directory source via downloadDirectory(), then combines everything into ONE
+ * hands the directory sources to collect-directories.ts, then combines everything into ONE
  * archive via createCombinedTar() (manifest v2). Only ever invoked when ctx.sources.length > 0 -
  * see the guard clause in 02-dump.ts.
  */
@@ -166,7 +151,6 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
         // db-only one never reports "Collecting Files". Each phase's progress is relative to
         // its own work, filling its stage bar independently.
         const dbTotal = dbNames.length;
-        const dirTotal = ctx.sources.length;
         const setPhaseProgress = (done: number, total: number) => {
             if (total === 0) return;
             ctx.updateStageProgress(Math.min(100, Math.max(0, Math.round((done / total) * 100))));
@@ -200,215 +184,22 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
             ctx.log(`Completed dump for: ${dbName}`, 'success');
         }
 
-        // ── Directory sources (each entirely independent - order doesn't matter) ──
-        if (dirTotal > 0) ctx.setStage(PIPELINE_STAGES.COLLECTING);
-        // Files within a source are downloaded in parallel; over a network source the
-        // per-file round trip dominates, so this is where most of the collection time is won.
-        // How many is decided per source: what one server welcomes another answers with rate
-        // limits, and the sources of a single job can be both.
-        let dirDone = 0;
-        for (const source of ctx.sources) {
-            // Checked before acquireSnapshot below, so a cancelled run never creates a shadow
-            // copy it then has to release.
-            ctx.abortSignal?.throwIfAborted();
-            const displayPath = source.remotePath || "/";
-            const label = `${source.configName}: ${displayPath}`;
-            const logPrefix = `[Directory: ${displayPath} via ${source.configName}]`;
-            ctx.log(`${logPrefix} Starting collection...`, 'info', 'storage');
-            // Said before anything slow starts. The detail text is otherwise still the
-            // previous source's final count, and a run that has moved on looks like a run
-            // that has stopped.
-            ctx.updateDetail(`${label}: preparing...`);
-
-            const localDir = path.join(workDir, "sources", source.jobSourceId);
-            const unitBase = dirDone;
-
-            // A snapshot, when the source is configured for one. Everything below reads
-            // through `readConfig`, which is either the plain config or the one overlaid
-            // onto the exposed snapshot - the collection itself does not know the difference.
-            const readConfig = await acquireSnapshot(ctx, source, logPrefix);
-
-            // Incremental runs skip files the chain already holds. The decision uses the
-            // listing (size and mtime), so an unchanged file is never transferred - which
-            // is where the bandwidth saving comes from, on top of the storage saving.
-            //
-            // Any difference in the timestamp counts, not just a newer one: a file whose
-            // mtime moves backwards has still been replaced - restoring an older copy or a
-            // corrected clock on the source both do that - and treating it as unchanged
-            // would silently keep the stale version. Erring this way costs one needless
-            // transfer at worst, which is the direction to err in. Matches rsync's quick
-            // check, which compares size and mtime for inequality.
-            //
-            // A full backup sets no predicate at all, so everything is transferred and
-            // hashed. That bounds how long a missed change can survive: at most until the
-            // next full, which is what "Full backup every N days" controls.
-            const previousFiles = previousBySource.get(source.jobSourceId);
-            const shouldDownload = plan.type === "incremental" && previousFiles && !job.verifyByHash
-                ? (entry: { relativePath: string; size: number; lastModified: Date }) => {
-                    const before = previousFiles.get(entry.relativePath);
-                    if (!before) return true;
-                    if (before.s !== entry.size) return true;
-                    return entry.lastModified.getTime() !== new Date(before.m).getTime();
-                }
-                : undefined;
-
-            const result = await downloadDirectory(
-                source.adapter,
-                readConfig,
-                source.remotePath,
-                localDir,
-                source.excludePatterns,
-                (processedBytes, totalBytes, processedFiles, totalFiles) => {
-                    const localFraction = totalBytes > 0
-                        ? processedBytes / totalBytes
-                        : (totalFiles > 0 ? processedFiles / totalFiles : 0);
-                    setPhaseProgress(unitBase + localFraction, dirTotal);
-                    ctx.updateDetail(`${label}: ${processedFiles}/${totalFiles} files, ${formatBytes(processedBytes)}/${formatBytes(totalBytes)}`);
-                },
-                (msg, level, type, details) => ctx.log(`${logPrefix} ${msg}`, level, type ?? 'storage', details),
-                {
-                    concurrency: resolveTransferConcurrency(source.adapter.id, readConfig),
-                    ...(shouldDownload ? { shouldDownload } : {}),
-                    ...(ctx.abortSignal ? { signal: ctx.abortSignal } : {}),
-                    // Only the detail text, deliberately. During listing there is no
-                    // denominator yet, so the stage bar has nothing honest to say and stays
-                    // where the previous source left it.
-                    onListProgress: ({ files, directories, prunedDirectories }) => ctx.updateDetail(
-                        `${label}: scanning, ${files} file(s) in ${directories} director(ies)`
-                        + (prunedDirectories > 0 ? `, ${prunedDirectories} skipped` : '')
-                    ),
-                }
-            );
-
-            // A file the source would not hand over is missing from this backup. Naming each
-            // one and refusing to call the run a success is the whole point - a silently
-            // incomplete backup is the failure mode that only shows up when it is needed.
-            if (result.failures.length > 0) {
-                for (const failure of result.failures) {
-                    ctx.log(`${logPrefix} MISSING from this backup: ${failure.path} (${failure.error})`, 'error', 'storage');
-                }
-                ctx.log(
-                    `${logPrefix} ${result.failures.length} file(s) could not be collected and are not in this backup`,
-                    'error', 'storage'
-                );
-                ctx.status = "Partial";
-            }
-
-            for (const e of result.entries) {
-                // A symbolic link has no bytes anywhere to point back at, so it is never
-                // carried - every snapshot restates its links in full. Guarded even though the
-                // collection never marks one unchanged, because the cost of being wrong here
-                // is a link that silently disappears from an incremental.
-                if (e.linkTarget !== undefined) continue;
-                // Not transferred, so its bytes stay where they already are.
-                if (e.unchanged) carriedKeys.add(fileKey(source.jobSourceId, e.relativePath));
-            }
-
-            // Permissions and ownership as the source sees them right now, for every file
-            // regardless of whether its bytes move. A file whose mode changed but whose
-            // content did not is carried forward, and this is what stops the chain from
-            // replaying the mode it had when the bytes were last written.
-            for (const e of result.entries) {
-                if (e.mode === undefined && e.uid === undefined && e.gid === undefined) continue;
-                freshMetadata.set(fileKey(source.jobSourceId, e.relativePath), {
-                    mode: e.mode, uid: e.uid, gid: e.gid,
-                });
-            }
-
-            // Content hash of the raw (pre-compression, pre-encryption) file. Lands in the
-            // archive index, which is itself sealed when the job is encrypted - a plaintext
-            // hash sitting in the clear would be a confirmation oracle against known files.
-            //
-            // Hashing is a second full read of everything just collected. Done one file at a
-            // time with nothing reported, it left the run looking finished-but-frozen for as
-            // long as the source was large - the last silent stretch of the collect phase.
-            //
-            // Symbolic links are left out: nothing was collected under their path, so hashing
-            // one means reading a file that is not there. Their content is the target string,
-            // which the index already carries in full.
-            const toHash = result.entries.filter((e) => !e.unchanged && e.linkTarget === undefined);
-            let hashed = 0;
-            ctx.updateDetail(`${label}: hashing ${toHash.length} file(s)...`);
-            const checksums = await mapWithConcurrency(toHash, HASH_CONCURRENCY, async (e) => {
-                ctx.abortSignal?.throwIfAborted();
-                const checksum = await calculateFileChecksum(path.join(localDir, e.relativePath));
-                hashed++;
-                if (hashed % HASH_PROGRESS_EVERY === 0) {
-                    ctx.updateDetail(`${label}: hashing ${hashed}/${toHash.length} file(s)`);
-                }
-                return checksum;
-            });
-
-            // Rebuilt in listing order, which mapWithConcurrency preserves - the index is
-            // compared against the previous snapshot's, so its layout has to stay stable.
-            const fileIndex: SourceFileEntry[] = [];
-            toHash.forEach((e, i) => {
-                const before = previousFiles?.get(e.relativePath);
-                const checksum = checksums[i];
-
-                // The file was transferred, but its content is identical to what the chain
-                // already holds - mtime moved without the bytes changing, which happens on
-                // every deploy and every `touch`. Carrying it forward avoids storing a
-                // second copy of the same content.
-                if (before?.h && before.h === checksum) {
-                    carriedKeys.add(fileKey(source.jobSourceId, e.relativePath));
-                    return;
-                }
-
-                fileIndex.push({
-                    path: e.relativePath,
-                    size: e.size,
-                    mtime: e.lastModified.toISOString(),
-                    checksum,
-                    mode: e.mode,
-                    uid: e.uid,
-                    gid: e.gid,
-                });
-            });
-
-            // Restated in every snapshot, full or incremental. A link is a path string of a few
-            // dozen bytes, so carrying it forward would save nothing and cost the entire chain
-            // a special case in exchange.
-            const symlinkEntries = result.entries.filter((e) => e.linkTarget !== undefined);
-            for (const e of symlinkEntries) {
-                fileIndex.push({
-                    path: e.relativePath,
-                    size: 0,
-                    mtime: e.lastModified.toISOString(),
-                    linkTarget: e.linkTarget,
-                });
-            }
-
-            if (plan.type === "incremental") {
-                const carriedHere = result.entries.length - fileIndex.length;
-                ctx.log(
-                    `${logPrefix} ${fileIndex.length} changed file(s) stored, ${carriedHere} unchanged file(s) referenced from earlier backups`,
-                    'info', 'storage'
-                );
-            }
-
-            entries.push({
-                kind: "directory",
-                jobSourceId: source.jobSourceId,
-                label,
-                localPath: localDir,
-                excludePatterns: source.excludePatterns,
-                files: fileIndex,
-            });
-
-            dirDone++;
-            setPhaseProgress(dirDone, dirTotal);
-            // Links are counted apart from files rather than folded in. They restore to
-            // something entirely different, and a run that stored 18 of them should say so
-            // where anyone reading the history will see it.
-            const symlinkSuffix = symlinkEntries.length > 0
-                ? ` and ${symlinkEntries.length} symlink(s)`
-                : '';
-            ctx.log(
-                `${logPrefix} Collected ${result.files - symlinkEntries.length} file(s)${symlinkSuffix}, ${formatBytes(result.bytes)}`,
-                'success', 'storage'
-            );
-        }
+        // ── Directory sources ──────────────────────────────────────────────────────
+        // Collected in groups, which for every adapter that does not plan them means one
+        // source per group and the same sequence as before. Files within a source are
+        // downloaded in parallel; over a network source the per-file round trip dominates,
+        // so that is where most of the collection time is won.
+        const collected = await collectDirectories({
+            ctx,
+            plan,
+            verifyByHash: job.verifyByHash,
+            workDir,
+            previousBySource,
+            setPhaseProgress,
+        });
+        entries.push(...collected.entries);
+        collected.carriedKeys.forEach((key) => carriedKeys.add(key));
+        collected.freshMetadata.forEach((value, key) => freshMetadata.set(key, value));
 
         // ── Combine everything into one archive ────────────────────────────────────
         // Compression AND encryption are applied per entry inside the archive rather than as
@@ -518,50 +309,3 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
     }
 }
 
-/**
- * Creates a snapshot for a directory source that asks for one, and returns the config the
- * collection should read through.
- *
- * Throws when a source is configured for snapshots but cannot get one. That is deliberate:
- * a job that promises point-in-time consistency must not quietly produce a backup without
- * it. The failure is loud, and the job's failure notification carries it.
- *
- * The handle is parked on the context immediately, before anything else can fail, so
- * `stepCleanup` releases it no matter how the run ends.
- */
-async function acquireSnapshot(
-    ctx: RunnerContext,
-    source: RunnerContext["sources"][number],
-    logPrefix: string
-): Promise<Record<string, unknown>> {
-    if (source.config?.useVss !== true) return source.config;
-
-    const { adapter, config, remotePath } = source;
-    if (!adapter.createSnapshot || !adapter.supportsSnapshot || !adapter.releaseSnapshot) {
-        throw new Error(`${source.configName}: shadow copies are enabled but adapter '${adapter.id}' cannot create them`);
-    }
-
-    const support = await adapter.supportsSnapshot(config, remotePath);
-    if (!support.supported) {
-        throw new Error(`${source.configName}: shadow copies are enabled but unavailable - ${support.message}`);
-    }
-
-    // A run killed before cleanup leaves its snapshot behind, and the server refuses a new
-    // one while the old set is open. Clear those first or every later backup fails.
-    if (adapter.findOrphanedSnapshots) {
-        const orphans = await adapter.findOrphanedSnapshots(config, remotePath).catch(() => []);
-        for (const orphan of orphans) {
-            ctx.log(`${logPrefix} Removing a shadow copy left over from an earlier run (${orphan.label})`, 'warning', 'storage');
-            await adapter.releaseSnapshot(config, orphan).catch((e: unknown) => {
-                ctx.log(`${logPrefix} Could not remove the leftover shadow copy: ${e instanceof Error ? e.message : String(e)}`, 'warning', 'storage');
-            });
-        }
-    }
-
-    const handle = await adapter.createSnapshot(config, remotePath);
-    ctx.shadowCopies = ctx.shadowCopies ?? [];
-    ctx.shadowCopies.push({ configId: source.configId, configName: source.configName, adapter, config, handle });
-    ctx.log(`${logPrefix} Reading from shadow copy ${handle.label}`, 'info', 'storage');
-
-    return { ...config, ...handle.configOverride };
-}

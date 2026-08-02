@@ -12,9 +12,14 @@ All notable changes to DBackup are documented here.
 - **backup**: Directory backups can now record a file's permissions and owner, and hand them back to the restore target. Nothing records them yet, and an archive that carries none restores exactly as before, so no existing job changes. This is what will let a restored container volume be usable by the program that owns it, since a data directory with the wrong owner stops PostgreSQL, MySQL and Redis from starting.
 - **backup**: An incremental backup now refreshes permissions and owner even for files it carries forward unchanged. Changing a file's mode changes no content, so it is not re-stored, and without this the chain would keep serving the permissions from whenever the file's contents last changed.
 
+### 🔄 Changed
+
+- **backup**: A shadow copy is now released as soon as the source that needed it has been collected, instead of at the end of the run. A job that snapshots one share and then spends an hour on another no longer holds the first snapshot open for that hour. A release that fails is still retried during cleanup, so nothing is left behind.
+
 ### 🧪 Tests
 
 - **transport**: Socket connections are covered for both execution hosts, including that a forwarding channel does not compete with command channels for the SSH session limit, and that a server refusing to forward reports which setting to change.
+- **backup**: The new collection grouping is covered on its own, including the case it exists to prevent: an adapter that leaves a source out of its plan fails the job before anything is collected, rather than producing a backup that reports success with a directory missing from it.
 - **backup**: The permission and owner fields are covered end to end - written into the archive index, carried across an incremental chain, and handed to the restore target - alongside the case that decides whether this is a no-op for existing jobs: a source that reports none.
 
 ### 🐳 Docker
