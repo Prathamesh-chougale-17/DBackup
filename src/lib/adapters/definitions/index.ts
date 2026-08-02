@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ADAPTER_CREDENTIAL_REQUIREMENTS } from "@/lib/core/credential-requirements";
 import type { AdapterDefinition } from "./shared";
+import { STORAGE_ROLES } from "@/lib/core/storage-roles";
 import {
     MySQLSchema, MariaDBSchema, PostgresSchema, MongoDBSchema,
     SQLiteSchema, MSSQLSchema, RedisSchema, FirebirdSchema,
@@ -8,7 +9,7 @@ import {
 import {
     LocalStorageSchema, S3GenericSchema, S3AWSSchema, S3R2Schema, S3HetznerSchema,
     SFTPSchema, SMBSchema, WebDAVSchema, FTPSchema, RsyncSchema,
-    GoogleDriveSchema, DropboxSchema, OneDriveSchema,
+    GoogleDriveSchema, DropboxSchema, OneDriveSchema, DockerVolumeSchema,
 } from "./storage";
 import {
     DiscordSchema, SlackSchema, TeamsSchema, GenericWebhookSchema,
@@ -33,6 +34,19 @@ export const ADAPTER_DEFINITIONS: AdapterDefinition[] = [
     { id: "firebird", type: "database", name: "Firebird", beta: true, configSchema: FirebirdSchema },
 
     { id: "local-filesystem", type: "storage", group: "Local", name: "Local Filesystem", configSchema: LocalStorageSchema },
+    {
+        id: "docker-volume", type: "storage", group: "Containers", name: "Docker Volumes",
+        beta: true, configSchema: DockerVolumeSchema,
+        // No primary credential: the Docker socket has no authentication of its own, so
+        // reaching the host that owns it is the entire access question.
+        credentials: { ssh: "SSH_KEY" },
+        // Somewhere to read data out of, never somewhere to put archives.
+        supportedRoles: [STORAGE_ROLES.SOURCE],
+        // A volume is read as one tar stream from a helper container, not file by file, so
+        // there is no per-file round trip to parallelise and nothing for a connection
+        // setting to tune.
+        transferConcurrency: { default: 1, max: 1 },
+    },
     { id: "s3-aws", type: "storage", group: "Cloud Storage (S3)", name: "Amazon S3", configSchema: S3AWSSchema },
     { id: "s3-generic", type: "storage", group: "Cloud Storage (S3)", name: "S3 Compatible (Generic)", configSchema: S3GenericSchema },
     { id: "s3-r2", type: "storage", group: "Cloud Storage (S3)", name: "Cloudflare R2", configSchema: S3R2Schema },

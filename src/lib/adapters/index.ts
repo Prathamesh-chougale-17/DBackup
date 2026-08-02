@@ -9,6 +9,7 @@ import { RedisAdapter } from "./database/redis";
 import { ValkeyAdapter } from "./database/valkey";
 import { FirebirdAdapter } from "./database/firebird";
 import { LocalFileSystemAdapter } from "./storage/local";
+import { DockerVolumeAdapter } from "./storage/docker";
 import { S3GenericAdapter, S3AWSAdapter, S3R2Adapter, S3HetznerAdapter } from "./storage/s3";
 import { SFTPAdapter } from "./storage/sftp";
 import { SMBAdapter } from "./storage/smb";
@@ -50,6 +51,7 @@ export function registerAdapters() {
     registry.register(FirebirdAdapter);
 
     registry.register(LocalFileSystemAdapter);
+    registry.register(DockerVolumeAdapter);
     registry.register(S3GenericAdapter);
     registry.register(S3AWSAdapter);
     registry.register(S3R2Adapter);

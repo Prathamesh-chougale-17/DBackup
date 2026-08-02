@@ -1,5 +1,23 @@
 import { z } from "zod";
-import { safePath } from "./shared";
+import { safePath, sshFields } from "./shared";
+
+/**
+ * Docker volumes as a directory source.
+ *
+ * Reuses `sshFields` verbatim so the connection form, the credential profiles and the Test
+ * button are the same ones every database source already has - a Docker host reached over
+ * SSH is the same problem as a MySQL host reached over SSH.
+ *
+ * There is no path field. A source's path is the volume name, picked from the list the
+ * adapter loads off the target, which is why the whole adapter carries so little config.
+ */
+export const DockerVolumeSchema = z.object({
+    ...sshFields,
+    socketPath: safePath("Docker socket path").default("/var/run/docker.sock")
+        .describe("Path to the Docker daemon socket, as seen from the host DBackup connects to"),
+    helperImage: z.string().min(1).default("alpine:latest")
+        .describe("Image used to empty a volume during a restore. Only needs a shell, and is never started during a backup"),
+});
 
 export const LocalStorageSchema = z.object({
     basePath: z.string().min(1, "Base path is required").default("/backups").describe("Absolute path to store backups (e.g., /backups)"),

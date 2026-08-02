@@ -8,6 +8,7 @@ All notable changes to DBackup are documented here.
 ### ✨ Features
 
 - **jobs**: A directory source can now say whether a backup may stop whatever holds it open while it is read. Nothing consults it yet, since no source type shipping today stops anything, and it defaults to allowing it.
+- **docker**: New **Docker Volumes** source (beta). Connects to a Docker daemon locally through its socket or on another machine over SSH, and lists the volumes it can see so they can be picked instead of typed.
 - **adapters**: An adapter can now declare which roles it supports, so one that only works in a single direction cannot be saved as the other. The role picker states what applies instead of offering a choice that would be rejected, and all three write paths enforce it - including cloning as the opposite role, which exists specifically to flip it.
 
 ### 🎨 Improvements

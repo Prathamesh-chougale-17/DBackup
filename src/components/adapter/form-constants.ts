@@ -10,7 +10,7 @@ export const STORAGE_CONNECTION_KEYS = [
     'clientId', 'clientSecret',
 ];
 
-export const STORAGE_CONFIG_KEYS = ['pathPrefix', 'storageClass', 'forcePathStyle', 'maxProtocol', 'tls', 'options', 'folderId', 'folderPath'];
+export const STORAGE_CONFIG_KEYS = ['pathPrefix', 'storageClass', 'forcePathStyle', 'maxProtocol', 'tls', 'options', 'folderId', 'folderPath', 'socketPath', 'helperImage'];
 
 export const NOTIFICATION_CONNECTION_KEYS = [
     'webhookUrl',

@@ -12,6 +12,10 @@ const ADAPTER_PERMISSIONS: Record<string, Permission> = {
     firebird: PERMISSIONS.SOURCES.VIEW,
 
     "local-filesystem": PERMISSIONS.DESTINATIONS.READ,
+    // Source-only, but still a storage adapter, and DESTINATIONS.READ is the permission
+    // governing saved storage configs whichever role they hold - the same reason a directory
+    // source on SFTP sits under it.
+    "docker-volume": PERMISSIONS.DESTINATIONS.READ,
     "s3-generic": PERMISSIONS.DESTINATIONS.READ,
     "s3-aws": PERMISSIONS.DESTINATIONS.READ,
     "s3-r2": PERMISSIONS.DESTINATIONS.READ,
