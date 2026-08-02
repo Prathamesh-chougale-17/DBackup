@@ -9,10 +9,13 @@ All notable changes to DBackup are documented here.
 
 - **transport**: Execution hosts can now open a stream to a Unix domain socket on the target machine, over SSH as well as locally. This is groundwork for reaching a container runtime that listens on a socket rather than a port, and has no effect on its own yet.
 - **transport**: Both execution hosts now key their binary lookup cache on a separator that no binary name can contain, so two different candidate lists can no longer share an entry. One of them held that separator as a raw null byte in the source file, which made the file read as binary to `grep` and every other text tool.
+- **backup**: Directory backups can now record a file's permissions and owner, and hand them back to the restore target. Nothing records them yet, and an archive that carries none restores exactly as before, so no existing job changes. This is what will let a restored container volume be usable by the program that owns it, since a data directory with the wrong owner stops PostgreSQL, MySQL and Redis from starting.
+- **backup**: An incremental backup now refreshes permissions and owner even for files it carries forward unchanged. Changing a file's mode changes no content, so it is not re-stored, and without this the chain would keep serving the permissions from whenever the file's contents last changed.
 
 ### 🧪 Tests
 
 - **transport**: Socket connections are covered for both execution hosts, including that a forwarding channel does not compete with command channels for the SSH session limit, and that a server refusing to forward reports which setting to change.
+- **backup**: The permission and owner fields are covered end to end - written into the archive index, carried across an incremental chain, and handed to the restore target - alongside the case that decides whether this is a no-op for existing jobs: a source that reports none.
 
 ### 🐳 Docker
 

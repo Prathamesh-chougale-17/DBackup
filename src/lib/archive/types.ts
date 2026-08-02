@@ -202,6 +202,20 @@ export interface IndexFileLine {
     o?: number;
     /** Byte length within the decompressed entry. Only set for bundled entries. */
     l?: number;
+    /**
+     * POSIX permission bits, owner and group, when the source could report them.
+     *
+     * Absent for every archive written before these existed and for every source whose
+     * protocol has no notion of them, which is most of them - S3 and Dropbox have no owner
+     * to record. A restore that finds them missing writes the file the way it always did.
+     *
+     * They live in the sealed index rather than in a tar header for the same reason a
+     * symlink target does: an unencrypted archive publishes its tar headers, and a uid map
+     * describes the machine a backup came from.
+     */
+    mo?: number;
+    u?: number;
+    g?: number;
 }
 
 /**
@@ -242,6 +256,44 @@ export function entryKey(archive: string | undefined, ordinal: number): string {
  */
 export function isSymlinkLine(file: IndexFileLine): file is IndexFileLine & { lnk: string } {
     return file.lnk !== undefined;
+}
+
+/** POSIX metadata of a source or index entry, in the shape both sides of the chain use. */
+export interface FileMetadata {
+    mode?: number;
+    uid?: number;
+    gid?: number;
+}
+
+/**
+ * The three metadata fields as index keys, omitting whichever the source did not report.
+ *
+ * Written this way rather than as three assignments so an unset field stays absent from the
+ * JSON instead of appearing as `null`. The index is one line per file in an archive that can
+ * hold a million of them, and `"mo":null` on every line is pure weight.
+ */
+export function metadataToIndex(meta: FileMetadata): Pick<IndexFileLine, "mo" | "u" | "g"> {
+    return {
+        ...(meta.mode !== undefined ? { mo: meta.mode } : {}),
+        ...(meta.uid !== undefined ? { u: meta.uid } : {}),
+        ...(meta.gid !== undefined ? { g: meta.gid } : {}),
+    };
+}
+
+/**
+ * The same three fields read back off an index line, for handing to an upload.
+ *
+ * Undefined rather than an empty object when the line carries none, so a restore from an
+ * archive without metadata - which is every archive written so far - calls `upload()` with
+ * exactly the arguments it always did.
+ */
+export function metadataFromIndex(file: IndexFileLine): FileMetadata | undefined {
+    if (file.mo === undefined && file.u === undefined && file.g === undefined) return undefined;
+    return {
+        ...(file.mo !== undefined ? { mode: file.mo } : {}),
+        ...(file.u !== undefined ? { uid: file.u } : {}),
+        ...(file.g !== undefined ? { gid: file.g } : {}),
+    };
 }
 
 /**
@@ -290,6 +342,10 @@ export interface SourceFileEntry {
      * writer stores the target instead of reading bytes that are not there.
      */
     linkTarget?: string;
+    /** POSIX metadata at the source, when the adapter could see it. See IndexFileLine. */
+    mode?: number;
+    uid?: number;
+    gid?: number;
 }
 
 export type ArchiveSourceEntry =

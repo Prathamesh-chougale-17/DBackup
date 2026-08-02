@@ -112,7 +112,12 @@ afterEach(async () => {
  * Builds a real v2 archive plus its `.index` and `.meta.json` sidecars, laid out the way
  * the upload step leaves them on a destination.
  */
-async function buildRemoteBackup(dbNames: string[], dirFiles?: Record<string, string>) {
+async function buildRemoteBackup(
+    dbNames: string[],
+    dirFiles?: Record<string, string>,
+    /** POSIX metadata to record for every directory file, as a Docker volume source would. */
+    dirMetadata?: { mode?: number; uid?: number; gid?: number },
+) {
     const workDir = await createTempDir('archive-restore-test-');
     createdPaths.push(workDir);
 
@@ -135,6 +140,7 @@ async function buildRemoteBackup(dbNames: string[], dirFiles?: Record<string, st
                 size: Buffer.byteLength(content),
                 mtime: new Date('2026-01-01').toISOString(),
                 checksum: crypto.createHash('sha256').update(content).digest('hex'),
+                ...dirMetadata,
             });
         }
         entries.push({ kind: 'directory', jobSourceId: 'src-1', label: 'Test Directory', localPath: dirLocalPath, excludePatterns: [], files: index });
@@ -202,7 +208,45 @@ describe('restoreArchiveSnapshot', () => {
         expect(result.restoredDirectories).toEqual(['src-1']);
         expect(dbAdapter.prepareRestore).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining(['db1_restored', 'db2']), expect.anything());
         expect(dbAdapter.restoreOne).toHaveBeenCalledTimes(2);
-        expect(storageAdapter.upload).toHaveBeenCalledWith(expect.anything(), expect.any(String), '/restore/dir/a.txt', undefined, expect.any(Function));
+        expect(storageAdapter.upload).toHaveBeenCalledWith(expect.anything(), expect.any(String), '/restore/dir/a.txt', undefined, expect.any(Function), undefined);
+    });
+
+    it('hands the recorded permissions and owner to the restore target', async () => {
+        // The end of the chain. A container volume restored without its mode and owner is
+        // one a database will not start on, so the index has to reach upload().
+        const { sourceAdapter } = await buildRemoteBackup([], { 'a.txt': 'AAAA' }, { mode: 0o600, uid: 1234, gid: 5678 });
+        const storageAdapter = makeFakeStorageAdapter();
+        wire({ 'source-fs': sourceAdapter, 'local-filesystem': storageAdapter });
+
+        await restoreArchiveSnapshot(makeInput({
+            directoryMapping: [
+                { entryId: 'src-1', targetConfigId: 'target-storage-1', targetPath: '/restore/dir', selected: true },
+            ],
+        }), { log: vi.fn(), updateDetail: vi.fn(), setStage: vi.fn() });
+
+        expect(storageAdapter.upload).toHaveBeenCalledWith(
+            expect.anything(), expect.any(String), '/restore/dir/a.txt', undefined, expect.any(Function),
+            { mode: 0o600, uid: 1234, gid: 5678 },
+        );
+    });
+
+    it('passes no options at all when the archive recorded no permissions', async () => {
+        // Every archive written before these fields existed is in this case. Passing an
+        // empty object instead would be a silent change in what every storage adapter sees.
+        const { sourceAdapter } = await buildRemoteBackup([], { 'a.txt': 'AAAA' });
+        const storageAdapter = makeFakeStorageAdapter();
+        wire({ 'source-fs': sourceAdapter, 'local-filesystem': storageAdapter });
+
+        await restoreArchiveSnapshot(makeInput({
+            directoryMapping: [
+                { entryId: 'src-1', targetConfigId: 'target-storage-1', targetPath: '/restore/dir', selected: true },
+            ],
+        }), { log: vi.fn(), updateDetail: vi.fn(), setStage: vi.fn() });
+
+        expect(storageAdapter.upload).toHaveBeenCalledWith(
+            expect.anything(), expect.any(String), '/restore/dir/a.txt', undefined, expect.any(Function),
+            undefined,
+        );
     });
 
     it('sets the two restore stages according to what the snapshot holds', async () => {
@@ -414,7 +458,7 @@ describe('restoreArchiveSnapshot', () => {
         expect(result.restoredDirectories).toEqual(['src-1']);
         expect(result.restoredDatabases).toEqual([]);
         expect(dbAdapter.restoreOne).not.toHaveBeenCalled();
-        expect(storageAdapter.upload).toHaveBeenCalledWith(expect.anything(), expect.any(String), '/restore/dir/a.txt', undefined, expect.any(Function));
+        expect(storageAdapter.upload).toHaveBeenCalledWith(expect.anything(), expect.any(String), '/restore/dir/a.txt', undefined, expect.any(Function), undefined);
     });
 
     it('records an error (Partial) for a directory entry with no restore target specified', async () => {

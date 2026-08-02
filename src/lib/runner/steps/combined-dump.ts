@@ -7,7 +7,7 @@ import { resolveAdapterConfig } from "@/lib/adapters/config-resolver";
 import { downloadDirectory } from "@/lib/adapters/storage/common/download-directory";
 import { createTempDir, cleanupTempDir } from "@/lib/adapters/database/common/tar-utils";
 import { createArchive } from "@/lib/archive/writer";
-import { ArchiveSourceEntry, DumpFormat, SourceFileEntry } from "@/lib/archive/types";
+import { ArchiveSourceEntry, DumpFormat, FileMetadata, SourceFileEntry } from "@/lib/archive/types";
 import { DIRECTORY_ONLY_SOURCE_TYPE, INDEX_SIDECAR_SUFFIX } from "@/lib/archive/format";
 import { getProfileMasterKey } from "@/services/backup/encryption-service";
 import { planChain } from "@/services/backup/chain-planner";
@@ -99,6 +99,10 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
     // Files whose bytes already live in an earlier archive of the chain. Collected while
     // walking the sources, then turned into carried index lines below.
     const carriedKeys = new Set<string>();
+    // Only consulted for carried files - a re-stored one gets its metadata from the
+    // SourceFileEntry the writer sees. Filled for every file anyway, because whether a file
+    // ends up carried is not decided until its checksum is known.
+    const freshMetadata = new Map<string, FileMetadata>();
     const previousBySource = new Map(
         (plan.previousIndex?.directories ?? []).map((d) => [
             d.src,
@@ -300,6 +304,17 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
                 if (e.unchanged) carriedKeys.add(fileKey(source.jobSourceId, e.relativePath));
             }
 
+            // Permissions and ownership as the source sees them right now, for every file
+            // regardless of whether its bytes move. A file whose mode changed but whose
+            // content did not is carried forward, and this is what stops the chain from
+            // replaying the mode it had when the bytes were last written.
+            for (const e of result.entries) {
+                if (e.mode === undefined && e.uid === undefined && e.gid === undefined) continue;
+                freshMetadata.set(fileKey(source.jobSourceId, e.relativePath), {
+                    mode: e.mode, uid: e.uid, gid: e.gid,
+                });
+            }
+
             // Content hash of the raw (pre-compression, pre-encryption) file. Lands in the
             // archive index, which is itself sealed when the job is encrypted - a plaintext
             // hash sitting in the clear would be a confirmation oracle against known files.
@@ -345,6 +360,9 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
                     size: e.size,
                     mtime: e.lastModified.toISOString(),
                     checksum,
+                    mode: e.mode,
+                    uid: e.uid,
+                    gid: e.gid,
                 });
             });
 
@@ -432,7 +450,7 @@ export async function executeCombinedDump(ctx: RunnerContext): Promise<void> {
                 ...(plan.baseArchive ? { base: plan.baseArchive } : {}),
                 index: plan.index,
                 ...(plan.previousIndex && plan.baseArchive
-                    ? { carried: carryForward(plan.previousIndex, plan.baseArchive, carriedKeys) }
+                    ? { carried: carryForward(plan.previousIndex, plan.baseArchive, carriedKeys, freshMetadata) }
                     : {}),
             },
         });

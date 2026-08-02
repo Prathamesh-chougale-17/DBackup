@@ -33,7 +33,7 @@ import { resolveTransferConcurrency } from "@/lib/adapters/transfer-concurrency"
 import { resolveSelection } from "@/lib/archive/browse";
 import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
 import { summariseExcluded, formatExcludeSummary } from "@/lib/exclude-summary";
-import { entryKey, IndexFileLine, partitionSymlinks } from "@/lib/archive/types";
+import { entryKey, IndexFileLine, metadataFromIndex, partitionSymlinks } from "@/lib/archive/types";
 import { getTempDir } from "@/lib/temp-dir";
 import { stripTrailingSlashes } from "@/lib/paths";
 import { openArchiveForRestore } from "./file-restore";
@@ -281,7 +281,8 @@ export async function restoreArchiveSnapshot(
                         // dropped so a large restore does not bury the history.
                         const uploadOk = await sessions.upload(
                             target, stagePath, remotePath,
-                            (msg, level, type, details) => { if (level && level !== 'info') log(`${file.p}: ${msg}`, level, type ?? 'storage', details); }
+                            (msg, level, type, details) => { if (level && level !== 'info') log(`${file.p}: ${msg}`, level, type ?? 'storage', details); },
+                            metadataFromIndex(file)
                         );
                         if (!uploadOk) {
                             throw new Error(`Adapter '${target.adapter.id}' rejected the upload`);

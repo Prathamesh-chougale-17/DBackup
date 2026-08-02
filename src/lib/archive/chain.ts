@@ -13,9 +13,11 @@ import {
     ArchiveIndex,
     CarriedIndexContent,
     entryKey,
+    FileMetadata,
     IndexEntryLine,
     IndexFileLine,
     isSymlinkLine,
+    metadataToIndex,
 } from "./types";
 
 /** Identifies a file within a snapshot. Paths are only unique per directory source. */
@@ -32,17 +34,26 @@ export function fileKey(src: string, path: string): string {
  * @param previousArchive - Filename of the predecessor archive
  * @param keep - Files to carry, as fileKey() values. Anything absent has been re-stored in
  * the new archive or no longer exists at the source.
+ * @param freshMetadata - Permissions and ownership as the source reports them now, by
+ * fileKey(). Carrying bytes forward must not carry stale metadata with them: a `chmod` or a
+ * `chown` changes no content, so the file lands here rather than being re-stored, and
+ * without this the chain would keep serving the mode from whenever the bytes last changed.
+ * On a container volume that is the difference between a database that starts after a
+ * restore and one that does not. Absent or empty entries leave the carried values alone, so
+ * sources that report no metadata behave exactly as before.
  */
 export function carryForward(
     previous: ArchiveIndex,
     previousArchive: string,
-    keep: ReadonlySet<string>
+    keep: ReadonlySet<string>,
+    freshMetadata?: ReadonlyMap<string, FileMetadata>
 ): CarriedIndexContent {
     const files: IndexFileLine[] = [];
     const neededEntries = new Map<string, string | undefined>();
 
     for (const line of previous.files) {
-        if (!keep.has(fileKey(line.src, line.p))) continue;
+        const key = fileKey(line.src, line.p);
+        if (!keep.has(key)) continue;
 
         // A symbolic link stores no bytes, so there is nothing to point back at and nothing
         // saved by trying. Every snapshot restates its links in full, which costs a few dozen
@@ -54,7 +65,13 @@ export function carryForward(
         // A line with no `a` lives in the predecessor itself. One that already has `a`
         // was carried before and keeps pointing further back, so chains never nest.
         const archive = line.a ?? previousArchive;
-        files.push({ ...line, a: archive });
+        // Metadata the source reported this run wins over what the predecessor recorded.
+        // A field the source did not report is left as it was, so this can only add detail,
+        // never erase it. Mtime is deliberately not refreshed alongside it: carrying a file
+        // forward is decided by content identity, and the existing snapshot semantics tie
+        // the recorded mtime to the bytes.
+        const fresh = freshMetadata?.get(key);
+        files.push({ ...line, ...(fresh ? metadataToIndex(fresh) : {}), a: archive });
         neededEntries.set(entryKey(archive, line.n!), line.a);
     }
 

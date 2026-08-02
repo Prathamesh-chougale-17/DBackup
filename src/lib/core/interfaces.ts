@@ -381,6 +381,19 @@ export type FileInfo = {
 export interface UploadOptions {
     checksumSha256?: string;
     checksumMd5?: string;
+    /**
+     * POSIX metadata to apply to the written file, when the backup recorded it and the
+     * adapter can set it.
+     *
+     * Adapters that cannot are not expected to try: a file uploaded to S3 or Dropbox has no
+     * owner to restore. The adapters that do care are the ones writing somewhere a program
+     * will read the result back - a container volume above all, where a data directory with
+     * the wrong owner or a mode looser than 0700 stops Postgres, MySQL and Redis from
+     * starting at all.
+     */
+    mode?: number;
+    uid?: number;
+    gid?: number;
 }
 
 /**
@@ -429,6 +442,16 @@ export interface DirectoryFileEntry {
      * file exists, so `size` is 0 and callers must not try to read it off disk.
      */
     linkTarget?: string;
+    /**
+     * POSIX metadata as it exists at the source, for adapters whose protocol carries it.
+     *
+     * Optional throughout: an adapter that cannot see permissions leaves these unset and
+     * the backup behaves exactly as it did before they existed. Setting them is what lets a
+     * restore put the file back the way a program expects to find it.
+     */
+    mode?: number;
+    uid?: number;
+    gid?: number;
 }
 
 /** Options for a directory download, used by incremental backups to skip unchanged files. */

@@ -31,7 +31,7 @@ import { archiveIndexVerifier, KeyOverride, resolveBackupKey } from "@/services/
 import { resolveTransferConcurrency } from "@/lib/adapters/transfer-concurrency";
 import { archiveIndexService } from "@/services/backup/archive-index-service";
 import { getTempDir } from "@/lib/temp-dir";
-import { ArchiveIndex, ArchiveManifest, IndexFileLine, partitionSymlinks } from "@/lib/archive/types";
+import { ArchiveIndex, ArchiveManifest, IndexFileLine, metadataFromIndex, partitionSymlinks } from "@/lib/archive/types";
 import { logger } from "@/lib/logging/logger";
 import { wrapError, NotFoundError, ValidationError } from "@/lib/logging/errors";
 import fs from "fs/promises";
@@ -462,7 +462,7 @@ export async function restoreFilesToStorage(
                 }
 
                 const remotePath = safeRemoteJoin(target.basePath, file.p);
-                if (!(await sessions.upload(target, stagePath, remotePath))) {
+                if (!(await sessions.upload(target, stagePath, remotePath, undefined, metadataFromIndex(file)))) {
                     throw new Error(`Adapter '${target.adapter.id}' rejected the upload`);
                 }
 
