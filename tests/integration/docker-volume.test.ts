@@ -16,6 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { registerAdapters } from "@/lib/adapters";
+import { dockerSshConfig, sshHostAvailable } from "./test-configs";
 import { registry } from "@/lib/core/registry";
 import { connectDocker } from "@/lib/adapters/storage/docker/engine/connect";
 import { noopHost } from "@/lib/testing/fake-host";
@@ -450,6 +451,61 @@ describe("collecting a volume", () => {
 
         await expect(adapter().upload(config, "/tmp/x", "vol/x.txt"))
             .rejects.toThrow(/only be restored through a restore session/);
+    });
+
+    it("does the same round trip over SSH", async () => {
+        // The only automated coverage of `connectSocket` over SSH against a real server.
+        // Everything else on that path is tested with a mocked ssh2, which proves the call
+        // is made and nothing about whether the daemon answers through an ssh2 channel.
+        //
+        // The ssh-host container has the test environment's own socket mounted, so this
+        // drives the same daemon - the topology of a Docker host on another machine.
+        if (!available || !sshHostAvailable) return;
+        const source = `${PREFIX}-ssh-src`;
+        const target = `${PREFIX}-ssh-dst`;
+        const localPath = await fs.mkdtemp(path.join(os.tmpdir(), "dbackup-ssh-"));
+        await seed(source);
+
+        try {
+            const test = await adapter().test!(dockerSshConfig, noopHost());
+            expect(test.success).toBe(true);
+
+            const handle = await adapter().createSnapshot!(dockerSshConfig, [source], { stopContainers: true });
+            let collected;
+            try {
+                collected = await adapter().downloadDirectory!(
+                    { ...dockerSshConfig, ...handle.configOverride }, source, localPath,
+                );
+            } finally {
+                await adapter().releaseSnapshot!(dockerSshConfig, handle);
+            }
+
+            expect(collected.entries.map((e) => e.relativePath).sort()).toContain("sub/private.txt");
+
+            const session = await adapter().openSession!(dockerSshConfig);
+            try {
+                for (const e of collected.entries) {
+                    if (e.linkTarget !== undefined) continue;
+                    await session.upload(
+                        path.join(localPath, e.relativePath), `${target}/${e.relativePath}`,
+                        undefined, undefined, { mode: e.mode, uid: e.uid, gid: e.gid },
+                    );
+                }
+            } finally {
+                await session.close();
+            }
+
+            const listing = await execFileAsync("docker", [
+                "run", "--rm", "-v", `${target}:/vol`, HELPER_IMAGE, "sh", "-c", "ls -lnR /vol && cat /vol/sub/private.txt",
+            ]);
+            expect(listing.stdout).toMatch(/-rw-------\s+1\s+0\s+0\s+.*private\.txt/);
+            expect(listing.stdout).toMatch(/-rw-r--r--\s+1\s+1234\s+5678\s+.*owned\.txt/);
+            expect(listing.stdout).toContain("secret");
+        } finally {
+            await fs.rm(localPath, { recursive: true, force: true });
+            await removeVolume(source);
+            await removeVolume(target);
+        }
     });
 
     it("refuses to collect a source with no prepared session", async () => {

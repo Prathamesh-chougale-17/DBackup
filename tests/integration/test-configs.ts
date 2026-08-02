@@ -322,6 +322,20 @@ const sshFields = {
     sshPrivateKey: sshPrivateKey ?? '',
 };
 
+/**
+ * Reaching the test environment's own Docker daemon over SSH.
+ *
+ * The ssh-host container has the host's socket mounted, so connecting to it and opening
+ * `/var/run/docker.sock` there drives the same daemon the tests run on - which is exactly
+ * the topology of a user whose Docker host is a different machine. It is the only way to
+ * exercise `connectSocket` over SSH against a real server instead of a mocked ssh2.
+ */
+export const dockerSshConfig = {
+    ...sshFields,
+    socketPath: '/var/run/docker.sock',
+    helperImage: 'alpine:3',
+};
+
 export const sshTestDatabases = [
     // MariaDB is the native match for Debian's mariadb-client.
     //

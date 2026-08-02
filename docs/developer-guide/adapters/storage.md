@@ -19,6 +19,69 @@ Storage adapters handle file operations: upload, download, list, and delete.
 | Google Drive | `google-drive` | Google Drive via OAuth 2.0 |
 | Dropbox | `dropbox` | Dropbox via OAuth 2.0 |
 | OneDrive | `onedrive` | Microsoft OneDrive via OAuth 2.0 |
+| Docker Volumes | `docker-volume` | Docker volume contents. Directory source only - see below |
+
+## Roles
+
+A storage config is either a backup destination or a directory source, never both. That is
+normally the user's choice, because most storage serves either end equally well. An adapter
+that only works one way round declares it on its **definition**, not on the runtime adapter:
+
+```typescript
+{
+  id: "docker-volume", type: "storage", group: "Containers", name: "Docker Volumes",
+  supportedRoles: [STORAGE_ROLES.SOURCE],
+  configSchema: DockerVolumeSchema,
+}
+```
+
+It lives on the definition because the role picker runs in the browser, and definitions are
+plain data - importing the runtime adapters there would pull ssh2 and the cloud SDKs into
+the client bundle. `validateStorageRole` enforces it on all three write paths: create,
+update, and clone, the last of which exists specifically to produce a config with the
+opposite role.
+
+## Preparing a source before it is read
+
+Some sources cannot be read as they are. A Docker volume is only reachable from inside a
+container, and an SMB share can offer a point-in-time shadow copy instead of a live tree.
+Both go through the same three optional members:
+
+```typescript
+supportsSnapshot?(config, remotePath): Promise<{ supported: boolean; message: string }>;
+createSnapshot?(config, remotePaths: string[], options?): Promise<SnapshotHandle>;
+releaseSnapshot?(config, handle): Promise<void>;
+
+/** Prepare unconditionally, rather than only when the config asks for it. */
+alwaysSnapshot?: true;
+
+/** Group this adapter's sources so shared preparation happens once. */
+planSourceGroups?(config, remotePaths: string[]): Promise<string[][]>;
+```
+
+The handle's `configOverride` is merged onto the config the collection reads through, which
+is how a prepared source hands its state to `downloadDirectory` without the runner knowing a
+connection exists.
+
+`planSourceGroups` exists for preparation that reaches beyond the source itself. Backing up
+a container volume means stopping the containers holding it, two volumes of one container
+must stop it once rather than twice, and a container whose volumes are done should start
+again without waiting out the rest of the job. The runner collects each returned group in
+turn and releases it as soon as the group is finished - which is why an adapter without this
+member behaves exactly as it always did, with one source per group.
+
+The returned partition has to cover the given paths exactly once. A dropped path is a
+directory missing from a backup that would otherwise report success, so the runner refuses
+it before anything is collected.
+
+## Keeping a library at arm's length
+
+`storage/docker/` is worth reading as a pattern for an adapter built on a client library.
+Everything above `engine/dockerode-engine.ts` speaks volumes and containers; that one file
+speaks dockerode, and a lint guard holds the line. The point is not a second implementation
+- there will not be one - but that the grouping, the container bookkeeping and the crash
+recovery are testable against a fake with fourteen methods instead of a mock reproducing
+`getVolume(...).remove()`.
 
 ## Interface
 

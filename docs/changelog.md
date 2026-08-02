@@ -22,8 +22,14 @@ All notable changes to DBackup are documented here.
 
 - **backup**: A shadow copy is now released as soon as the source that needed it has been collected, instead of at the end of the run. A job that snapshots one share and then spends an hour on another no longer holds the first snapshot open for that hour. A release that fails is still retried during cleanup, so nothing is left behind.
 
+### 📝 Documentation
+
+- **docker**: New guide for the Docker Volumes source, covering socket access, what stopping containers does and does not promise, restoring to the same or a new volume, and the current limitations - directory permissions, empty directories and extended attributes are not yet restored.
+- **adapters**: The storage adapter developer guide now documents adapter roles, the members that prepare a source before it is read, and source grouping.
+
 ### 🧪 Tests
 
+- **docker**: The volume adapter is covered against a real Docker daemon, including the full round trip - collect a volume, restore it, and check the permissions and owners that come back - and the same round trip over SSH, which is the only automated coverage of a Unix socket carried through an SSH channel.
 - **transport**: Socket connections are covered for both execution hosts, including that a forwarding channel does not compete with command channels for the SSH session limit, and that a server refusing to forward reports which setting to change.
 - **backup**: The new collection grouping is covered on its own, including the case it exists to prevent: an adapter that leaves a source out of its plan fails the job before anything is collected, rather than producing a backup that reports success with a directory missing from it.
 - **backup**: The permission and owner fields are covered end to end - written into the archive index, carried across an incremental chain, and handed to the restore target - alongside the case that decides whether this is a no-op for existing jobs: a source that reports none.

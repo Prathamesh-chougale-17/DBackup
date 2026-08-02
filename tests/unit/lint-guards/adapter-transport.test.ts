@@ -66,6 +66,28 @@ const ADAPTER_RULES: Rule[] = [
         reason: "src/lib/ssh was removed. Import from @/lib/transport instead.",
     },
     {
+        name: "dockerode import",
+        pattern: /from\s+["']dockerode["']/,
+        allowed: {
+            "storage/docker/engine/dockerode-engine.ts":
+                "The one implementation of the DockerEngine port. Everything above it speaks volumes and containers, not dockerode.",
+        },
+        reason:
+            "Only storage/docker/engine/dockerode-engine.ts may talk to dockerode. Without this line the client "
+            + "spreads back across the adapter within a couple of changes, which is exactly how shellEscape ended up "
+            + "in eighteen files.",
+    },
+    {
+        name: "Dockerode type outside the engine",
+        pattern: /\bDockerode\b/,
+        allowed: {
+            "storage/docker/engine/dockerode-engine.ts": "Constructs the client, so it names its type.",
+        },
+        reason:
+            "A port that leaks the library's own types into signatures is not a port. If DockerEngine ever "
+            + "collapses into an alias for Dockerode it should be deleted rather than kept for the shape of it.",
+    },
+    {
         name: "connectionMode comparison",
         pattern: /connectionMode\s*[=!]==|\.mode\s*===\s*["']ssh["']/,
         allowed: {
