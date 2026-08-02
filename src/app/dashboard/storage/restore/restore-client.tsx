@@ -1325,7 +1325,11 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                                                     <Input
                                                         value={d.targetPath}
                                                         onChange={(e) => handleDirTargetPathChange(d.entryId, e.target.value)}
-                                                        placeholder="/restore/path"
+                                                        placeholder={
+                                                            storageDestinations.find(sd => sd.id === d.targetConfigId)?.adapterId === "docker-volume"
+                                                                ? "volume-name"
+                                                                : "/restore/path"
+                                                        }
                                                         className="h-8 text-sm"
                                                         disabled={!d.selected}
                                                     />
@@ -1349,11 +1353,20 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                                                                 <TooltipTrigger>
                                                                     <Badge variant="destructive" className="text-[10px] px-1.5 py-0 shrink-0">
                                                                         <AlertTriangle className="h-3 w-3 mr-1" />
-                                                                        Occupied
+                                                                        {storageDestinations.find(sd => sd.id === d.targetConfigId)?.adapterId === "docker-volume"
+                                                                            ? "Exists"
+                                                                            : "Occupied"}
                                                                     </Badge>
                                                                 </TooltipTrigger>
                                                                 <TooltipContent>
-                                                                    <p>This path already contains files - matching filenames will be overwritten</p>
+                                                                    {/* A volume is emptied before it is written, which is a very different
+                                                                        promise from overwriting files of the same name - saying the wrong
+                                                                        one here is how somebody loses data they meant to keep. */}
+                                                                    <p>
+                                                                        {storageDestinations.find(sd => sd.id === d.targetConfigId)?.adapterId === "docker-volume"
+                                                                            ? "This volume already exists - everything in it is deleted before the backup is restored into it"
+                                                                            : "This path already contains files - matching filenames will be overwritten"}
+                                                                    </p>
                                                                 </TooltipContent>
                                                             </Tooltip>
                                                         </TooltipProvider>

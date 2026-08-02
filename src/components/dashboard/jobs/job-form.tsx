@@ -86,6 +86,7 @@ const directorySourceSchema = z.object({
     path: z.string().min(1, "Path is required"),
     excludePatterns: z.array(z.string()).default([]),
     excludePatternPresetIds: z.array(z.string()).default([]),
+    stopContainers: z.boolean().default(true),
 });
 
 export interface JobSourceData {
@@ -95,6 +96,8 @@ export interface JobSourceData {
     path: string;
     excludePatterns: string[];
     excludePatternPresetIds?: string[];
+    /** Only meaningful for sources whose adapter stops anything. Defaults to allowing it. */
+    stopContainers?: boolean;
 }
 
 export interface JobData {
@@ -378,6 +381,7 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
         path: s.path,
         excludePatterns: normalizeExcludePatterns(s.excludePatterns),
         excludePatternPresetIds: s.excludePatternPresetIds ?? [],
+        stopContainers: s.stopContainers ?? true,
     }));
 
     const form = useForm({
@@ -437,7 +441,7 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
             result.push({ ...entry, excludePatterns: match.excludePatterns, excludePatternPresetIds: entry.excludePatternPresetIds ?? [] });
         }
         for (const added of remainingNew) {
-            result.push({ configId, path: added.path, excludePatterns: added.excludePatterns, excludePatternPresetIds: [] });
+            result.push({ configId, path: added.path, excludePatterns: added.excludePatterns, excludePatternPresetIds: [], stopContainers: true });
         }
         replaceSource(result);
         setExpandedSources(new Set());
@@ -663,6 +667,7 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
                     path: s.path,
                     excludePatterns: s.excludePatterns || [],
                     excludePatternPresetIds: s.excludePatternPresetIds || [],
+                    stopContainers: s.stopContainers ?? true,
                 })),
                 destinations: data.destinations.map((d, i) => ({
                     configId: d.configId,
@@ -990,7 +995,7 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
                                             type="button"
                                             variant="outline"
                                             size="sm"
-                                            onClick={() => appendSource({ configId: "", path: "", excludePatterns: [], excludePatternPresetIds: defaultExcludePresetIds })}
+                                            onClick={() => appendSource({ configId: "", path: "", excludePatterns: [], excludePatternPresetIds: defaultExcludePresetIds, stopContainers: true })}
                                             disabled={directorySourceOptions.length === 0}
                                         >
                                             <Plus className="h-4 w-4 mr-1" />
@@ -1646,6 +1651,10 @@ function DirectorySourceRow({ index, form, directorySourceOptions, isExpanded, o
     const allDirectorySources: JobSourceData[] = form.watch("directorySources") || [];
     const excludePatterns: string[] = form.watch(`directorySources.${index}.excludePatterns`) || [];
     const excludePatternPresetIds: string[] = form.watch(`directorySources.${index}.excludePatternPresetIds`) || [];
+    // Only an adapter that stops something has anything to say about stopping it. Named the
+    // same way the connection form decides which adapter-specific panels to render.
+    const isDockerVolume = currentAdapter?.adapterId === "docker-volume";
+    const stopsContainers = isDockerVolume;
 
     return (
         <div className="border rounded-lg">
@@ -1705,7 +1714,11 @@ function DirectorySourceRow({ index, form, directorySourceOptions, isExpanded, o
                 <FormField control={form.control} name={`directorySources.${index}.path`} render={({ field }) => (
                     <FormItem className="flex-1 space-y-0">
                         <FormControl>
-                            <Input placeholder="/path/to/directory" className="h-9" {...field} />
+                            <Input
+                                placeholder={isDockerVolume ? "volume-name" : "/path/to/directory"}
+                                className="h-9"
+                                {...field}
+                            />
                         </FormControl>
                         <FormMessage />
                     </FormItem>
@@ -1716,7 +1729,9 @@ function DirectorySourceRow({ index, form, directorySourceOptions, isExpanded, o
                     variant="outline"
                     size="sm"
                     className="h-9 px-2"
-                    title={currentAdapter?.supportsBrowse ? "Browse folders" : "Select an adapter that supports browsing first"}
+                    title={currentAdapter?.supportsBrowse
+                        ? (isDockerVolume ? "Load volumes from this host" : "Browse folders")
+                        : "Select an adapter that supports browsing first"}
                     disabled={!currentAdapter?.supportsBrowse}
                     onClick={() => setBrowseOpen(true)}
                 >
@@ -1747,10 +1762,27 @@ function DirectorySourceRow({ index, form, directorySourceOptions, isExpanded, o
                 </Button>
             </div>
 
-            {/* Inline Exclude Patterns Config */}
+            {/* Inline per-source settings: stopping containers, then exclude patterns */}
             <Collapsible open={isExpanded}>
                 <CollapsibleContent>
                     <div className="border-t px-3 py-3 bg-muted/30 space-y-2">
+                        {stopsContainers && (
+                            <FormField control={form.control} name={`directorySources.${index}.stopContainers`} render={({ field }) => (
+                                <FormItem className="flex items-start justify-between gap-4 rounded-md border bg-background p-3 space-y-0">
+                                    <div className="space-y-0.5">
+                                        <FormLabel className="text-xs font-medium">Stop containers while reading</FormLabel>
+                                        <p className="text-xs text-muted-foreground">
+                                            Containers using this volume are stopped for as long as it takes to read, then started
+                                            again. Turning this off avoids the interruption, but a volume read while it is being
+                                            written to is only as consistent as a backup taken during a power cut.
+                                        </p>
+                                    </div>
+                                    <FormControl>
+                                        <Switch checked={field.value ?? true} onCheckedChange={field.onChange} />
+                                    </FormControl>
+                                </FormItem>
+                            )} />
+                        )}
                         <div className="text-xs font-medium text-muted-foreground flex items-center gap-1">
                             <Filter className="h-3 w-3" />
                             Exclude patterns for {currentAdapter?.name || `Source #${index + 1}`}
