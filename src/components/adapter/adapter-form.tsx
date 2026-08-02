@@ -82,6 +82,15 @@ export function AdapterForm({ type, adapters, onSuccess, initialData, onBack, de
 
     const selectedAdapter = adapters.find(a => a.id === selectedAdapterId);
 
+    // An adapter that only works one way round overrides whatever the seed above produced.
+    // Without this, picking a source-only adapter from the Destinations section would leave
+    // the form holding a role the API rejects, and the only symptom would be a failed save.
+    useEffect(() => {
+        const allowed = selectedAdapter?.supportedRoles;
+        if (!allowed || allowed.length === 0 || allowed.includes(storageRole)) return;
+        setStorageRole(allowed[0]);
+    }, [selectedAdapter, storageRole]);
+
     // Group adapters by their group field (preserves insertion order)
     const adapterGroups = useMemo(() => {
         const groups: { label: string; items: AdapterDefinition[] }[] = [];

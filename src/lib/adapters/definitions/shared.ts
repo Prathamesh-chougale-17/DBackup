@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { CredentialType } from "@/lib/core/credentials";
+import type { StorageRole } from "@/lib/core/storage-roles";
 
 export type AdapterDefinition = {
     id: string;
@@ -29,6 +30,19 @@ export type AdapterDefinition = {
      * which is the common case - `DEFAULT_TRANSFER_CONCURRENCY` then applies.
      */
     transferConcurrency?: { default: number; max: number };
+    /**
+     * Storage only: which roles a config of this adapter may be given. Both, when omitted.
+     *
+     * The role is normally the user's choice, because most storage serves either end - a
+     * folder on an SFTP server is as good a backup destination as it is a directory source.
+     * Some adapters only work one way round: a container runtime is somewhere to read data
+     * out of, never somewhere to put archives, and offering it as a destination would only
+     * let someone build a job that fails on its first upload.
+     *
+     * Here rather than on the runtime adapter for the same reason as transferConcurrency:
+     * the role picker runs in the browser, and definitions are plain data.
+     */
+    supportedRoles?: readonly StorageRole[];
 }
 
 // Validation: Reject paths with null bytes or obvious shell injection patterns

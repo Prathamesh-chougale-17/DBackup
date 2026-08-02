@@ -25,6 +25,13 @@ export interface SourceInput {
     path: string;
     excludePatterns?: string[];
     excludePatternPresetIds?: string[];
+    /**
+     * Whether the adapter may stop whatever holds this source open while it is read.
+     *
+     * Undefined means yes, matching the column default. Only adapters that stop anything at
+     * all consult it, so it is inert for every source type shipping today.
+     */
+    stopContainers?: boolean;
 }
 
 export interface CreateJobInput {
@@ -281,6 +288,7 @@ export class JobService {
                             priority: s.priority,
                             path: s.path,
                             excludePatterns: JSON.stringify(s.excludePatterns || []),
+                            ...(s.stopContainers !== undefined ? { stopContainers: s.stopContainers } : {}),
                             excludePatternPresets: {
                                 connect: (s.excludePatternPresetIds || []).map((id) => ({ id })),
                             },
@@ -354,6 +362,9 @@ export class JobService {
                     const data = {
                         priority: s.priority,
                         excludePatterns: JSON.stringify(s.excludePatterns || []),
+                        // Left untouched when the caller did not send it, so an older client
+                        // or a partial update cannot silently reset the choice to the default.
+                        ...(s.stopContainers !== undefined ? { stopContainers: s.stopContainers } : {}),
                         excludePatternPresets: {
                             set: (s.excludePatternPresetIds || []).map((presetId) => ({ id: presetId })),
                         },
@@ -552,6 +563,7 @@ export class JobService {
                             priority: s.priority,
                             path: s.path,
                             excludePatterns: s.excludePatterns,
+                            stopContainers: s.stopContainers,
                             excludePatternPresets: {
                                 connect: s.excludePatternPresets.map((p) => ({ id: p.id })),
                             },

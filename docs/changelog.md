@@ -5,6 +5,11 @@ All notable changes to DBackup are documented here.
 ## vNEXT
 *Release: In Progress*
 
+### ✨ Features
+
+- **jobs**: A directory source can now say whether a backup may stop whatever holds it open while it is read. Nothing consults it yet, since no source type shipping today stops anything, and it defaults to allowing it.
+- **adapters**: An adapter can now declare which roles it supports, so one that only works in a single direction cannot be saved as the other. The role picker states what applies instead of offering a choice that would be rejected, and all three write paths enforce it - including cloning as the opposite role, which exists specifically to flip it.
+
 ### 🎨 Improvements
 
 - **transport**: Execution hosts can now open a stream to a Unix domain socket on the target machine, over SSH as well as locally. This is groundwork for reaching a container runtime that listens on a socket rather than a port, and has no effect on its own yet.

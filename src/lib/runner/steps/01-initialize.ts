@@ -110,6 +110,7 @@ export async function stepInitialize(ctx: RunnerContext) {
             remotePath: src.path === "/" ? "" : src.path,
             excludePatterns,
             priority: src.priority,
+            stopContainers: src.stopContainers,
         };
         ctx.sources.push(sourceCtx);
     }

@@ -310,13 +310,48 @@ function SnapshotSwitch({
     );
 }
 
+const ROLE_CHOICES = [
+    {
+        value: STORAGE_ROLES.DESTINATION,
+        id: "role-destination",
+        title: "Backup Destination",
+        description: "Backups are written into this adapter's configured path, one folder per job.",
+    },
+    {
+        value: STORAGE_ROLES.SOURCE,
+        id: "role-source",
+        title: "Directory Source",
+        description: "Folders below this adapter's configured path can be picked as backup sources.",
+    },
+] as const;
+
 function AdapterRolePicker({
     storageRole,
     onStorageRoleChange,
+    supportedRoles,
 }: {
     storageRole: StorageRole;
     onStorageRoleChange: (role: StorageRole) => void;
+    /** Both roles when the adapter does not restrict them, which is the usual case. */
+    supportedRoles?: readonly StorageRole[];
 }) {
+    const choices = supportedRoles
+        ? ROLE_CHOICES.filter((choice) => supportedRoles.includes(choice.value))
+        : ROLE_CHOICES;
+
+    // An adapter that only works one way round is told, not asked. The API rejects the other
+    // role anyway, so a control offering it would only produce a rejected save.
+    if (choices.length === 1) {
+        const only = choices[0];
+        return (
+            <div className="rounded-lg border p-4 space-y-0.5">
+                <Label>Role</Label>
+                <p className="text-sm font-medium">{only.title}</p>
+                <p className="text-sm text-muted-foreground">{only.description}</p>
+            </div>
+        );
+    }
+
     return (
         <div className="rounded-lg border p-4 space-y-3">
             <div className="space-y-0.5">
@@ -330,24 +365,15 @@ function AdapterRolePicker({
                 onValueChange={(value) => onStorageRoleChange(value as StorageRole)}
                 className="gap-3"
             >
-                <div className="flex items-start space-x-2">
-                    <RadioGroupItem value={STORAGE_ROLES.DESTINATION} id="role-destination" className="mt-1" />
-                    <Label htmlFor="role-destination" className="font-normal cursor-pointer">
-                        <span className="font-medium">Backup Destination</span>
-                        <span className="block text-sm text-muted-foreground">
-                            Backups are written into this adapter&apos;s configured path, one folder per job.
-                        </span>
-                    </Label>
-                </div>
-                <div className="flex items-start space-x-2">
-                    <RadioGroupItem value={STORAGE_ROLES.SOURCE} id="role-source" className="mt-1" />
-                    <Label htmlFor="role-source" className="font-normal cursor-pointer">
-                        <span className="font-medium">Directory Source</span>
-                        <span className="block text-sm text-muted-foreground">
-                            Folders below this adapter&apos;s configured path can be picked as backup sources.
-                        </span>
-                    </Label>
-                </div>
+                {choices.map((choice) => (
+                    <div key={choice.value} className="flex items-start space-x-2">
+                        <RadioGroupItem value={choice.value} id={choice.id} className="mt-1" />
+                        <Label htmlFor={choice.id} className="font-normal cursor-pointer">
+                            <span className="font-medium">{choice.title}</span>
+                            <span className="block text-sm text-muted-foreground">{choice.description}</span>
+                        </Label>
+                    </div>
+                ))}
             </RadioGroup>
         </div>
     );
@@ -988,6 +1014,7 @@ export function StorageFormContent({
                         <AdapterRolePicker
                             storageRole={storageRole ?? STORAGE_ROLES.DESTINATION}
                             onStorageRoleChange={onStorageRoleChange}
+                            supportedRoles={adapter.supportedRoles}
                         />
                     )}
                     {/* Only for a directory source. A backup destination receives one archive
