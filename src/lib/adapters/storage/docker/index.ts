@@ -4,6 +4,12 @@ import { logger } from "@/lib/logging/logger";
 import { wrapError, getErrorMessage } from "@/lib/logging/errors";
 import { connectDocker } from "./engine/connect";
 import type { DockerEngine } from "./engine/types";
+import {
+    createDockerSnapshot,
+    planDockerSourceGroups,
+    releaseDockerSnapshot,
+    supportsDockerSnapshot,
+} from "./snapshot";
 
 const log = logger.child({ adapter: "docker-volume" });
 
@@ -26,6 +32,20 @@ export const DockerVolumeAdapter: StorageAdapter = {
     type: "storage",
     name: "Docker Volumes",
     configSchema: DockerVolumeSchema,
+
+    /**
+     * A volume has no live path at all - its contents are only reachable through a
+     * container - so the preparation is not an option the way shadow copies are. Stopping
+     * the containers is the part that stays optional, per job source.
+     */
+    alwaysSnapshot: true,
+
+    planSourceGroups: planDockerSourceGroups,
+    supportsSnapshot: supportsDockerSnapshot,
+    createSnapshot: createDockerSnapshot,
+    releaseSnapshot: releaseDockerSnapshot,
+    // `findOrphanedSnapshots` is deliberately absent - the sweep needs the connection the
+    // preparation is about to open anyway, so it happens inside createSnapshot. See snapshot.ts.
 
     async test(config) {
         return withEngine<{ success: boolean; message: string; version?: string }>(
@@ -103,8 +123,8 @@ export const DockerVolumeAdapter: StorageAdapter = {
  * Runs one operation against a freshly opened connection, and always closes it.
  *
  * Every call here is a standalone one - a connection test, a health check, a volume listing
- * for the job form. A backup holds a connection across a whole run instead, which is what
- * the session built on top of this is for.
+ * for the job form. A backup instead holds one connection per prepared group, for as long as
+ * that group's volumes are being read. See session.ts.
  */
 async function withEngine<T>(
     config: DockerVolumeConfig,

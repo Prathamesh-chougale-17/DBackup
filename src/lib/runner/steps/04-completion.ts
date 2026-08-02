@@ -69,17 +69,6 @@ export async function stepCleanup(ctx: RunnerContext) {
         }
     }
     ctx.shadowCopies = [];
-
-    // 3. Close whatever the run opened outside a snapshot's lifetime.
-    for (const disposable of ctx.disposables ?? []) {
-        try {
-            await disposable.dispose();
-        } catch (e: unknown) {
-            const message = e instanceof Error ? e.message : String(e);
-            ctx.log(`Could not close ${disposable.label}: ${message}`, 'warning', 'storage');
-        }
-    }
-    ctx.disposables = [];
 }
 
 export async function stepFinalize(ctx: RunnerContext) {

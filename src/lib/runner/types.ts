@@ -108,15 +108,6 @@ export interface RunnerContext {
          */
         released?: boolean;
     }[];
-    /**
-     * Run-scoped teardown, drained by `stepCleanup` alongside the snapshots.
-     *
-     * Exists because preparation can start before the first snapshot: an adapter that plans
-     * source groups has to reach its server to decide, and whatever that opened has to be
-     * closed even if the run fails immediately afterwards. Each is attempted independently
-     * and a failure is logged rather than thrown.
-     */
-    disposables?: Array<{ label: string; dispose: () => Promise<void> }>;
     destinations: DestinationContext[];
 
     // File paths
