@@ -325,6 +325,133 @@ describe("collecting a volume", () => {
         }
     });
 
+    it("restores a volume so that its contents, permissions and owners come back", async () => {
+        // The acceptance test for the whole feature. A data directory restored without its
+        // mode and owner is one a database will not start on, so this is the assertion the
+        // archive format was extended for.
+        if (!available) return;
+        const source = `${PREFIX}-rt-src`;
+        const target = `${PREFIX}-rt-dst`;
+        const localPath = await fs.mkdtemp(path.join(os.tmpdir(), "dbackup-roundtrip-"));
+        await seed(source);
+
+        try {
+            const collected = await collect(source, localPath);
+
+            const session = await adapter().openSession!(config);
+            try {
+                for (const entry of collected.entries) {
+                    if (entry.linkTarget !== undefined) continue;
+                    await session.upload(
+                        path.join(localPath, entry.relativePath),
+                        `${target}/${entry.relativePath}`,
+                        undefined, undefined,
+                        { mode: entry.mode, uid: entry.uid, gid: entry.gid },
+                    );
+                }
+                // Links go through the adapter rather than the session, as the restore does.
+                for (const entry of collected.entries.filter((e) => e.linkTarget !== undefined)) {
+                    await adapter().createSymlink!(config, `${target}/${entry.relativePath}`, entry.linkTarget!);
+                }
+            } finally {
+                await session.close();
+            }
+
+            const listing = await execFileAsync("docker", [
+                "run", "--rm", "-v", `${target}:/vol`, HELPER_IMAGE, "sh", "-c",
+                "cd /vol && ls -lnR . && echo '---' && cat sub/private.txt && readlink link",
+            ]);
+
+            expect(listing.stdout).toMatch(/-rw-------\s+1\s+0\s+0\s+.*private\.txt/);
+            expect(listing.stdout).toMatch(/-rw-r--r--\s+1\s+1234\s+5678\s+.*owned\.txt/);
+            expect(listing.stdout).toContain("secret");
+            expect(listing.stdout).toContain("plain.txt");
+        } finally {
+            await fs.rm(localPath, { recursive: true, force: true });
+            await removeVolume(source);
+            await removeVolume(target);
+        }
+    });
+
+    it("empties an existing volume before restoring into it", async () => {
+        // "Overwrite" has to mean the backup's state, not a merge of two. For a database a
+        // leftover file from the old contents is not a stale file, it is a corrupt directory.
+        if (!available) return;
+        const target = `${PREFIX}-rt-wipe`;
+        const localPath = await fs.mkdtemp(path.join(os.tmpdir(), "dbackup-wipe-"));
+
+        try {
+            await engine.createVolume(target);
+            await execFileAsync("docker", [
+                "run", "--rm", "-v", `${target}:/vol`, HELPER_IMAGE, "sh", "-c",
+                "echo stale > /vol/leftover.txt && mkdir -p /vol/olddir && echo x > /vol/olddir/y.txt",
+            ]);
+            await fs.writeFile(path.join(localPath, "fresh.txt"), "new\n");
+
+            const session = await adapter().openSession!(config);
+            try {
+                await session.upload(path.join(localPath, "fresh.txt"), `${target}/fresh.txt`);
+            } finally {
+                await session.close();
+            }
+
+            const listing = await execFileAsync("docker", [
+                "run", "--rm", "-v", `${target}:/vol`, HELPER_IMAGE, "sh", "-c", "ls -A /vol",
+            ]);
+            expect(listing.stdout.trim().split("\n").sort()).toEqual(["fresh.txt"]);
+        } finally {
+            await fs.rm(localPath, { recursive: true, force: true });
+            await removeVolume(target);
+        }
+    });
+
+    it("creates a volume that does not exist yet", async () => {
+        if (!available) return;
+        const target = `${PREFIX}-rt-new`;
+        const localPath = await fs.mkdtemp(path.join(os.tmpdir(), "dbackup-new-"));
+
+        try {
+            await fs.writeFile(path.join(localPath, "a.txt"), "hello\n");
+            const session = await adapter().openSession!(config);
+            try {
+                await session.upload(path.join(localPath, "a.txt"), `${target}/nested/a.txt`);
+            } finally {
+                await session.close();
+            }
+
+            expect(await engine.inspectVolume(target)).not.toBeNull();
+            const listing = await execFileAsync("docker", [
+                "run", "--rm", "-v", `${target}:/vol`, HELPER_IMAGE, "cat", "/vol/nested/a.txt",
+            ]);
+            expect(listing.stdout).toBe("hello\n");
+        } finally {
+            await fs.rm(localPath, { recursive: true, force: true });
+            await removeVolume(target);
+        }
+    });
+
+    it("reports an existing volume as occupied and an absent one as empty", async () => {
+        // What the restore's overwrite warning is built on.
+        if (!available) return;
+        const name = `${PREFIX}-rt-check`;
+        await engine.createVolume(name);
+
+        try {
+            expect(await adapter().list(config, name)).toHaveLength(1);
+            expect(await adapter().list(config, `${PREFIX}-rt-absent`)).toEqual([]);
+        } finally {
+            await removeVolume(name);
+        }
+    });
+
+    it("refuses a per-file upload outside a session", async () => {
+        // The fallback path in the restore would otherwise empty the volume before every write.
+        if (!available) return;
+
+        await expect(adapter().upload(config, "/tmp/x", "vol/x.txt"))
+            .rejects.toThrow(/only be restored through a restore session/);
+    });
+
     it("refuses to collect a source with no prepared session", async () => {
         // A volume is only readable through a helper container. Reaching this without one
         // means something called the collection outside the runner's snapshot scope.

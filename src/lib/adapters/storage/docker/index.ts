@@ -5,6 +5,7 @@ import { wrapError, getErrorMessage } from "@/lib/logging/errors";
 import { connectDocker } from "./engine/connect";
 import type { DockerEngine } from "./engine/types";
 import { downloadVolume } from "./read";
+import { openDockerRestoreSession, restoreSessionFor } from "./restore-session";
 import {
     createDockerSnapshot,
     planDockerSourceGroups,
@@ -96,15 +97,23 @@ export const DockerVolumeAdapter: StorageAdapter = {
     },
 
     /**
-     * Present because StorageAdapter requires it, and answering with the volume itself is
-     * the only honest thing it can say: the tree inside a volume is not readable without a
-     * container, which is what the collection path builds. Nothing calls this for a Docker
-     * source - the collection uses `downloadDirectory`, and the destination-facing callers
-     * that use `list()` are all role-filtered to destinations.
+     * Answers one question: does this volume already exist?
+     *
+     * The only caller that matters is the restore's "empty or occupied" badge, and for a
+     * volume that badge means "am I about to overwrite something". Counting what is inside
+     * would take a container run for a label nobody reads a number off, so an existing volume
+     * reports one entry and an absent one reports none. The collection never comes through
+     * here - it uses `downloadDirectory`.
      */
-    async list(_config, remotePath): Promise<FileInfo[]> {
-        void remotePath;
-        return [];
+    async list(config, remotePath): Promise<FileInfo[]> {
+        const volume = remotePath.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").split("/")[0];
+        if (!volume) return [];
+
+        return withEngine<FileInfo[]>(config, async (engine) => {
+            const found = await engine.inspectVolume(volume);
+            if (!found) return [];
+            return [{ name: volume, path: volume, size: 0, lastModified: new Date(0), isDirectory: true }];
+        }, () => []);
     },
 
     /**
@@ -116,8 +125,43 @@ export const DockerVolumeAdapter: StorageAdapter = {
         return downloadVolume(config, remotePath, localPath, excludePatterns, onProgress, onLog, options);
     },
 
+    /**
+     * Holds one connection and one helper container per target volume for the whole restore.
+     *
+     * Never throws: `createDestinationSessions` reads a failed `openSession` as "this adapter
+     * cannot hold a session" and falls back to calling `upload()` per file, which here would
+     * empty the target volume again before every single write. Connection problems surface
+     * on the first write instead, reported against a file.
+     */
+    openSession(config, onLog) {
+        return Promise.resolve(openDockerRestoreSession(config, onLog));
+    },
+
+    /**
+     * Refuses outside a session, on purpose.
+     *
+     * Writing one file into a volume means stopping its containers, emptying it and creating
+     * a helper - work that belongs to the restore as a whole, not to a file. Doing it here
+     * would make the per-file fallback path destructive rather than merely slow.
+     */
     async upload(): Promise<boolean> {
-        throw new Error("Docker volumes cannot be used as a backup destination.");
+        throw new Error(
+            "A Docker volume can only be restored through a restore session. If this appeared during a restore, "
+            + "the connection to the Docker daemon could not be opened."
+        );
+    },
+
+    /**
+     * The one part of a directory restore that reaches the adapter rather than the session,
+     * so it looks up the session it belongs to - the link has to land in the same helper
+     * container as the files around it.
+     */
+    async createSymlink(config, remotePath, target): Promise<void> {
+        const session = restoreSessionFor(config);
+        if (!session) {
+            throw new Error("A Docker volume can only be restored through a restore session.");
+        }
+        await session.createSymlink(remotePath, target);
     },
 
     async download(): Promise<boolean> {
