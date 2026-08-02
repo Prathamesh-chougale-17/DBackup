@@ -96,8 +96,21 @@ export async function createDockerSnapshot(
         }
 
         const containerId = await createHelper(engine, volumes, helperImage, sessionLabel(volumes), stopped);
+
+        // Costs a few percent of the export it describes, and buys a real "x of y" instead
+        // of a number ticking up against nothing. Null when the helper could not be run,
+        // which is a nicety lost rather than a backup failed.
+        const entryCounts = await engine.countEntriesPerVolume(containerId);
+        if (!entryCounts) {
+            toLog(
+                `Could not count the files in ${volumes.join(", ")} beforehand, so progress will show a running count without a total. `
+                + `The backup itself is unaffected.`,
+                "warning"
+            );
+        }
+
         const session = registerSession(
-            { engine, containerId, stoppedContainerIds: stopped, volumes },
+            { engine, containerId, stoppedContainerIds: stopped, volumes, entryCounts },
             connection
         );
 

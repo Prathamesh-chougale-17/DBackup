@@ -4,6 +4,7 @@ import { logger } from "@/lib/logging/logger";
 import { wrapError, getErrorMessage } from "@/lib/logging/errors";
 import { connectDocker } from "./engine/connect";
 import type { DockerEngine } from "./engine/types";
+import { downloadVolume } from "./read";
 import {
     createDockerSnapshot,
     planDockerSourceGroups,
@@ -104,6 +105,15 @@ export const DockerVolumeAdapter: StorageAdapter = {
     async list(_config, remotePath): Promise<FileInfo[]> {
         void remotePath;
         return [];
+    },
+
+    /**
+     * Native, because the generic path lists a tree and then fetches each file - which for a
+     * volume is a round trip per file through the Docker API. One tar stream instead, the
+     * same reason Rsync brings its own.
+     */
+    downloadDirectory(config, remotePath, localPath, excludePatterns, onProgress, onLog, options) {
+        return downloadVolume(config, remotePath, localPath, excludePatterns, onProgress, onLog, options);
     },
 
     async upload(): Promise<boolean> {

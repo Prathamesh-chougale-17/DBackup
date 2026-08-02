@@ -173,7 +173,15 @@ async function collectOne(input: CollectOneInput): Promise<void> {
                 ? processedBytes / totalBytes
                 : (totalFiles > 0 ? processedFiles / totalFiles : 0);
             setPhaseProgress(unitBase + localFraction, dirTotal);
-            ctx.updateDetail(`${label}: ${processedFiles}/${totalFiles} files, ${formatBytes(processedBytes)}/${formatBytes(totalBytes)}`);
+            // Not every source knows both totals up front. A container volume counts its
+            // files cheaply but cannot add up their sizes without reading them, and a source
+            // that could not even be counted knows neither. A total shown as zero reads as a
+            // bug, so whichever half is unknown is left out rather than printed as "/0".
+            const filePart = totalFiles > 0 ? `${processedFiles}/${totalFiles} files` : `${processedFiles} file(s)`;
+            const bytePart = totalBytes > 0
+                ? `${formatBytes(processedBytes)}/${formatBytes(totalBytes)}`
+                : formatBytes(processedBytes);
+            ctx.updateDetail(`${label}: ${filePart}, ${bytePart}`);
         },
         (msg, level, type, details) => ctx.log(`${logPrefix} ${msg}`, level, type ?? 'storage', details),
         {

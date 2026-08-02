@@ -51,7 +51,7 @@ describe("createDockerSnapshot", () => {
 
         await createDockerSnapshot(config, ["v-web"], { stopContainers: true });
 
-        expect(engine.calls.order).toEqual(["stop:web", "create:helper-1"]);
+        expect(engine.calls.order).toEqual(["stop:web", "ensureImage:alpine:3", "create:helper-1", "count:helper-1"]);
     });
 
     it("mounts every volume of the group into one helper", async () => {
@@ -151,7 +151,9 @@ describe("releaseDockerSnapshot", () => {
         const handle = await createDockerSnapshot(config, ["v-web"], { stopContainers: true });
         await releaseDockerSnapshot(config, handle);
 
-        expect(engine.calls.order).toEqual(["stop:web", "create:helper-1", "remove:helper-1", "start:web"]);
+        expect(engine.calls.order).toEqual([
+            "stop:web", "ensureImage:alpine:3", "create:helper-1", "count:helper-1", "remove:helper-1", "start:web",
+        ]);
     });
 
     it("starts the containers even when removing the helper fails", async () => {

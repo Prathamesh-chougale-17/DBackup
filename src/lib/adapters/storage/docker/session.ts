@@ -26,6 +26,11 @@ export interface DockerSession {
     /** Containers this session stopped and therefore has to start again. */
     readonly stoppedContainerIds: readonly string[];
     readonly volumes: readonly string[];
+    /**
+     * Files per volume, for the progress denominator. Null when the helper could not be run
+     * to count them, in which case the collection reports a count without a total.
+     */
+    readonly entryCounts: Map<string, number> | null;
 }
 
 /** Key the runner overlays onto the config so the collection can find its session. */

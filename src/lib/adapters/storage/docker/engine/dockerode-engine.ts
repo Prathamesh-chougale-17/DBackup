@@ -11,9 +11,26 @@ import { Writable, type Duplex } from "node:stream";
 import http from "node:http";
 
 import type { ContainerInfo, DockerEngine, VolumeInfo } from "./types";
+import { COUNT_COMMAND } from "../temp-container";
 
 /** Where the mounted volumes appear inside a helper container. */
 export const MOUNT_ROOT = "/vol";
+
+/**
+ * Reads `<volume> <count>` lines out of the helper's output.
+ *
+ * Container logs are multiplexed - each line is preceded by aneight-byte frame header - so
+ * the control bytes are stripped rather than parsed. A line that does not fit the shape is
+ * dropped: this is a progress denominator, and a wrong one is worse than none.
+ */
+function parseCounts(raw: string): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const line of raw.replace(/[\x00-\x08\x0b-\x1f]/g, "").split("\n")) {
+        const match = /^(.+)\s+(\d+)$/.exec(line.trim());
+        if (match) counts.set(match[1].trim(), Number(match[2]));
+    }
+    return counts;
+}
 
 /**
  * An http.Agent whose connections come from somewhere else entirely.
@@ -153,16 +170,46 @@ export function createDockerodeEngine(options: DockerodeEngineOptions): DockerEn
             }
         },
 
+        async ensureImage(name) {
+            try {
+                await docker.getImage(name).inspect();
+                return;
+            } catch (e: unknown) {
+                if ((e as { statusCode?: number }).statusCode !== 404) throw e;
+            }
+            const stream = await docker.pull(name);
+            await new Promise<void>((resolve, reject) => {
+                // The progress stream has to be drained or the pull never finishes. Nothing
+                // in it is worth reporting for an image this small.
+                docker.modem.followProgress(stream, (err: Error | null) => (err ? reject(err) : resolve()));
+            });
+        },
+
         async createMountContainer(volumes, image, labels) {
             const container = await docker.createContainer({
                 Image: image,
-                // Never run, so the command only has to exist. It is here because the API
-                // rejects a container with neither Cmd nor an image entrypoint.
-                Cmd: ["true"],
+                // Run at most once, to count. The export works whether or not it ever ran.
+                Cmd: COUNT_COMMAND,
                 Labels: labels,
                 HostConfig: { Binds: volumes.map((name) => `${name}:${MOUNT_ROOT}/${name}`) },
             });
             return container.id;
+        },
+
+        async countEntriesPerVolume(containerId) {
+            try {
+                const container = docker.getContainer(containerId);
+                await container.start();
+                const result = await container.wait();
+                if (result?.StatusCode !== 0) return null;
+
+                const raw = await container.logs({ stdout: true, stderr: false });
+                return parseCounts(raw.toString("utf8"));
+            } catch {
+                // An image with no shell, one that refuses to start, a daemon that says no.
+                // None of those are worth failing a backup for.
+                return null;
+            }
         },
 
         async removeMountContainer(id) {

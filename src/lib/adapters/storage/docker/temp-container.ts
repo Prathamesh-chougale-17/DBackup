@@ -21,6 +21,21 @@ export function mountPathFor(volume: string): string {
     return `/vol/${volume}`;
 }
 
+/**
+ * What the helper runs when it is started, printing `<volume> <count>` per mounted volume.
+ *
+ * Fixed text with no user input in it - the only variable part is the shell's own glob over
+ * the mount root. Counting all of a group's volumes in one start is what keeps this to a
+ * single container run rather than one per volume.
+ *
+ * A helper is created with this command whether or not it is ever started. Exporting works
+ * either way, so an image that cannot run it costs the progress denominator and nothing else.
+ */
+export const COUNT_COMMAND = [
+    "sh", "-c",
+    'for d in /vol/*; do [ -d "$d" ] || continue; printf "%s %s\\n" "${d##*/}" "$(find "$d" \\( -type f -o -type l \\) 2>/dev/null | wc -l)"; done',
+];
+
 export async function createHelper(
     engine: DockerEngine,
     volumes: readonly string[],
@@ -29,6 +44,9 @@ export async function createHelper(
     stoppedContainerIds: readonly string[]
 ): Promise<string> {
     try {
+        // Pulled only when absent. The very first backup on a host would otherwise fail on a
+        // missing image, for a setting most people will never touch.
+        await engine.ensureImage(image);
         return await engine.createMountContainer([...volumes], image, labelsFor(sessionId, stoppedContainerIds));
     } catch (e: unknown) {
         const message = e instanceof Error ? e.message : String(e);
@@ -36,7 +54,7 @@ export async function createHelper(
         // is worth naming rather than passing the raw "No such image" through.
         throw new Error(
             `Could not create the helper container from image '${image}': ${message}. `
-            + `The image only has to exist on the Docker host - it is never started - so pulling it once is enough.`
+            + `The image only has to exist on the Docker host - it is never started - so having it locally, or letting DBackup pull it once, is enough.`
         );
     }
 }
