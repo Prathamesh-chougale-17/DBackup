@@ -277,6 +277,39 @@ describe('stepInitialize', () => {
             });
         });
 
+        it('carries the per-source stop choice through to the runner', async () => {
+            // Set on the job source, read much later by whatever prepares the source for
+            // reading. Nothing in between looks at it, which is exactly why a break here
+            // would go unnoticed until a container was stopped that should not have been.
+            const prisma = (await import('@/lib/prisma')).default;
+            const { registry } = await import('@/lib/core/registry');
+            (prisma.job.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(makeJob({
+                sources: [
+                    {
+                        id: 'jsrc-1', configId: 'storage-1', priority: 0, path: '/v-live', excludePatterns: '[]',
+                        excludePatternPresets: [], stopContainers: false,
+                        config: { id: 'storage-1', adapterId: 'sftp', config: '{}', name: 'Docker Host', type: 'storage' },
+                    },
+                    {
+                        id: 'jsrc-2', configId: 'storage-1', priority: 1, path: '/v-db', excludePatterns: '[]',
+                        excludePatternPresets: [], stopContainers: true,
+                        config: { id: 'storage-1', adapterId: 'sftp', config: '{}', name: 'Docker Host', type: 'storage' },
+                    },
+                ],
+            }));
+            (registry.get as ReturnType<typeof vi.fn>).mockImplementation((id: string) => {
+                if (id === 'mysql') return { type: 'database', dump: vi.fn() };
+                if (id === 'local-filesystem') return { type: 'storage', upload: vi.fn() };
+                if (id === 'sftp') return { type: 'storage', upload: vi.fn(), download: vi.fn() };
+                return null;
+            });
+
+            const ctx = makeCtx({ execution: { id: 'exec-1' } as any });
+            await stepInitialize(ctx);
+
+            expect(ctx.sources.map((s) => s.stopContainers)).toEqual([false, true]);
+        });
+
         it('warns and skips a directory source whose adapter is missing, keeps the rest', async () => {
             const prisma = (await import('@/lib/prisma')).default;
             const { registry } = await import('@/lib/core/registry');

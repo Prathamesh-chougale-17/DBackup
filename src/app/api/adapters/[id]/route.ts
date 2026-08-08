@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { STORAGE_ROLES, isStorageRole, type StorageRole } from "@/lib/core/storage-roles";
 import { validateSnapshotConfig } from "@/lib/adapters/snapshot-validation";
+import { validateStorageRole } from "@/lib/adapters/role-validation";
 import prisma from "@/lib/prisma";
 import { encryptConfig, decryptConfig, mergeSecrets } from "@/lib/crypto";
 import { toAdapterListItem } from "@/lib/adapters/dto";
@@ -146,6 +147,19 @@ export async function PUT(
         // refuse it while a job still depends on that role rather than breaking the job.
         if (storageRole !== undefined && !isStorageRole(storageRole)) {
             return NextResponse.json({ error: "Invalid storage role" }, { status: 400 });
+        }
+        // Checked before the in-use checks below, because an adapter that cannot serve the
+        // requested role at all should say so plainly rather than explain which jobs are in
+        // the way of a move that was never possible.
+        if (isStorageRole(storageRole) && existingAdapter.type === "storage") {
+            try {
+                validateStorageRole(existingAdapter.adapterId, storageRole);
+            } catch (e) {
+                if (e instanceof ValidationError) {
+                    return NextResponse.json({ success: false, error: e.message }, { status: 400 });
+                }
+                throw e;
+            }
         }
         if (isStorageRole(storageRole) && storageRole !== existingAdapter.storageRole) {
             if (storageRole === STORAGE_ROLES.SOURCE) {

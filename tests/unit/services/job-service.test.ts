@@ -243,6 +243,31 @@ describe('JobService', () => {
             );
         });
 
+        it('persists a source that forbids stopping containers', async () => {
+            // The test above pins the other half: a caller that says nothing about it leaves
+            // the column default alone, so an older client cannot silently flip the choice.
+            prismaMock.adapterConfig.findMany.mockResolvedValue([
+                { id: 'storage-1', name: 'Docker Host', type: 'storage', storageRole: 'SOURCE' },
+                { id: 'dest-1', name: 'Backup NAS', type: 'storage', storageRole: 'DESTINATION' },
+            ] as any);
+            prismaMock.job.create.mockResolvedValue({ id: 'volume-job' } as any);
+
+            await service.createJob({
+                name: 'Volume Job',
+                schedule: '0 0 * * *',
+                destinations: [{ configId: 'dest-1', priority: 0, retention: '{}' }],
+                sources: [{ configId: 'storage-1', priority: 0, path: 'v-live', stopContainers: false }],
+            });
+
+            expect(prismaMock.job.create).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    data: expect.objectContaining({
+                        sources: { create: [expect.objectContaining({ path: 'v-live', stopContainers: false })] },
+                    }),
+                })
+            );
+        });
+
         it('throws when a directory source points at a destination adapter', async () => {
             prismaMock.adapterConfig.findMany.mockResolvedValue([
                 { id: 'storage-1', name: 'Backup NAS', type: 'storage', storageRole: 'DESTINATION' },

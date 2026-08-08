@@ -481,7 +481,7 @@ async dump(config, destinationPath) {
 
 ```typescript
 const MongoDBSchema = z.object({
-  uri: z.string().optional().describe("Connection URI (overrides other settings)"),
+  uri: z.string().optional().describe("DEPRECATED — use host/port + a credential profile instead"),
   host: z.string().default("localhost"),
   port: z.coerce.number().default(27017),
   user: z.string().optional(),

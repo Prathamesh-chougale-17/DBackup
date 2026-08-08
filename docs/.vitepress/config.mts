@@ -114,6 +114,13 @@ export default defineConfig({
           ]
         },
         {
+          text: 'Directory Sources',
+          collapsed: false,
+          items: [
+            { text: 'Docker Volumes', link: '/user-guide/sources/docker-volumes' }
+          ]
+        },
+        {
           text: 'Storage Destinations',
           collapsed: false,
           items: [

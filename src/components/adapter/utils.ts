@@ -20,6 +20,7 @@ import sqliteIcon from "@iconify-icons/logos/sqlite";
 import redisIcon from "@iconify-icons/logos/redis";
 import awsS3Icon from "@iconify-icons/logos/aws";
 import cloudflareIcon from "@iconify-icons/logos/cloudflare-icon";
+import dockerIcon from "@iconify-icons/logos/docker-icon";
 import googleDriveIcon from "@iconify-icons/logos/google-drive";
 import dropboxIcon from "@iconify-icons/logos/dropbox";
 import onedriveIcon from "@iconify-icons/logos/microsoft-onedrive";
@@ -77,6 +78,9 @@ const ADAPTER_ICON_MAP: Record<string, IconifyIcon> = {
 
     // Storage - Local
     "local-filesystem": harddiskIcon,
+
+    // Storage - Containers
+    "docker-volume": dockerIcon,
 
     // Storage - S3
     "s3-aws": awsS3Icon,

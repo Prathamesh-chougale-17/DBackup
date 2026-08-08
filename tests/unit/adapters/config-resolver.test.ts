@@ -132,6 +132,39 @@ describe("resolveAdapterConfig", () => {
         expect(result.sshUsername).toBeUndefined();
     });
 
+    it("overlays SSH slot WITH prefix for an adapter that has no primary slot but prefixed fields (Docker volumes)", async () => {
+        // The mirror image of the SQLite case above, and the reason the two cannot be told
+        // apart by the primary slot. A Docker socket has no login of its own, so there is no
+        // primary slot - but the schema spreads `sshFields` like every other adapter, and
+        // `standardTransport` reads `sshUsername`. Writing the plain names here left SSH
+        // mode unable to connect at all, with a "SSH host or username is missing" error that
+        // pointed at the config rather than at the overlay.
+        (getDecryptedCredentialData as any).mockResolvedValueOnce({
+            username: "dockeruser",
+            authType: "privateKey",
+            privateKey: "-----KEY-----",
+            passphrase: "ph",
+        });
+
+        const result = (await resolveAdapterConfig(
+            buildRow({
+                adapterId: "docker-volume",
+                primaryCredentialId: null,
+                sshCredentialId: "cred-ssh",
+                config: { connectionMode: "ssh", sshHost: "docker-host", socketPath: "/var/run/docker.sock" },
+            })
+        )) as Record<string, unknown>;
+
+        expect(result.sshUsername).toBe("dockeruser");
+        expect(result.sshAuthType).toBe("privateKey");
+        expect(result.sshPrivateKey).toBe("-----KEY-----");
+        expect(result.sshPassphrase).toBe("ph");
+        // The plain names must stay clear, or the transport would read one and the config
+        // would carry the other.
+        expect(result.username).toBeUndefined();
+        expect(result.privateKey).toBeUndefined();
+    });
+
     it("overlays SSH_KEY in primary slot for SFTP-style adapters (no prefix)", async () => {
         (getDecryptedCredentialData as any).mockResolvedValue({
             username: "deploy",

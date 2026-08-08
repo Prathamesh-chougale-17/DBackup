@@ -151,6 +151,16 @@ export interface ExecutionHost {
 
     /** TCP stream to host:port as reachable from this host. */
     connect(remoteHost: string, remotePort: number): Promise<Duplex>;
+    /**
+     * Stream to a Unix domain socket as reachable from this host.
+     *
+     * Exists for clients that speak a protocol over a socket rather than a port -
+     * the Docker daemon is the first - and returns a bare stream rather than a
+     * local address on purpose. A client that accepts a connection factory can
+     * then be pointed at a remote daemon with no listener in between, and a
+     * future agent transport that has no TCP to offer at all still fits.
+     */
+    connectSocket(socketPath: string): Promise<Duplex>;
     /** Expose host:port at a local address a native driver can dial. */
     forwardPort(remoteHost: string, remotePort: number): Promise<PortForward>;
 

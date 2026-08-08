@@ -5,11 +5,13 @@ import { logger } from "@/lib/logging/logger";
 import { ConflictError, NotFoundError, ValidationError, wrapError } from "@/lib/logging/errors";
 import {
     CREDENTIAL_SCHEMAS,
+    SshKeyGenerateSchema,
     type CredentialType,
     type CredentialData,
     type CredentialProfileShape,
     parseCredentialData,
 } from "@/lib/core/credentials";
+import { generateSshKeyPair, readPublicKey, sshFingerprint } from "@/lib/transport/openssh-key";
 
 const log = logger.child({ service: "CredentialService" });
 
@@ -36,16 +38,85 @@ function sanitize(profile: {
 }
 
 /**
- * Computes which sensitive payload fields are set, WITHOUT exposing values.
- * Used so the UI can tell whether an OAUTH profile is authorized (has a
- * refreshToken). Returns undefined if the payload can't be decrypted/parsed.
+ * Everything a client may learn about a stored payload without revealing it: which sensitive
+ * fields are set, and the public half of an SSH key.
+ *
+ * Both come out of the same decrypt, which is why they are computed together. Returns an
+ * empty object if the payload can't be decrypted or parsed.
  */
-function secretStatusOf(encryptedData: string): Record<string, boolean> | undefined {
+function describePayload(encryptedData: string): Partial<CredentialProfileShape> {
     try {
-        return getSecretStatus(JSON.parse(decrypt(encryptedData)));
+        return describeParsedPayload(JSON.parse(decrypt(encryptedData)));
     } catch {
-        return undefined;
+        return {};
     }
+}
+
+/** Same as `describePayload`, for a payload that is already in hand. */
+function describeParsedPayload(payload: unknown): Partial<CredentialProfileShape> {
+    const publicKey = publicKeyOf(payload);
+    return {
+        secretStatus: getSecretStatus(payload),
+        ...(publicKey ? { publicKey, fingerprint: sshFingerprint(publicKey) ?? undefined } : {}),
+    };
+}
+
+function publicKeyOf(payload: unknown): string | undefined {
+    if (!payload || typeof payload !== "object") return undefined;
+    const value = (payload as { publicKey?: unknown }).publicKey;
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Turns an `SSH_KEY` payload into one that carries real key material.
+ *
+ * A `generate` request is answered here rather than in the route, so a private key is created
+ * in the same place it is encrypted and never travels to a browser. A pasted key gets its
+ * public half derived instead, which is best effort: a passphrase-protected or unusual key
+ * simply ends up without one, and everything else about the profile still works.
+ */
+async function resolveSshKeyMaterial(type: CredentialType, raw: unknown): Promise<unknown> {
+    if (type !== "SSH_KEY" || !raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+
+    const payload = { ...(raw as Record<string, unknown>) };
+    const request = payload.generate;
+    delete payload.generate;
+    // Only ever set from key material this function knows about.
+    delete payload.publicKey;
+
+    if (request !== undefined) {
+        const parsed = SshKeyGenerateSchema.safeParse(request);
+        if (!parsed.success) {
+            throw new ValidationError("Invalid SSH key generation request", {
+                field: "generate",
+                cause: parsed.error,
+            });
+        }
+        const { keyType, comment, passphrase } = parsed.data;
+        const key = await generateSshKeyPair(keyType, comment ?? "", passphrase);
+        log.info("Generated SSH keypair", {
+            keyType,
+            fingerprint: key.fingerprint,
+            encrypted: !!passphrase,
+        });
+        return {
+            ...payload,
+            authType: "privateKey",
+            privateKey: key.privateKey,
+            publicKey: key.publicKey,
+            // The passphrase of the new key, never one left in the form from an earlier key.
+            passphrase: passphrase || undefined,
+        };
+    }
+
+    if (payload.authType === "privateKey" && typeof payload.privateKey === "string") {
+        const passphrase =
+            typeof payload.passphrase === "string" ? payload.passphrase : undefined;
+        const derived = readPublicKey(payload.privateKey, passphrase);
+        if (derived) payload.publicKey = derived.publicKey;
+    }
+
+    return payload;
 }
 
 /**
@@ -62,10 +133,12 @@ export async function createCredentialProfile(
         throw new ValidationError(`Unknown credential type: ${type}`, { field: "type" });
     }
 
+    const payload = await resolveSshKeyMaterial(type, data);
+
     // Validate payload shape before storing
     let validated: CredentialData;
     try {
-        validated = parseCredentialData(type, data);
+        validated = parseCredentialData(type, payload);
     } catch (e) {
         throw new ValidationError("Credential payload validation failed", {
             cause: e instanceof Error ? e : undefined,
@@ -90,7 +163,7 @@ export async function createCredentialProfile(
     });
 
     log.info("Credential profile created", { id: profile.id, type, name });
-    return sanitize(profile);
+    return { ...sanitize(profile), ...describeParsedPayload(validated) };
 }
 
 /**
@@ -104,7 +177,7 @@ export async function listCredentialProfiles(
         where: type ? { type } : undefined,
         orderBy: { createdAt: "desc" },
     });
-    return profiles.map((p) => ({ ...sanitize(p), secretStatus: secretStatusOf(p.data) }));
+    return profiles.map((p) => ({ ...sanitize(p), ...describePayload(p.data) }));
 }
 
 /**
@@ -125,7 +198,7 @@ export async function listCredentialProfilesWithCounts(
     });
     return profiles.map((p) => ({
         ...sanitize(p),
-        secretStatus: secretStatusOf(p.data),
+        ...describePayload(p.data),
         usageCount: p._count.primaryAdapters + p._count.sshAdapters,
     }));
 }
@@ -138,7 +211,7 @@ export async function getCredentialProfile(id: string): Promise<CredentialProfil
     if (!profile) {
         throw new NotFoundError("CredentialProfile", id);
     }
-    return { ...sanitize(profile), secretStatus: secretStatusOf(profile.data) };
+    return { ...sanitize(profile), ...describePayload(profile.data) };
 }
 
 /**
@@ -208,16 +281,19 @@ export async function updateCredentialProfile(
         patch.name = updates.name;
     }
 
+    let stored: CredentialData | undefined;
+
     if (updates.data !== undefined) {
-        let validated: CredentialData;
+        const type = existing.type as CredentialType;
+        const payload = await resolveSshKeyMaterial(type, updates.data);
         try {
-            validated = parseCredentialData(existing.type as CredentialType, updates.data);
+            stored = parseCredentialData(type, payload);
         } catch (e) {
             throw new ValidationError("Credential payload validation failed", {
                 cause: e instanceof Error ? e : undefined,
             });
         }
-        patch.data = encrypt(JSON.stringify(validated));
+        patch.data = encrypt(JSON.stringify(stored));
     }
 
     if (updates.description !== undefined) {
@@ -230,7 +306,10 @@ export async function updateCredentialProfile(
     });
 
     log.info("Credential profile updated", { id, fields: Object.keys(patch) });
-    return sanitize(updated);
+    return {
+        ...sanitize(updated),
+        ...(stored ? describeParsedPayload(stored) : describePayload(updated.data)),
+    };
 }
 
 /**

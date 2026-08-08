@@ -213,6 +213,10 @@ model JobSource {
   excludePatterns        String                @default("[]") // JSON array of job-specific extra glob patterns (in addition to any linked presets' patterns)
   excludePatternPresets  ExcludePatternPreset[] // Live-linked templates - re-read fresh at execution time (see 01-initialize.ts); patterns from every linked preset are unioned
   useStagingCache        Boolean               @default(false) // Reserved for a later phase (persistent rsync mirror); unused for now
+  // Whether the adapter may stop whatever holds this source open while it is read. Only
+  // consulted by adapters that stop anything at all; the rest ignore it. Default true: a
+  // consistent backup with a short interruption is what asking for one implies.
+  stopContainers         Boolean               @default(true)
   createdAt              DateTime              @default(now())
   updatedAt              DateTime              @updatedAt
 

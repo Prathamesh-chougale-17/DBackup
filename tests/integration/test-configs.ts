@@ -313,13 +313,28 @@ if (!sshHostAvailable) {
 }
 
 /** The prefixed convention every adapter but SQLite uses. */
-const sshFields = {
+/** The ssh-host container, as a config `standardTransport` can resolve. */
+export const sshHostConfig = {
     connectionMode: 'ssh',
     sshHost: TEST_HOST,
     sshPort: SSH_PORT,
     sshUsername: 'root',
     sshAuthType: 'privateKey',
     sshPrivateKey: sshPrivateKey ?? '',
+};
+
+/**
+ * Reaching the test environment's own Docker daemon over SSH.
+ *
+ * The ssh-host container has the host's socket mounted, so connecting to it and opening
+ * `/var/run/docker.sock` there drives the same daemon the tests run on - which is exactly
+ * the topology of a user whose Docker host is a different machine. It is the only way to
+ * exercise `connectSocket` over SSH against a real server instead of a mocked ssh2.
+ */
+export const dockerSshConfig = {
+    ...sshHostConfig,
+    socketPath: '/var/run/docker.sock',
+    helperImage: 'alpine:3',
 };
 
 export const sshTestDatabases = [
@@ -333,7 +348,7 @@ export const sshTestDatabases = [
         config: {
             type: 'mariadb', host: 'mariadb-11', port: 3306,
             user: 'root', password: 'rootpassword', database: 'testdb',
-            ...sshFields,
+            ...sshHostConfig,
         },
     },
     {
@@ -341,7 +356,7 @@ export const sshTestDatabases = [
         config: {
             type: 'mysql', host: 'mysql-57', port: 3306,
             user: 'root', password: 'rootpassword', database: 'testdb',
-            ...sshFields,
+            ...sshHostConfig,
         },
     },
     // postgres-17 is absent for the mirror-image reason: pg_dump refuses to
@@ -351,7 +366,7 @@ export const sshTestDatabases = [
         config: {
             type: 'postgres', host: 'postgres-12', port: 5432,
             user: 'testuser', password: 'testpassword', database: 'testdb',
-            ...sshFields,
+            ...sshHostConfig,
         },
     },
     {
@@ -359,7 +374,7 @@ export const sshTestDatabases = [
         config: {
             type: 'redis', host: 'redis-8', port: 6379,
             password: 'testpassword', database: 0,
-            ...sshFields,
+            ...sshHostConfig,
         },
     },
     {
@@ -367,7 +382,7 @@ export const sshTestDatabases = [
         config: {
             type: 'valkey', host: 'valkey-8', port: 6379,
             password: 'testpassword', database: 0,
-            ...sshFields,
+            ...sshHostConfig,
         },
     },
     // SQLite stores `mode` plus unprefixed SSH keys, see sqlite/transport.ts.

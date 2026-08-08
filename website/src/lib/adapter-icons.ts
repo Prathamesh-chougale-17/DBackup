@@ -16,6 +16,7 @@ import discordIcon from "@iconify-icons/logos/discord-icon";
 import slackIcon from "@iconify-icons/logos/slack-icon";
 import teamsIcon from "@iconify-icons/logos/microsoft-teams";
 import telegramIcon from "@iconify-icons/logos/telegram";
+import dockerIcon from "@iconify-icons/logos/docker-icon";
 
 // Simple Icons (monochrome - brand color applied via getAdapterColor)
 import mssqlIcon from "@iconify-icons/simple-icons/microsoftsqlserver";
@@ -77,6 +78,7 @@ const ADAPTER_ICON_MAP: Record<string, IconifyIcon> = {
   webdav: cloudUploadIcon,
   smb: folderNetworkIcon,
   rsync: folderSyncIcon,
+  "docker-volume": dockerIcon,
   // Notifications
   discord: discordIcon,
   slack: slackIcon,

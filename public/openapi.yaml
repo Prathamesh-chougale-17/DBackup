@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: DBackup API
-  version: 3.1.0
+  version: 3.2.0
   description: |
     REST API for DBackup - a self-hosted database backup automation platform with encryption, compression, and smart retention.
 
@@ -2284,6 +2284,14 @@ components:
         updatedAt:
           type: string
           format: date-time
+        publicKey:
+          type: string
+          description: |
+            `SSH_KEY` profiles on private-key auth only. The `authorized_keys` line for the
+            stored key, which is not a secret and needs no reveal permission.
+        fingerprint:
+          type: string
+          description: "`SHA256:...` fingerprint of `publicKey`, matching `ssh-keygen -lf`."
 
     CredentialProfileInput:
       type: object
@@ -2330,11 +2338,42 @@ components:
           description: Required when `authType = password`
         privateKey:
           type: string
-          description: PEM-encoded private key. Required when `authType = privateKey`
+          description: |
+            PEM-encoded private key. Required when `authType = privateKey`, unless `generate`
+            is sent instead.
         passphrase:
           type: string
           format: password
           description: Optional passphrase for encrypted private keys
+        publicKey:
+          type: string
+          readOnly: true
+          description: |
+            The `authorized_keys` line for the stored private key. Derived by the server, which
+            ignores any value a client sends. Absent when the private key cannot be read, for
+            example an encrypted key stored without its passphrase.
+        generate:
+          type: object
+          writeOnly: true
+          required: [keyType]
+          description: |
+            Asks DBackup to generate the private key instead of sending one. Sent in place of
+            `privateKey` and forces `authType = privateKey`. The response returns the public
+            half, the private key never leaves the server.
+          properties:
+            keyType:
+              type: string
+              enum: [ed25519, rsa-4096, ecdsa-p256, ecdsa-p384]
+            comment:
+              type: string
+              maxLength: 120
+              description: Key comment written into the public key, e.g. `dbackup@prod`.
+            passphrase:
+              type: string
+              format: password
+              description: |
+                Optional. Encrypts the generated key and is stored with it, so it also becomes
+                the profile's `passphrase`. A Rsync destination cannot use a key that has one.
 
     AccessKeyData:
       type: object

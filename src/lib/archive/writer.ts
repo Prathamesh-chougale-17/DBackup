@@ -58,6 +58,7 @@ import {
     IndexEntryLine,
     IndexFileLine,
     IndexLine,
+    metadataToIndex,
     SourceFileEntry,
 } from "./types";
 
@@ -493,6 +494,7 @@ export async function createArchive(
             fileLines.push({
                 k: "f", src, p: file.path, s: file.size, m: file.mtime,
                 ...(file.checksum ? { h: file.checksum } : {}),
+                ...metadataToIndex(file),
                 n: entry.ordinal,
             });
         } else if (entry.origin.kind === "bundle") {
@@ -501,6 +503,7 @@ export async function createArchive(
                 fileLines.push({
                     k: "f", src: part.src, p: part.file.path, s: part.file.size, m: part.file.mtime,
                     ...(part.file.checksum ? { h: part.file.checksum } : {}),
+                    ...metadataToIndex(part.file),
                     n: entry.ordinal, o: slice.offset, l: slice.length,
                 });
             });

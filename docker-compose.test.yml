@@ -488,6 +488,16 @@ services:
       - "127.0.0.1:22022:22"
     volumes:
       - ./.ssh-test:/keys:ro
+      # The host's own Docker socket, so the Docker volume adapter can be exercised
+      # over SSH: DBackup connects to this container, and the socket it finds there
+      # is the daemon running the whole test environment. That is the same topology
+      # a user has when their Docker host is a different machine, and it is the only
+      # way to test `connectSocket` over SSH against something real rather than a mock.
+      #
+      # Read-write because creating and removing a test volume is the point. This is a
+      # local test container that already accepts key-based root logins, and the socket
+      # is not published anywhere.
+      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD-SHELL", "ssh-keyscan -p 22 127.0.0.1 >/dev/null 2>&1 || exit 1"]
       interval: 5s

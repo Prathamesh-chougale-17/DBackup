@@ -28,6 +28,13 @@ interface FolderPickerDialogProps {
     /** Storage adapter config to browse. */
     configId: string;
     configName: string;
+    /**
+     * This adapter has nothing below its root, so there is no folder to descend into and no
+     * path to assemble - a Docker volume is picked whole or not at all.
+     */
+    flat?: boolean;
+    /** What one item is called, singular. Wording only. */
+    itemNoun?: string;
     /** Called with the chosen folder path, relative to the adapter's root. */
     onSelect: (path: string) => void;
 }
@@ -43,7 +50,7 @@ interface FolderPickerDialogProps {
  * is identical to the real relative path; for ID-based adapters (Google Drive) it is the
  * name path, which is what their upload path resolution expects.
  */
-export function FolderPickerDialog({ open, onOpenChange, configId, configName, onSelect }: FolderPickerDialogProps) {
+export function FolderPickerDialog({ open, onOpenChange, configId, configName, onSelect, flat = false, itemNoun = "folder" }: FolderPickerDialogProps) {
     const [stack, setStack] = useState<Crumb[]>([]);
     const [entries, setEntries] = useState<BrowseEntry[]>([]);
     const [loading, setLoading] = useState(false);
@@ -91,14 +98,16 @@ export function FolderPickerDialog({ open, onOpenChange, configId, configName, o
         <Dialog open={open} onOpenChange={onOpenChange}>
             <DialogContent className="flex h-[70vh] max-w-lg flex-col">
                 <DialogHeader>
-                    <DialogTitle>Choose a folder</DialogTitle>
+                    <DialogTitle>Choose a {itemNoun}</DialogTitle>
                     <DialogDescription>
-                        Pick the restore target folder on <span className="font-medium">{configName}</span>.
+                        {flat
+                            ? <>Pick the {itemNoun} to restore into on <span className="font-medium">{configName}</span>. A {itemNoun} is restored whole, so there is nothing to choose inside it.</>
+                            : <>Pick the restore target folder on <span className="font-medium">{configName}</span>.</>}
                     </DialogDescription>
                 </DialogHeader>
 
-                {/* Breadcrumb */}
-                <div className="flex flex-wrap items-center gap-1 text-sm">
+                {/* Breadcrumb - a flat adapter has no depth to show */}
+                {!flat && <div className="flex flex-wrap items-center gap-1 text-sm">
                     <button
                         type="button"
                         onClick={() => jumpTo(0)}
@@ -119,7 +128,7 @@ export function FolderPickerDialog({ open, onOpenChange, configId, configName, o
                             </button>
                         </span>
                     ))}
-                </div>
+                </div>}
 
                 {/* The dialog carries a definite height (h-, not max-h) so this can take the
                     leftover space with flex-1: a ScrollArea's viewport is height:100%, which
@@ -144,18 +153,28 @@ export function FolderPickerDialog({ open, onOpenChange, configId, configName, o
                                 This adapter does not support folder browsing - type the target path manually instead.
                             </p>
                         ) : entries.length === 0 ? (
-                            <p className="p-3 text-sm text-muted-foreground">No subfolders here.</p>
+                            <p className="p-3 text-sm text-muted-foreground">
+                                {flat ? `No ${itemNoun}s on this host.` : "No subfolders here."}
+                            </p>
                         ) : (
                             entries.map((entry) => (
                                 <button
                                     key={entry.path}
                                     type="button"
-                                    onClick={() => descend(entry)}
+                                    // Flat: the click IS the choice. Descending would open an empty
+                                    // level, and a separate confirm would ask twice for one decision.
+                                    onClick={() => {
+                                        if (!flat) { descend(entry); return; }
+                                        onSelect(entry.path);
+                                        onOpenChange(false);
+                                    }}
                                     className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted/60"
                                 >
-                                    <Folder className="h-4 w-4 shrink-0 text-blue-500" />
+                                    {flat
+                                        ? <HardDrive className="h-4 w-4 shrink-0 text-muted-foreground" />
+                                        : <Folder className="h-4 w-4 shrink-0 text-blue-500" />}
                                     <span className="truncate">{entry.name}</span>
-                                    <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-muted-foreground" />
+                                    {!flat && <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-muted-foreground" />}
                                 </button>
                             ))
                         )}
@@ -163,20 +182,28 @@ export function FolderPickerDialog({ open, onOpenChange, configId, configName, o
                 </ScrollArea>
 
                 <DialogFooter className="items-center gap-2 sm:justify-between">
-                    <span className="truncate font-mono text-xs text-muted-foreground">
-                        /{currentPath}
-                    </span>
-                    <div className="flex gap-2">
+                    {/* Neither half applies to a flat adapter: there is no assembled path to
+                        show, and no "use this level" to confirm - picking a row is the whole
+                        interaction. Offering the root as a target would store a path the
+                        adapter turns into a mount with no volume name. */}
+                    {!flat && (
+                        <span className="truncate font-mono text-xs text-muted-foreground">
+                            /{currentPath}
+                        </span>
+                    )}
+                    <div className="flex gap-2 ml-auto">
                         <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-                        <Button
-                            disabled={unsupported}
-                            onClick={() => {
-                                onSelect(`/${currentPath}`.replace(/\/+$/, "") || "/");
-                                onOpenChange(false);
-                            }}
-                        >
-                            Select this folder
-                        </Button>
+                        {!flat && (
+                            <Button
+                                disabled={unsupported}
+                                onClick={() => {
+                                    onSelect(`/${currentPath}`.replace(/\/+$/, "") || "/");
+                                    onOpenChange(false);
+                                }}
+                            >
+                                Select this folder
+                            </Button>
+                        )}
                     </div>
                 </DialogFooter>
             </DialogContent>

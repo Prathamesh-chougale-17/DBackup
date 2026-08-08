@@ -190,6 +190,9 @@ export async function createShadowCopy(config: SmbVssConfig): Promise<SnapshotHa
         // The exposed share is a full UNC path; the adapter addresses shares as //server/share.
         configOverride: { address: exposedShare.replace(/\\/g, "/") },
         label: exposedShare,
+        // What VSS actually calls it, and what the log has always said. Stated explicitly
+        // now that the runner no longer assumes every adapter makes shadow copies.
+        noun: "shadow copy",
     };
 
     try {
@@ -251,5 +254,6 @@ export async function findOrphanedShadowCopies(config: SmbVssConfig): Promise<Sn
         id: encodeRef({ setId, shadowCopyId, baseShare: unc }),
         configOverride: {},
         label: unc,
+        noun: "shadow copy",
     }];
 }

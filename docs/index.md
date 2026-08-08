@@ -22,7 +22,7 @@ features:
     details: Supports MySQL, MariaDB, PostgreSQL, MongoDB, SQLite, Redis, Valkey, Microsoft SQL Server, and Firebird (beta).
   - icon: 📁
     title: File & Folder Backups
-    details: Back up an application's config and data directories alongside its database, in one job with one schedule and one retention policy. Folder tree picker, reusable exclude presets, and VSS shadow copies on SMB sources.
+    details: Back up an application's config and data directories alongside its database, in one job with one schedule and one retention policy. Folder tree picker, reusable exclude presets, Docker volumes read through the daemon, and VSS shadow copies on SMB sources.
   - icon: 🧩
     title: Incremental Backups
     details: Directory sources can store only what changed since the last run. Each chain lives in its own folder and is retained and deleted as a unit, so a snapshot can never lose the archives it depends on.
@@ -37,7 +37,7 @@ features:
     details: Built-in GZIP and Brotli compression to reduce backup size and storage costs.
   - icon: ☁️
     title: Flexible Storage
-    details: 13+ storage adapters including S3, Google Drive, Dropbox, OneDrive, SFTP, Rsync, WebDAV, SMB, FTP, and local filesystem - usable as backup destinations or as directory sources.
+    details: 14 storage adapters including S3, Google Drive, Dropbox, OneDrive, SFTP, Rsync, WebDAV, SMB, FTP, local filesystem, and Docker volumes - usable as backup destinations or as directory sources.
   - icon: 🔀
     title: Multi-Destination Jobs
     details: Each backup job can target multiple storage destinations simultaneously for redundancy or off-site copies.
@@ -139,7 +139,7 @@ Then open [https://localhost:3000](https://localhost:3000) and create your first
 
 == 📁 Directory Sources
 
-Every storage adapter can also be a **directory source**. What differs is how a restore behaves - adapters that serve byte ranges fetch just the file you asked for:
+Every storage adapter can also be a **directory source**, and one backend exists on this side only. What differs is how a restore behaves - adapters that serve byte ranges fetch just the file you asked for:
 
 | Adapter | Browse folders | Restore one file without fetching the whole archive |
 | :--- | :---: | :---: |
@@ -153,6 +153,7 @@ Every storage adapter can also be a **directory source**. What differs is how a 
 | **Dropbox** | ✅ | ✅ |
 | **Microsoft OneDrive** | ✅ | ✅ |
 | **SMB / Samba** | ✅ | ❌ (fetches the archive once) |
+| **Docker Volumes** (Beta) | ✅ (volumes, not folders) | — (source only, never holds a backup) |
 
 → [File & Folder Backups](/user-guide/features/file-backups) for setup and the full comparison.
 

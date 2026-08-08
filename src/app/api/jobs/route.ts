@@ -76,12 +76,16 @@ export async function POST(req: NextRequest) {
                 retention: d.retention ? JSON.stringify(d.retention) : "{}",
                 retentionPolicyId: d.retentionPolicyId ?? null,
             })),
-            sources: Array.isArray(sources) ? sources.map((s: { configId: string; priority?: number; path: string; excludePatterns?: string[]; excludePatternPresetIds?: string[] }, i: number) => ({
+            sources: Array.isArray(sources) ? sources.map((s: { configId: string; priority?: number; path: string; excludePatterns?: string[]; excludePatternPresetIds?: string[]; stopContainers?: boolean }, i: number) => ({
                 configId: s.configId,
                 priority: s.priority ?? i,
                 path: s.path,
                 excludePatterns: Array.isArray(s.excludePatterns) ? s.excludePatterns : [],
                 excludePatternPresetIds: Array.isArray(s.excludePatternPresetIds) ? s.excludePatternPresetIds : [],
+                // Only forwarded when it really is a boolean, so a client that omits it or
+                // sends something else falls through to the column default rather than
+                // turning an unrelated value into "do not stop anything".
+                ...(typeof s.stopContainers === "boolean" ? { stopContainers: s.stopContainers } : {}),
             })) : undefined,
             notificationIds,
             notificationTemplateIds: Array.isArray(notificationTemplateIds) ? notificationTemplateIds : undefined,

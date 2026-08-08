@@ -381,6 +381,19 @@ export type FileInfo = {
 export interface UploadOptions {
     checksumSha256?: string;
     checksumMd5?: string;
+    /**
+     * POSIX metadata to apply to the written file, when the backup recorded it and the
+     * adapter can set it.
+     *
+     * Adapters that cannot are not expected to try: a file uploaded to S3 or Dropbox has no
+     * owner to restore. The adapters that do care are the ones writing somewhere a program
+     * will read the result back - a container volume above all, where a data directory with
+     * the wrong owner or a mode looser than 0700 stops Postgres, MySQL and Redis from
+     * starting at all.
+     */
+    mode?: number;
+    uid?: number;
+    gid?: number;
 }
 
 /**
@@ -429,6 +442,16 @@ export interface DirectoryFileEntry {
      * file exists, so `size` is 0 and callers must not try to read it off disk.
      */
     linkTarget?: string;
+    /**
+     * POSIX metadata as it exists at the source, for adapters whose protocol carries it.
+     *
+     * Optional throughout: an adapter that cannot see permissions leaves these unset and
+     * the backup behaves exactly as it did before they existed. Setting them is what lets a
+     * restore put the file back the way a program expects to find it.
+     */
+    mode?: number;
+    uid?: number;
+    gid?: number;
 }
 
 /** Options for a directory download, used by incremental backups to skip unchanged files. */
@@ -561,6 +584,28 @@ export interface DirectoryBrowseEntry {
  * which runs in the runner's `finally` - so a snapshot outlives neither a failure nor a
  * cancellation.
  */
+/** Per-group choices the job carries into a snapshot. */
+export interface SnapshotOptions {
+    /**
+     * Whether the adapter may stop whatever is holding the sources open, for the duration.
+     *
+     * Set per job source. Uniform within a group by construction: a source that says no is
+     * always planned into a group of its own, so an adapter never has to reconcile a group
+     * where half the sources allow it and half do not.
+     */
+    stopContainers?: boolean;
+    /**
+     * Writes into the run's execution log.
+     *
+     * Preparing a source can be the most consequential thing a backup does - stopping a
+     * database, emptying nothing but touching everything, discovering that an earlier run
+     * left services down. Without this the adapter could only talk to the server console,
+     * so none of it reached the history someone actually reads. Same shape as the callback
+     * `downloadDirectory`, `upload` and `openSession` already take.
+     */
+    onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void;
+}
+
 export interface SnapshotHandle {
     /** Opaque id the adapter needs to release this snapshot again. */
     id: string;
@@ -572,6 +617,15 @@ export interface SnapshotHandle {
     configOverride: Record<string, unknown>;
     /** Human-readable location, for the execution log. */
     label: string;
+    /**
+     * What this kind of snapshot is called, for the runner's own log lines. Defaults to
+     * "snapshot".
+     *
+     * A shadow copy and a helper container are not the same thing, and a log that calls one
+     * by the other's name is worse than a vague one. SMB says "shadow copy" and reads
+     * exactly as it always has; a container runtime says "helper container".
+     */
+    noun?: string;
 }
 
 export interface StorageAdapter extends BaseAdapter {
@@ -719,11 +773,56 @@ export interface StorageAdapter extends BaseAdapter {
      */
     supportsSnapshot?(config: AdapterConfig, remotePath: string): Promise<{ supported: boolean; message: string }>;
 
-    /** Creates and exposes a snapshot. The caller must release it, whatever else happens. */
-    createSnapshot?(config: AdapterConfig, remotePath: string): Promise<SnapshotHandle>;
+    /**
+     * Groups this adapter's sources within one run, so preparation they share happens once
+     * and is undone as soon as the last of them is collected.
+     *
+     * Without it every source is its own group and the run behaves exactly as it always
+     * did. It exists for sources whose preparation reaches beyond the source itself: backing
+     * up a container volume means stopping the containers holding it, two volumes of the
+     * same container have to stop it once rather than twice, and a container whose volumes
+     * are done should start again without waiting for the rest of the job.
+     *
+     * Returns the given paths partitioned into groups, in the order they should be
+     * collected. Every input path must appear exactly once - the caller checks, because a
+     * dropped path is a file missing from a backup that still reports success.
+     */
+    planSourceGroups?(config: AdapterConfig, remotePaths: string[]): Promise<string[][]>;
 
-    /** Releases a snapshot. Must tolerate one that is already gone. */
-    releaseSnapshot?(config: AdapterConfig, handle: SnapshotHandle): Promise<void>;
+    /**
+     * Prepare unconditionally, rather than only when the source config asks for a snapshot.
+     *
+     * `useVss` makes shadow copies an option a user turns on for a share that supports them.
+     * An adapter that cannot be read at all without preparing first - a volume needs a
+     * container to expose it - sets this instead, and its `stopContainers`-style choices
+     * become options on createSnapshot rather than a reason to skip it.
+     */
+    alwaysSnapshot?: true;
+
+    /**
+     * Creates and exposes a snapshot. The caller must release it, whatever else happens.
+     *
+     * Takes the whole group's paths: an adapter that implements `planSourceGroups` gets one
+     * preparation covering all of them. Adapters that do not are called with exactly one.
+     */
+    createSnapshot?(
+        config: AdapterConfig,
+        remotePaths: string[],
+        options?: SnapshotOptions
+    ): Promise<SnapshotHandle>;
+
+    /**
+     * Releases a snapshot. Must tolerate one that is already gone.
+     *
+     * `onLog` is separate from the create side's because a release happens twice: once when
+     * the group is done, and once more from cleanup if that failed. Both want to say what
+     * they undid, and the second one no longer has the options object.
+     */
+    releaseSnapshot?(
+        config: AdapterConfig,
+        handle: SnapshotHandle,
+        onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
+    ): Promise<void>;
 
     /**
      * Finds snapshots this adapter left behind on the server, so a run killed before it

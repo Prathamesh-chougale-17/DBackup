@@ -66,6 +66,38 @@ const ADAPTER_RULES: Rule[] = [
         reason: "src/lib/ssh was removed. Import from @/lib/transport instead.",
     },
     {
+        name: "dockerode import",
+        pattern: /from\s+["']dockerode["']/,
+        allowed: {
+            "storage/docker/engine/dockerode-engine.ts":
+                "The one implementation of the DockerEngine port. Everything above it speaks volumes and containers, not dockerode.",
+        },
+        reason:
+            "Only storage/docker/engine/dockerode-engine.ts may talk to dockerode. Without this line the client "
+            + "spreads back across the adapter within a couple of changes, which is exactly how shellEscape ended up "
+            + "in eighteen files.",
+    },
+    {
+        name: "AutoRemove on a container we wait for",
+        pattern: /AutoRemove/,
+        reason:
+            "A container started with AutoRemove is deleted by the daemon the moment it exits, so a "
+            + "`wait` that arrives afterwards gets 'no such container'. On a local socket that gap is "
+            + "microseconds and it almost always wins; over SSH without socket forwarding every API "
+            + "call is its own process on the target and the wait loses every time - reproduced at 0 of "
+            + "3 with 400 ms per request. Create, start, wait, then remove it yourself.",
+    },
+    {
+        name: "Dockerode type outside the engine",
+        pattern: /\bDockerode\b/,
+        allowed: {
+            "storage/docker/engine/dockerode-engine.ts": "Constructs the client, so it names its type.",
+        },
+        reason:
+            "A port that leaks the library's own types into signatures is not a port. If DockerEngine ever "
+            + "collapses into an alias for Dockerode it should be deleted rather than kept for the shape of it.",
+    },
+    {
         name: "connectionMode comparison",
         pattern: /connectionMode\s*[=!]==|\.mode\s*===\s*["']ssh["']/,
         allowed: {

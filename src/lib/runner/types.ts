@@ -59,6 +59,14 @@ export interface DirectorySourceContext {
     remotePath: string;
     excludePatterns: string[];
     priority: number;
+    /**
+     * Whether the adapter may stop whatever holds this source open while it is read.
+     *
+     * Set per job source. Undefined means yes: a consistent backup with a short interruption
+     * is what someone asking for one expects, and only an adapter that stops anything at all
+     * consults it.
+     */
+    stopContainers?: boolean;
 }
 
 export interface RunnerContext {
@@ -85,7 +93,21 @@ export interface RunnerContext {
      * Snapshots created for this run, released in `stepCleanup` - which the runner calls
      * from its `finally`, so they go on success, failure and cancellation alike.
      */
-    shadowCopies?: { configId: string; configName: string; adapter: StorageAdapter; config: Record<string, unknown>; handle: SnapshotHandle }[];
+    shadowCopies?: {
+        configId: string;
+        configName: string;
+        adapter: StorageAdapter;
+        config: Record<string, unknown>;
+        handle: SnapshotHandle;
+        /**
+         * Set once a release has actually succeeded, so `stepCleanup` skips it.
+         *
+         * The collection releases each group as soon as it is done rather than waiting for
+         * the end of the run. A release that failed stays unset on purpose, so cleanup gets
+         * a second attempt at it.
+         */
+        released?: boolean;
+    }[];
     destinations: DestinationContext[];
 
     // File paths

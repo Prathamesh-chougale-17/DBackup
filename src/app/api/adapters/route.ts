@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isStorageRole, STORAGE_ROLES } from "@/lib/core/storage-roles";
 import { validateSnapshotConfig } from "@/lib/adapters/snapshot-validation";
+import { validateStorageRole } from "@/lib/adapters/role-validation";
 import prisma from "@/lib/prisma";
 import { encryptConfig } from "@/lib/crypto";
 import { toAdapterListItem } from "@/lib/adapters/dto";
@@ -102,6 +103,19 @@ export async function POST(req: NextRequest) {
             }
             if (e instanceof NotFoundError) {
                 return NextResponse.json({ error: e.message }, { status: 404 });
+            }
+            throw e;
+        }
+
+        // An adapter that only works one way round never gets a config pointing the other
+        // way, whatever the request asked for.
+        try {
+            if (type === 'storage') {
+                validateStorageRole(adapterId, isStorageRole(storageRole) ? storageRole : STORAGE_ROLES.DESTINATION);
+            }
+        } catch (e) {
+            if (e instanceof ValidationError) {
+                return NextResponse.json({ error: e.message }, { status: 400 });
             }
             throw e;
         }

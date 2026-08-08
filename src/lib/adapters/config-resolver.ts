@@ -1,8 +1,10 @@
-import { decryptConfig } from "@/lib/crypto";
+import { decryptConfig, mergeSecrets } from "@/lib/crypto";
+import prisma from "@/lib/prisma";
 import { registry } from "@/lib/core/registry";
 import { ConfigurationError, NotFoundError, wrapError } from "@/lib/logging/errors";
 import { logger } from "@/lib/logging/logger";
 import { getDecryptedCredentialData } from "@/services/auth/credential-service";
+import { usesPrefixedSshKeys } from "@/lib/adapters/ssh-key-convention";
 import type {
     CredentialData,
     CredentialType,
@@ -101,8 +103,7 @@ export async function resolveAdapterConfig(adapter: AdapterConfigInput): Promise
             adapter.adapterId,
             "ssh"
         );
-        const useSshPrefix = requirements.primary !== undefined;
-        applySshOverlay(parsed, profile as SshKeyData, useSshPrefix);
+        applySshOverlay(parsed, profile as SshKeyData, usesPrefixedSshKeys(adapterDef.configSchema));
     }
 
     return parsed;
@@ -148,11 +149,49 @@ export async function overlayCredentialsOnConfig(
             adapterId,
             "ssh"
         );
-        const useSshPrefix = requirements.primary !== undefined;
-        applySshOverlay(config, profile as SshKeyData, useSshPrefix);
+        applySshOverlay(config, profile as SshKeyData, usesPrefixedSshKeys(adapterDef.configSchema));
     }
 
     return config;
+}
+
+/**
+ * Fills in the secrets a client-submitted config is missing from the saved
+ * config it belongs to.
+ *
+ * The adapter DTO deletes every key in `SENSITIVE_KEYS` before a config reaches
+ * the browser, so an edit-form round trip submits secrets missing rather than
+ * unchanged. For a secret held in a credential profile that is harmless, since
+ * the profile is resolved server-side. For a secret that lives in the config
+ * itself, such as MongoDB's deprecated inline `uri` or a legacy inline SSH key,
+ * the submitted config is one the saved source never had, which is why a
+ * connection test could fail while backups from that same source kept working.
+ *
+ * Caller-supplied values always win, so this only restores what is absent.
+ * Permission is the caller's job: only somebody who may edit the source should
+ * be handed its stored secrets.
+ */
+export async function applyStoredSecrets(
+    adapterId: string,
+    configId: string,
+    config: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+    try {
+        const stored = await prisma.adapterConfig.findUnique({
+            where: { id: configId },
+            select: { adapterId: true, config: true },
+        });
+
+        // A config of another type holds other keys, so merging one into the
+        // other would only ever produce a config nobody asked about.
+        if (!stored || stored.adapterId !== adapterId) return config;
+
+        return mergeSecrets(config, decryptConfig(JSON.parse(stored.config)));
+    } catch (e) {
+        // A stored config that cannot be read is no reason to refuse the request.
+        log.error("Failed to merge stored secrets into config", { adapterId, configId }, wrapError(e));
+        return config;
+    }
 }
 
 async function loadAndValidate(
@@ -253,11 +292,16 @@ function applyPrimaryOverlay(
 
 /**
  * Overlays an SSH-slot credential onto the config.
- * - If the adapter also has a primary slot (DB adapters with SSH tunnel),
- *   credentials are written to `ssh*` prefixed fields to avoid clobbering
- *   primary credentials.
- * - If the adapter has no primary slot (e.g. SQLite SSH mode), unprefixed
- *   field names are used to match the schema.
+ *
+ * Which names it writes is decided by the adapter's schema, not by whether it also has a
+ * primary slot - see `ssh-key-convention.ts`. Most adapters spread `sshFields` and get
+ * `ssh*` names, which keeps an SSH identity from clobbering a database login. SQLite has no
+ * database login and reuses the plain names.
+ *
+ * This used to be inferred from the primary slot, which was a proxy that held only while
+ * SQLite was the sole adapter without one. Docker volumes has no primary slot either - a
+ * Docker socket has no login - but prefixed names, and the mismatch meant its SSH mode
+ * could never connect.
  */
 function applySshOverlay(
     config: Record<string, unknown>,

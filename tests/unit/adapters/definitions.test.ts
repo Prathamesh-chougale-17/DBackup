@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { MySQLSchema, PostgresSchema, MongoDBSchema, LocalStorageSchema, RedisSchema } from '@/lib/adapters/definitions';
+import { MySQLSchema, PostgresSchema, MongoDBSchema, LocalStorageSchema, RedisSchema, DockerVolumeSchema } from '@/lib/adapters/definitions';
 
 describe('Adapter Configuration Validation (Zod)', () => {
 
@@ -236,6 +236,39 @@ describe('Adapter Configuration Validation (Zod)', () => {
             if (result.success) {
                 expect(result.data.username).toBe('myuser');
             }
+        });
+    });
+    describe('Docker Volume Schema', () => {
+        it('fills in both defaults when nothing is given', () => {
+            const result = DockerVolumeSchema.parse({});
+
+            expect(result.socketPath).toBe('/var/run/docker.sock');
+            expect(result.helperImage).toBe('alpine:latest');
+        });
+
+        it('treats a cleared field as "use the default" rather than as invalid', () => {
+            // The runtime already reads an empty value that way. Without this the form
+            // refuses to save a field the user cleared - and for the helper image that
+            // error would sit inside a collapsed Advanced block, with nothing visibly wrong.
+            const result = DockerVolumeSchema.parse({ socketPath: '', helperImage: '   ' });
+
+            expect(result.socketPath).toBe('/var/run/docker.sock');
+            expect(result.helperImage).toBe('alpine:latest');
+        });
+
+        it('keeps a value the user really entered', () => {
+            const result = DockerVolumeSchema.parse({
+                socketPath: '/run/user/1000/docker.sock',
+                helperImage: 'busybox:stable',
+            });
+
+            expect(result.socketPath).toBe('/run/user/1000/docker.sock');
+            expect(result.helperImage).toBe('busybox:stable');
+        });
+
+        it('still rejects a socket path with a null byte in it', () => {
+            // The path guard must survive the preprocess wrapper.
+            expect(DockerVolumeSchema.safeParse({ socketPath: '/var/run/\0evil' }).success).toBe(false);
         });
     });
 });

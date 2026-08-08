@@ -1,3 +1,5 @@
+import { DEFAULT_DOCKER_SOCKET } from "@/lib/adapters/definitions/storage";
+
 export const STORAGE_CONNECTION_KEYS = [
     'host', 'port',
     'endpoint', 'region',
@@ -8,9 +10,20 @@ export const STORAGE_CONNECTION_KEYS = [
     'authType',
     'privateKey', 'passphrase',
     'clientId', 'clientSecret',
+    // Where the connection terminates, not a tuning knob - a Docker daemon is reached
+    // through its socket the way an FTP server is reached through host and port.
+    'socketPath',
 ];
 
 export const STORAGE_CONFIG_KEYS = ['pathPrefix', 'storageClass', 'forcePathStyle', 'maxProtocol', 'tls', 'options', 'folderId', 'folderPath'];
+
+/**
+ * Settings that are right out of the box and exist only for the case that is not.
+ *
+ * Rendered behind a disclosure rather than in the main body, so the common path is not asked
+ * a question it has no way to answer. Anything here must have a working default.
+ */
+export const STORAGE_ADVANCED_KEYS = ['helperImage'];
 
 export const NOTIFICATION_CONNECTION_KEYS = [
     'webhookUrl',
@@ -42,6 +55,11 @@ export const PLACEHOLDERS: Record<string, string> = {
     "firebird.port": "3050",
     "email.port": "587",
     "mongodb.uri": "mongodb://user:password@localhost:27017/db?authSource=admin",
+
+    // Docker. Adapter-scoped rather than bare, so a future adapter with a field of the same
+    // name does not silently inherit a Docker-specific hint.
+    "docker-volume.socketPath": DEFAULT_DOCKER_SOCKET,
+    "docker-volume.helperImage": "alpine:latest",
 
     // Generic SSH fields (shared across all SSH-capable adapters)
     "sshHost": "192.168.1.10",

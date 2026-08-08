@@ -84,6 +84,7 @@ export function useAdapterConnection({ adapterId, form, initialDataId, primaryCr
                  body: JSON.stringify({
                      adapterId: adapterId,
                      config: currentConfig,
+                     configId: initialDataId,
                      primaryCredentialId: primaryCredentialId ?? null,
                      sshCredentialId: sshCredentialId ?? null
                  })
@@ -104,6 +105,7 @@ export function useAdapterConnection({ adapterId, form, initialDataId, primaryCr
                  body: JSON.stringify({
                      adapterId: adapterId,
                      config: currentConfig,
+                     configId: initialDataId,
                      primaryCredentialId: primaryCredentialId ?? null,
                      sshCredentialId: sshCredentialId ?? null
                  })

@@ -28,6 +28,10 @@ is one or the other, never both.
 To use the same server for both, use **Create as Directory Source** on the destination's
 row (or the reverse here) and adjust the path on the copy.
 
+One backend exists only on this side: [Docker Volumes](/user-guide/sources/docker-volumes)
+reads the contents of Docker volumes, which is data a container holds and nothing else can
+reach. It cannot be a destination, so it is offered as a directory source only.
+
 ## Database Explorer
 
 Beyond configuring sources for backups, DBackup includes a **Database Explorer** that lets you browse live databases, tables, and data directly from the UI — no separate database client needed. See [Database Explorer](/user-guide/features/database-explorer).

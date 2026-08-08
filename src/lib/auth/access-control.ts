@@ -104,13 +104,19 @@ export async function getAuthContext(headersObj: Headers): Promise<AuthContext |
  * Throws PermissionError if the context does not have the required permission.
  */
 export function checkPermissionWithContext(ctx: AuthContext, permission: Permission): void {
-  if (ctx.isSuperAdmin) {
-    return; // SuperAdmin bypass (session only, API keys never have isSuperAdmin)
-  }
-
-  if (!ctx.permissions.includes(permission)) {
+  if (!hasPermissionWithContext(ctx, permission)) {
     throw new PermissionError(permission);
   }
+}
+
+/**
+ * Non-throwing form of `checkPermissionWithContext`, for a route that already
+ * passed its own guard and needs to decide how much to do rather than whether
+ * to answer at all.
+ */
+export function hasPermissionWithContext(ctx: AuthContext, permission: Permission): boolean {
+  // SuperAdmin bypass (session only, API keys never have isSuperAdmin)
+  return ctx.isSuperAdmin || ctx.permissions.includes(permission);
 }
 
 export async function getCurrentUserWithGroup() {

@@ -113,11 +113,26 @@ Code that ships in the repository still counts even when its purpose is to keep 
 - ✅ `**storage**: ...`  ❌ `**storage alerts**: ...`
 - ✅ `**Valkey**: ...`  ❌ `**new Valkey adapter**: ...` (the "what happened" belongs in the description)
 
-**Description** - one sentence, as short as it can be while still making sense. Two only if unavoidable. Write **what** changed, not why or how. No file paths, function names, or internals.
+**Description** - at most **two sentences**, and one wherever one will do. Say **what** the change is, not why it was made, how it works, or what it took to build. No file paths, function names, or internals. Anything that needs a third sentence belongs in the guide for that feature, not here.
+
+**Punctuation** - no `;`, no ` - ` and no `- ` inside a description. Stricter than the general typography rule, which allows a hyphen as a dash. A sentence reaching for one of them is doing too much work, so split it or cut it. The `- ` that opens the line is the list marker and stays.
 
 **Issue links** - always at the end as `([#N](url))`. Never inside the component name.
 
 **One entry per user-visible change.** A PR touching 20 files to deliver one behavior change is one line. Two unrelated changes in one PR are two lines.
+
+## Does the change need an entry?
+
+On `main` the answer is nearly always yes, because everything there is code somebody is already running. On any other branch it is a real question, and getting it wrong is how one feature turns into fifteen lines.
+
+| The change is | Entry |
+| :--- | :--- |
+| A feature, fix, or behavior change to something already released | Yes |
+| A step in building the unreleased feature the branch exists for | No, that feature's own entry covers it |
+| A bug that only ever existed on this branch | No, nobody has run that code |
+| Groundwork with no visible effect until the new feature ships | No |
+
+Check it rather than assume it. `git log main..HEAD --oneline` settles most cases: if the code being fixed arrived in one of those commits, it never shipped. The trap is shared code touched for the new feature, which often changes for existing adapters as well, and that half does need a line.
 
 ## Section order
 

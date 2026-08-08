@@ -6,9 +6,10 @@ import { AUDIT_ACTIONS, AUDIT_RESOURCES } from "@/lib/core/audit-types";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
 import { PERMISSIONS, Permission } from "@/lib/auth/permissions";
 import { logger } from "@/lib/logging/logger";
-import { wrapError, getErrorMessage } from "@/lib/logging/errors";
+import { wrapError, getErrorMessage, ValidationError } from "@/lib/logging/errors";
 import { registerAdapters } from "@/lib/adapters";
 import { toAdapterListItem } from "@/lib/adapters/dto";
+import { validateStorageRole } from "@/lib/adapters/role-validation";
 import { isStorageRole } from "@/lib/core/storage-roles";
 
 registerAdapters();
@@ -69,6 +70,20 @@ export async function POST(
             return NextResponse.json({ success: false, error: "Invalid storage role" }, { status: 400 });
         }
         const storageRole = isStorageRole(body.role) ? body.role : original.storageRole;
+
+        // The third write path for a role, and the one that exists precisely to flip it.
+        // Without this check "clone as the opposite role" would be the way around an adapter
+        // that only supports one.
+        if (original.type === "storage" && isStorageRole(storageRole)) {
+            try {
+                validateStorageRole(original.adapterId, storageRole);
+            } catch (e) {
+                if (e instanceof ValidationError) {
+                    return NextResponse.json({ success: false, error: e.message }, { status: 400 });
+                }
+                throw e;
+            }
+        }
 
         const cloned = await prisma.adapterConfig.create({
             data: {

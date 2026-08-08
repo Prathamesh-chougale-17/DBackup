@@ -1,4 +1,4 @@
-import type { StorageAdapter, StorageSession, AdapterConfig } from "@/lib/core/interfaces";
+import type { StorageAdapter, StorageSession, AdapterConfig, UploadOptions } from "@/lib/core/interfaces";
 import type { LogLevel, LogType } from "@/lib/core/logs";
 
 type OnLog = (msg: string, level?: LogLevel, type?: LogType, details?: string) => void;
@@ -26,7 +26,9 @@ export interface DestinationSessions {
         destination: RestoreDestination,
         localPath: string,
         remotePath: string,
-        onLog?: OnLog
+        onLog?: OnLog,
+        /** Permissions and ownership from the archive index, for adapters that can apply them. */
+        options?: UploadOptions
     ): Promise<boolean>;
     close(): Promise<void>;
 }
@@ -58,11 +60,11 @@ export function createDestinationSessions(concurrency: number, onLog?: OnLog): D
     }
 
     return {
-        async upload(destination, localPath, remotePath, fileLog) {
+        async upload(destination, localPath, remotePath, fileLog, options) {
             const session = await sessionFor(destination);
             return session
-                ? session.upload(localPath, remotePath, undefined, fileLog)
-                : destination.adapter.upload(destination.config, localPath, remotePath, undefined, fileLog);
+                ? session.upload(localPath, remotePath, undefined, fileLog, options)
+                : destination.adapter.upload(destination.config, localPath, remotePath, undefined, fileLog, options);
         },
 
         async close() {

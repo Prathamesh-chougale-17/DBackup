@@ -45,7 +45,7 @@ export async function stepCleanup(ctx: RunnerContext) {
         });
     }
 
-    // 2. Release every shadow copy this run created.
+    // 2. Release every snapshot this run created.
     //
     // This function runs from the runner's `finally`, so it covers success, failure and
     // cancellation. A snapshot left behind consumes space on the file server and blocks
@@ -53,13 +53,27 @@ export async function stepCleanup(ctx: RunnerContext) {
     // failure is logged rather than thrown - it must not turn an otherwise good backup
     // into a failed one.
     for (const shadow of ctx.shadowCopies ?? []) {
+        // The collection releases each group the moment it is done, so most snapshots are
+        // already gone by the time this runs. Only the ones it could not release - and every
+        // one at all when the run died mid-collection - are still open here.
+        if (shadow.released) continue;
+        // A shadow copy and a helper container are not the same thing, and this path in
+        // particular runs after a failure, where a vague word costs someone time.
+        const noun = shadow.handle.noun ?? "snapshot";
+        const prefix = `[${shadow.configName}]`;
         try {
-            await shadow.adapter.releaseSnapshot?.(shadow.config, shadow.handle);
-            ctx.log(`[${shadow.configName}] Shadow copy released`, 'info', 'storage');
+            // The adapter gets the log too. This is the path a killed run ends on, so what
+            // it puts back - restarted containers above all - has to be visible.
+            await shadow.adapter.releaseSnapshot?.(
+                shadow.config,
+                shadow.handle,
+                (msg, level, type, details) => ctx.log(`${prefix} ${msg}`, level, type ?? 'storage', details),
+            );
+            ctx.log(`${prefix} Released the ${noun}`, 'info', 'storage');
         } catch (e: unknown) {
             const message = e instanceof Error ? e.message : String(e);
             ctx.log(
-                `[${shadow.configName}] Could not release the shadow copy (${shadow.handle.label}): ${message}. It may have to be removed on the server.`,
+                `${prefix} Could not release the ${noun} (${shadow.handle.label}): ${message}. It may have to be removed on the server.`,
                 'warning', 'storage'
             );
         }

@@ -1,9 +1,9 @@
-import { withHost } from '@/lib/transport';
+import { createHost, standardTransport, withHost } from '@/lib/transport';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { registry } from '@/lib/core/registry';
 import { registerAdapters } from '@/lib/adapters';
 import { DatabaseAdapter } from '@/lib/core/interfaces';
-import { sshTestDatabases, sshHostAvailable, sshRestoreUnsupported } from './test-configs';
+import { sshTestDatabases, sshHostAvailable, sshHostConfig, sshRestoreUnsupported } from './test-configs';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -133,6 +133,47 @@ describe('Integration Tests: SSH Mode', () => {
                 expect(result.second).toEqual(result.first);
             },
             90000,
+        );
+    });
+
+    describe('a command channel carrying bytes both ways', () => {
+        it.skipIf(!sshHostAvailable)(
+            'writes to a remote command and reads its answer back',
+            async () => {
+                // What the Docker adapter's fallback rests on. When an SSH server will not
+                // forward a Unix socket - a mesh VPN answering on port 22 with its own
+                // server cannot, and neither can `AllowStreamLocalForwarding no` - the
+                // daemon is reached by running `docker system dial-stdio` and speaking HTTP
+                // over stdin and stdout. That only works if a spawned command's streams are
+                // genuinely bidirectional over SSH, which is this adapter's own plumbing
+                // rather than something ssh2 promises in a shape we use elsewhere.
+                //
+                // Tested with `cat` rather than Docker: whether dial-stdio speaks the API is
+                // Docker's business and is covered locally, whereas whether our channel
+                // carries the bytes is ours.
+                const host = createHost(standardTransport(sshHostConfig));
+                try {
+                    const proc = await host.spawn(['cat'], { stdin: true });
+                    expect(proc.stdin).not.toBeNull();
+
+                    const payload = 'GET /_ping HTTP/1.1\r\n\r\n';
+                    proc.stdin!.write(payload);
+                    proc.stdin!.end();
+
+                    const echoed = await new Promise<string>((resolve, reject) => {
+                        let seen = '';
+                        proc.stdout.on('data', (chunk: Buffer) => { seen += chunk.toString(); });
+                        proc.stdout.on('end', () => resolve(seen));
+                        proc.stdout.on('error', reject);
+                    });
+
+                    expect(echoed).toBe(payload);
+                    expect((await proc.exit()).code).toBe(0);
+                } finally {
+                    await host.dispose();
+                }
+            },
+            60000,
         );
     });
 });

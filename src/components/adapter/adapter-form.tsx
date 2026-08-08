@@ -26,34 +26,7 @@ import { useAdapterConnection } from "./use-adapter-connection";
 import { DatabaseFormContent, GenericFormContent, NotificationFormContent, StorageFormContent } from "./form-sections";
 import { SchemaField } from "./schema-field";
 import { SecretStatusProvider } from "./secret-status-context";
-
-/**
- * Walks a Zod schema shape and calls form.setValue for every field that has a
- * Zod .default(...) value AND whose current form value is undefined.
- * This seeds enum/boolean/number defaults without wiping values already typed.
- */
-function seedSchemaDefaults(schema: z.ZodTypeAny, form: any) {
-    if (!(schema instanceof z.ZodObject)) return;
-    const shape = (schema as z.ZodObject<any>).shape;
-    for (const [key, raw] of Object.entries(shape)) {
-        const currentVal = form.getValues(`config.${key}`);
-        if (currentVal !== undefined) continue;
-        // Walk wrappers (Optional, Nullable) to find ZodDefault
-        let s = raw as z.ZodTypeAny;
-        while (s) {
-            const typeName = (s as any)._def?.typeName;
-            if (typeName === "ZodDefault") {
-                form.setValue(`config.${key}`, (s as any)._def.defaultValue());
-                break;
-            }
-            if ((s as any)._def?.innerType) {
-                s = (s as any)._def.innerType;
-            } else {
-                break;
-            }
-        }
-    }
-}
+import { seedSchemaDefaults } from "./schema-defaults";
 
 export function AdapterForm({ type, adapters, onSuccess, initialData, onBack, defaultRole }: { type: string, adapters: AdapterDefinition[], onSuccess: () => void, initialData?: AdapterConfig, onBack?: () => void, defaultRole?: StorageRole }) {
     const [selectedAdapterId, setSelectedAdapterId] = useState<string>(initialData?.adapterId || "");
@@ -81,6 +54,15 @@ export function AdapterForm({ type, adapters, onSuccess, initialData, onBack, de
     const [sshCredentialId, setSshCredentialId] = useState<string | null>(initialData?.sshCredentialId ?? null);
 
     const selectedAdapter = adapters.find(a => a.id === selectedAdapterId);
+
+    // An adapter that only works one way round overrides whatever the seed above produced.
+    // Without this, picking a source-only adapter from the Destinations section would leave
+    // the form holding a role the API rejects, and the only symptom would be a failed save.
+    useEffect(() => {
+        const allowed = selectedAdapter?.supportedRoles;
+        if (!allowed || allowed.length === 0 || allowed.includes(storageRole)) return;
+        setStorageRole(allowed[0]);
+    }, [selectedAdapter, storageRole]);
 
     // Group adapters by their group field (preserves insertion order)
     const adapterGroups = useMemo(() => {
@@ -259,7 +241,7 @@ export function AdapterForm({ type, adapters, onSuccess, initialData, onBack, de
                  const testRes = await fetch('/api/adapters/test-connection', {
                      method: 'POST',
                      headers: { 'Content-Type': 'application/json' },
-                     body: JSON.stringify({ adapterId: data.adapterId, config: data.config, primaryCredentialId, sshCredentialId })
+                     body: JSON.stringify({ adapterId: data.adapterId, config: data.config, configId: initialData?.id, primaryCredentialId, sshCredentialId })
                  });
 
                  const testResult = await testRes.json();

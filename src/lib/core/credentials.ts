@@ -28,6 +28,28 @@ export const UsernamePasswordSchema = z.object({
     password: z.string().min(1, "Password is required"),
 });
 
+/**
+ * Key types DBackup can generate itself. Ed25519 is the default everywhere.
+ * The rest exist for hosts too old to accept it.
+ */
+export const SSH_KEY_TYPES = ["ed25519", "rsa-4096", "ecdsa-p256", "ecdsa-p384"] as const;
+
+export type SshKeyType = (typeof SSH_KEY_TYPES)[number];
+
+/**
+ * Asks the server to generate the private key instead of carrying one.
+ * Sent in place of `privateKey` inside an `SSH_KEY` payload, so the key material is created
+ * where it is stored and no private key ever travels to a browser.
+ */
+export const SshKeyGenerateSchema = z.object({
+    keyType: z.enum(SSH_KEY_TYPES),
+    comment: z.string().max(120).optional(),
+    /** Encrypts the generated key. Stored with it, so backups still run unattended. */
+    passphrase: z.string().optional(),
+});
+
+export type SshKeyGenerateRequest = z.infer<typeof SshKeyGenerateSchema>;
+
 export const SshKeySchema = z
     .object({
         username: z.string().min(1, "Username is required"),
@@ -35,6 +57,9 @@ export const SshKeySchema = z
         password: z.string().optional(),
         privateKey: z.string().optional(),
         passphrase: z.string().optional(),
+        // Public half of `privateKey`, kept so a profile can show which key to install on a
+        // host. Not a secret, and filled in by the service rather than by the client.
+        publicKey: z.string().optional(),
     })
     .superRefine((data, ctx) => {
         if (data.authType === "password" && !data.password) {
@@ -133,6 +158,13 @@ export interface CredentialProfileShape {
      * any secret value. Never contains the values themselves.
      */
     secretStatus?: Record<string, boolean>;
+    /**
+     * `SSH_KEY` profiles on private-key auth: the `authorized_keys` line for the stored key,
+     * and the `SHA256:...` fingerprint derived from it. The public half is not a secret, so
+     * both come back with `CREDENTIALS.READ` and without a reveal audit entry.
+     */
+    publicKey?: string;
+    fingerprint?: string;
 }
 
 /**

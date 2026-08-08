@@ -30,6 +30,10 @@ export const ADAPTER_CREDENTIAL_REQUIREMENTS: Record<
     sftp: { primary: "SSH_KEY" },
     rsync: { primary: "SSH_KEY" },
 
+    // The Docker socket has no authentication of its own - reaching the host that owns it
+    // is the whole access question, so only the SSH slot applies. Same shape as sqlite.
+    "docker-volume": { ssh: "SSH_KEY" },
+
     // User/Pass storage
     ftp: { primary: "USERNAME_PASSWORD" },
     smb: { primary: "USERNAME_PASSWORD" },

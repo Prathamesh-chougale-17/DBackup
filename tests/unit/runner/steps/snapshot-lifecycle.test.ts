@@ -55,7 +55,11 @@ describe('stepCleanup - shadow copy release', () => {
 
         await stepCleanup(ctx);
 
-        expect(release).toHaveBeenCalledWith({ address: '//server/share' }, expect.objectContaining({ id: 'set-1|copy-1|\\\\server\\share' }));
+        expect(release).toHaveBeenCalledWith(
+            { address: '//server/share' },
+            expect.objectContaining({ id: 'set-1|copy-1|\\\\server\\share' }),
+            expect.any(Function),
+        );
         expect(ctx.shadowCopies).toEqual([]);
     });
 
@@ -98,12 +102,34 @@ describe('stepCleanup - shadow copy release', () => {
         await expect(stepCleanup(ctx)).resolves.toBeUndefined();
 
         const logged = (ctx.log as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0])).join('\n');
-        expect(logged).toContain('Could not release the shadow copy');
+        expect(logged).toContain('Could not release the snapshot');
         expect(logged).toContain('server unreachable');
     });
 
     it('does nothing when the run took no snapshots', async () => {
         const ctx = makeCtx();
         await expect(stepCleanup(ctx)).resolves.toBeUndefined();
+    });
+
+    it('skips a snapshot the collection already released', async () => {
+        // Groups are released as soon as they are collected, so by the time cleanup runs
+        // most snapshots are gone. Releasing again would be a wasted round trip and a
+        // second "released" line in a history someone has to read.
+        const release = vi.fn().mockResolvedValue(undefined);
+        const ctx = makeCtx({ shadowCopies: [{ ...makeShadow(release), released: true }] });
+
+        await stepCleanup(ctx);
+
+        expect(release).not.toHaveBeenCalled();
+    });
+
+    it('still releases one whose early release failed', async () => {
+        // The reason a failed early release stays unmarked: this is its second chance.
+        const release = vi.fn().mockResolvedValue(undefined);
+        const ctx = makeCtx({ shadowCopies: [{ ...makeShadow(release), released: false }] });
+
+        await stepCleanup(ctx);
+
+        expect(release).toHaveBeenCalledTimes(1);
     });
 });

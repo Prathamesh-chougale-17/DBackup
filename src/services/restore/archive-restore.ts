@@ -15,6 +15,7 @@
 
 import path from "path";
 import { safeRemoteJoin } from "@/lib/archive/remote-paths";
+import { formatBytes } from "@/lib/utils";
 import fs from "fs/promises";
 import { createWriteStream } from "fs";
 import crypto from "crypto";
@@ -33,7 +34,7 @@ import { resolveTransferConcurrency } from "@/lib/adapters/transfer-concurrency"
 import { resolveSelection } from "@/lib/archive/browse";
 import { matchesAnyExcludePattern } from "@/lib/exclude-patterns";
 import { summariseExcluded, formatExcludeSummary } from "@/lib/exclude-summary";
-import { entryKey, IndexFileLine, partitionSymlinks } from "@/lib/archive/types";
+import { entryKey, IndexFileLine, metadataFromIndex, partitionSymlinks } from "@/lib/archive/types";
 import { getTempDir } from "@/lib/temp-dir";
 import { stripTrailingSlashes } from "@/lib/paths";
 import { openArchiveForRestore } from "./file-restore";
@@ -242,6 +243,14 @@ export async function restoreArchiveSnapshot(
              */
             const perSourceSkippedLinks = new Map<string, number>();
             let done = 0;
+            // Bytes as well as a file count, so a restore reads like the backup that produced it.
+            // The sizes are already in the index, they were simply never added up here - a restore
+            // of one huge file otherwise looked frozen at "0/1".
+            const totalBytes = workItems.reduce((sum, item) => sum + (item.file.s ?? 0), 0);
+            let doneBytes = 0;
+            const detailText = () => (totalBytes > 0
+                ? `Files: ${done}/${workItems.length} restored, ${formatBytes(doneBytes)}/${formatBytes(totalBytes)}`
+                : `Files: ${done}/${workItems.length} restored`);
 
             // Files stream and stage independently, so several transfer at once - this is the
             // network round-trip win the user sees restoring to S3/R2. An adapter that cannot
@@ -281,7 +290,8 @@ export async function restoreArchiveSnapshot(
                         // dropped so a large restore does not bury the history.
                         const uploadOk = await sessions.upload(
                             target, stagePath, remotePath,
-                            (msg, level, type, details) => { if (level && level !== 'info') log(`${file.p}: ${msg}`, level, type ?? 'storage', details); }
+                            (msg, level, type, details) => { if (level && level !== 'info') log(`${file.p}: ${msg}`, level, type ?? 'storage', details); },
+                            metadataFromIndex(file)
                         );
                         if (!uploadOk) {
                             throw new Error(`Adapter '${target.adapter.id}' rejected the upload`);
@@ -298,7 +308,9 @@ export async function restoreArchiveSnapshot(
                     }
 
                     done++;
-                    updateDetail(`Files: ${done}/${workItems.length} restored`);
+
+                    doneBytes += file.s ?? 0;
+                    updateDetail(detailText());
                 }, concurrency);
 
                 // Symbolic links, once every regular file is in place.
@@ -321,7 +333,8 @@ export async function restoreArchiveSnapshot(
                             'warning', 'storage'
                         );
                         done++;
-                        updateDetail(`Files: ${done}/${workItems.length} restored`);
+                        doneBytes += file.s ?? 0;
+                        updateDetail(detailText());
                         continue;
                     }
 
@@ -340,7 +353,9 @@ export async function restoreArchiveSnapshot(
                     }
 
                     done++;
-                    updateDetail(`Files: ${done}/${workItems.length} restored`);
+
+                    doneBytes += file.s ?? 0;
+                    updateDetail(detailText());
                 }
             } finally {
                 await sessions.close();

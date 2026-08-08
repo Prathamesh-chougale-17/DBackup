@@ -10,7 +10,9 @@ import {
     getCredentialUsage,
 } from "@/services/auth/credential-service";
 import prisma from "@/lib/prisma";
+import { utils as sshUtils } from "ssh2";
 import * as cryptoLib from "@/lib/crypto";
+import { generateSshKeyPair } from "@/lib/transport/openssh-key";
 import { ConflictError, NotFoundError, ValidationError } from "@/lib/logging/errors";
 
 vi.mock("@/lib/prisma", () => ({
@@ -30,7 +32,8 @@ vi.mock("@/lib/prisma", () => ({
     },
 }));
 
-vi.mock("@/lib/crypto", () => ({
+vi.mock("@/lib/crypto", async (importOriginal) => ({
+    ...(await importOriginal<typeof cryptoLib>()),
     encrypt: vi.fn(),
     decrypt: vi.fn(),
 }));
@@ -96,6 +99,126 @@ describe("Credential Service", () => {
             await expect(
                 createCredentialProfile("Test", "BOGUS" as any, {})
             ).rejects.toBeInstanceOf(ValidationError);
+        });
+    });
+
+    describe("SSH key material", () => {
+        const sshRow = { ...baseRow, type: "SSH_KEY" };
+
+        /** The payload as it was handed to `encrypt`, which is what ends up stored. */
+        const storedPayload = () =>
+            JSON.parse((cryptoLib.encrypt as any).mock.calls.at(-1)[0]);
+
+        beforeEach(() => {
+            (cryptoLib.encrypt as any).mockReturnValue("ENCRYPTED");
+            (prisma.credentialProfile.findFirst as any).mockResolvedValue(null);
+            (prisma.credentialProfile.create as any).mockResolvedValue(sshRow);
+        });
+
+        it("generates the keypair itself when the payload asks for one", async () => {
+            const profile = await createCredentialProfile("Deploy key", "SSH_KEY", {
+                username: "backup",
+                authType: "privateKey",
+                generate: { keyType: "ed25519", comment: "dbackup@prod" },
+            });
+
+            const stored = storedPayload();
+            expect(stored.privateKey).toContain("BEGIN OPENSSH PRIVATE KEY");
+            expect(stored.publicKey).toMatch(/^ssh-ed25519 \S+ dbackup@prod$/);
+            expect(stored.generate).toBeUndefined();
+
+            // The public half comes back so the UI can show which key to install.
+            expect(profile.publicKey).toBe(stored.publicKey);
+            expect(profile.fingerprint).toMatch(/^SHA256:/);
+        });
+
+        it("stores the passphrase the generated key was encrypted with", async () => {
+            await createCredentialProfile("Deploy key", "SSH_KEY", {
+                username: "backup",
+                authType: "privateKey",
+                generate: { keyType: "ed25519", passphrase: "correct horse" },
+            });
+
+            const stored = storedPayload();
+            expect(stored.passphrase).toBe("correct horse");
+            // The stored key really is the encrypted one, not a plaintext key plus a note.
+            expect(sshUtils.parseKey(stored.privateKey) instanceof Error).toBe(true);
+            expect(
+                sshUtils.parseKey(stored.privateKey, "correct horse") instanceof Error
+            ).toBe(false);
+        });
+
+        it("ignores a passphrase left in the form from an earlier key", async () => {
+            await createCredentialProfile("Deploy key", "SSH_KEY", {
+                username: "backup",
+                authType: "privateKey",
+                passphrase: "typed before switching to generate",
+                generate: { keyType: "ed25519" },
+            });
+
+            const stored = storedPayload();
+            expect(stored.passphrase).toBeUndefined();
+            expect(sshUtils.parseKey(stored.privateKey) instanceof Error).toBe(false);
+        });
+
+        it("rejects an unknown key type", async () => {
+            await expect(
+                createCredentialProfile("Deploy key", "SSH_KEY", {
+                    username: "backup",
+                    authType: "privateKey",
+                    generate: { keyType: "dsa-1024" },
+                })
+            ).rejects.toBeInstanceOf(ValidationError);
+        });
+
+        it("derives the public half of a pasted private key", async () => {
+            const generated = await generateSshKeyPair("ed25519", "someone@laptop");
+
+            const profile = await createCredentialProfile("Imported", "SSH_KEY", {
+                username: "backup",
+                authType: "privateKey",
+                privateKey: generated.privateKey,
+            });
+
+            expect(storedPayload().publicKey).toBe(generated.publicKey);
+            expect(profile.publicKey).toBe(generated.publicKey);
+        });
+
+        it("ignores a public key supplied by the client", async () => {
+            await createCredentialProfile("Imported", "SSH_KEY", {
+                username: "backup",
+                authType: "password",
+                password: "pw",
+                publicKey: "ssh-ed25519 AAAA not-the-stored-key",
+            });
+
+            expect(storedPayload().publicKey).toBeUndefined();
+        });
+
+        it("stores nothing extra for a key it cannot read", async () => {
+            await createCredentialProfile("Imported", "SSH_KEY", {
+                username: "backup",
+                authType: "privateKey",
+                privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nnope\n",
+            });
+
+            expect(storedPayload().publicKey).toBeUndefined();
+        });
+
+        it("replaces the key on rotation", async () => {
+            (prisma.credentialProfile.findUnique as any).mockResolvedValue(sshRow);
+            (prisma.credentialProfile.update as any).mockResolvedValue(sshRow);
+
+            const profile = await updateCredentialProfile("cred-1", {
+                data: {
+                    username: "backup",
+                    authType: "privateKey",
+                    generate: { keyType: "ecdsa-p256", comment: "dbackup@rotated" },
+                },
+            });
+
+            expect(storedPayload().privateKey).toContain("BEGIN OPENSSH PRIVATE KEY");
+            expect(profile.publicKey).toMatch(/^ecdsa-sha2-nistp256 \S+ dbackup@rotated$/);
         });
     });
 

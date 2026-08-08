@@ -12,7 +12,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
-import { Lock, History, ChevronsUpDown, Plus, Trash2, ChevronDown, ChevronRight, Database, Info, Loader2, FileText, CalendarClock, Pencil, FolderInput, FolderOpen, Filter, type LucideIcon } from "lucide-react";
+import { Lock, History, ChevronsUpDown, Plus, Trash2, ChevronDown, ChevronRight, Database, Info, Loader2, FileText, CalendarClock, Pencil, FolderInput, FolderOpen, HardDrive, Filter, type LucideIcon } from "lucide-react";
+import { ADAPTER_DEFINITIONS } from "@/lib/adapters/definitions";
 import { SchedulePicker } from "./schedule-picker";
 import { RetentionPolicyPicker, DEFAULT_RETENTION_SENTINEL } from "@/components/templates/retention-policy-picker";
 import { NamingTemplatePicker } from "@/components/templates/naming-template-picker";
@@ -86,6 +87,7 @@ const directorySourceSchema = z.object({
     path: z.string().min(1, "Path is required"),
     excludePatterns: z.array(z.string()).default([]),
     excludePatternPresetIds: z.array(z.string()).default([]),
+    stopContainers: z.boolean().default(true),
 });
 
 export interface JobSourceData {
@@ -95,6 +97,8 @@ export interface JobSourceData {
     path: string;
     excludePatterns: string[];
     excludePatternPresetIds?: string[];
+    /** Only meaningful for sources whose adapter stops anything. Defaults to allowing it. */
+    stopContainers?: boolean;
 }
 
 export interface JobData {
@@ -378,6 +382,7 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
         path: s.path,
         excludePatterns: normalizeExcludePatterns(s.excludePatterns),
         excludePatternPresetIds: s.excludePatternPresetIds ?? [],
+        stopContainers: s.stopContainers ?? true,
     }));
 
     const form = useForm({
@@ -437,7 +442,7 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
             result.push({ ...entry, excludePatterns: match.excludePatterns, excludePatternPresetIds: entry.excludePatternPresetIds ?? [] });
         }
         for (const added of remainingNew) {
-            result.push({ configId, path: added.path, excludePatterns: added.excludePatterns, excludePatternPresetIds: [] });
+            result.push({ configId, path: added.path, excludePatterns: added.excludePatterns, excludePatternPresetIds: [], stopContainers: true });
         }
         replaceSource(result);
         setExpandedSources(new Set());
@@ -663,6 +668,7 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
                     path: s.path,
                     excludePatterns: s.excludePatterns || [],
                     excludePatternPresetIds: s.excludePatternPresetIds || [],
+                    stopContainers: s.stopContainers ?? true,
                 })),
                 destinations: data.destinations.map((d, i) => ({
                     configId: d.configId,
@@ -990,7 +996,7 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
                                             type="button"
                                             variant="outline"
                                             size="sm"
-                                            onClick={() => appendSource({ configId: "", path: "", excludePatterns: [], excludePatternPresetIds: defaultExcludePresetIds })}
+                                            onClick={() => appendSource({ configId: "", path: "", excludePatterns: [], excludePatternPresetIds: defaultExcludePresetIds, stopContainers: true })}
                                             disabled={directorySourceOptions.length === 0}
                                         >
                                             <Plus className="h-4 w-4 mr-1" />
@@ -1646,6 +1652,16 @@ function DirectorySourceRow({ index, form, directorySourceOptions, isExpanded, o
     const allDirectorySources: JobSourceData[] = form.watch("directorySources") || [];
     const excludePatterns: string[] = form.watch(`directorySources.${index}.excludePatterns`) || [];
     const excludePatternPresetIds: string[] = form.watch(`directorySources.${index}.excludePatternPresetIds`) || [];
+    // Only an adapter that stops something has anything to say about stopping it. Named the
+    // same way the connection form decides which adapter-specific panels to render.
+    // How this adapter's browse behaves, declared on the definition rather than guessed
+    // from its id - the next adapter with a flat list should work without touching this.
+    const definition = ADAPTER_DEFINITIONS.find((d) => d.id === currentAdapter?.adapterId);
+    const browseShape = {
+        flat: definition?.flatBrowse === true,
+        noun: definition?.browseNoun ?? "folder",
+    };
+    const stopsContainers = currentAdapter?.adapterId === "docker-volume";
 
     return (
         <div className="border rounded-lg">
@@ -1705,7 +1721,11 @@ function DirectorySourceRow({ index, form, directorySourceOptions, isExpanded, o
                 <FormField control={form.control} name={`directorySources.${index}.path`} render={({ field }) => (
                     <FormItem className="flex-1 space-y-0">
                         <FormControl>
-                            <Input placeholder="/path/to/directory" className="h-9" {...field} />
+                            <Input
+                                placeholder={browseShape.flat ? `${browseShape.noun}-name` : "/path/to/directory"}
+                                className="h-9"
+                                {...field}
+                            />
                         </FormControl>
                         <FormMessage />
                     </FormItem>
@@ -1716,11 +1736,13 @@ function DirectorySourceRow({ index, form, directorySourceOptions, isExpanded, o
                     variant="outline"
                     size="sm"
                     className="h-9 px-2"
-                    title={currentAdapter?.supportsBrowse ? "Browse folders" : "Select an adapter that supports browsing first"}
+                    title={currentAdapter?.supportsBrowse
+                        ? (browseShape.flat ? `Pick ${browseShape.noun}s on this host` : "Browse folders")
+                        : "Select an adapter that supports browsing first"}
                     disabled={!currentAdapter?.supportsBrowse}
                     onClick={() => setBrowseOpen(true)}
                 >
-                    <FolderOpen className="h-4 w-4" />
+                    {browseShape.flat ? <HardDrive className="h-4 w-4" /> : <FolderOpen className="h-4 w-4" />}
                 </Button>
 
                 <Button
@@ -1747,10 +1769,27 @@ function DirectorySourceRow({ index, form, directorySourceOptions, isExpanded, o
                 </Button>
             </div>
 
-            {/* Inline Exclude Patterns Config */}
+            {/* Inline per-source settings: stopping containers, then exclude patterns */}
             <Collapsible open={isExpanded}>
                 <CollapsibleContent>
                     <div className="border-t px-3 py-3 bg-muted/30 space-y-2">
+                        {stopsContainers && (
+                            <FormField control={form.control} name={`directorySources.${index}.stopContainers`} render={({ field }) => (
+                                <FormItem className="flex items-start justify-between gap-4 rounded-md border bg-background p-3 space-y-0">
+                                    <div className="space-y-0.5">
+                                        <FormLabel className="text-xs font-medium">Stop containers while reading</FormLabel>
+                                        <p className="text-xs text-muted-foreground">
+                                            Containers using this volume are stopped for as long as it takes to read, then started
+                                            again. Turning this off avoids the interruption, but a volume read while it is being
+                                            written to is only as consistent as a backup taken during a power cut.
+                                        </p>
+                                    </div>
+                                    <FormControl>
+                                        <Switch checked={field.value ?? true} onCheckedChange={field.onChange} />
+                                    </FormControl>
+                                </FormItem>
+                            )} />
+                        )}
                         <div className="text-xs font-medium text-muted-foreground flex items-center gap-1">
                             <Filter className="h-3 w-3" />
                             Exclude patterns for {currentAdapter?.name || `Source #${index + 1}`}
@@ -1822,6 +1861,8 @@ function DirectorySourceRow({ index, form, directorySourceOptions, isExpanded, o
                         .filter((s) => s.configId === currentAdapter.id)
                         .map((s) => ({ path: s.path, excludePatterns: s.excludePatterns ?? [], excludePatternPresetIds: s.excludePatternPresetIds ?? [] }))}
                     onConfirm={(rows) => onSync(currentAdapter.id, rows)}
+                    flat={browseShape.flat}
+                    itemNoun={browseShape.noun}
                 />
             )}
         </div>
@@ -1836,6 +1877,9 @@ interface DirectoryBrowseDialogProps {
     /** Every directorySources row currently configured for this adapter, regardless of which row's "Browse" button opened the dialog. */
     initialRows: DirectoryTreeRow[];
     onConfirm: (rows: DirectoryTreeRow[]) => void;
+    /** This adapter has nothing below its root - see DirectoryTree. */
+    flat?: boolean;
+    itemNoun?: string;
 }
 
 /**
@@ -1849,17 +1893,23 @@ interface DirectoryBrowseDialogProps {
  * the path field renders something meaningful and passes the required-path validation. Translated
  * at this boundary only.
  */
-function DirectoryBrowseDialog({ open, onOpenChange, configId, adapterName, initialRows, onConfirm }: DirectoryBrowseDialogProps) {
+function DirectoryBrowseDialog({ open, onOpenChange, configId, adapterName, initialRows, onConfirm, flat, itemNoun }: DirectoryBrowseDialogProps) {
     const [rows, setRows] = useState<DirectoryTreeRow[]>([]);
 
     useEffect(() => {
         if (open) {
-            setRows(initialRows.map((r) => (r.path === "/" ? { ...r, path: "" } : r)));
+            // A flat adapter has no root to select, so a stored root row is dropped rather
+            // than translated. Keeping it made a row the UI could not show and therefore not
+            // untick, which came back on every save as a source the adapter cannot read.
+            const seeded = flat
+                ? initialRows.filter((r) => r.path !== "/" && r.path !== "")
+                : initialRows.map((r) => (r.path === "/" ? { ...r, path: "" } : r));
+            setRows(seeded);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open]);
 
-    const isEverything = rows.length === 1 && rows[0].path === "";
+    const isEverything = !flat && rows.length === 1 && rows[0].path === "";
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
@@ -1867,15 +1917,21 @@ function DirectoryBrowseDialog({ open, onOpenChange, configId, adapterName, init
                 <DialogHeader className="p-4 pb-3 border-b shrink-0">
                     <DialogTitle>Browse {adapterName ?? "Adapter"}</DialogTitle>
                     <DialogDescription>
-                        Check the folders you want to back up, or pick &quot;Back up everything&quot; for the whole adapter. This
-                        reflects every directory source row already configured for {adapterName ?? "this adapter"} - unchecking a
-                        folder removes its row, checking a new one adds one.
+                        {flat
+                            ? `Check the ${itemNoun ?? "item"}s you want to back up. This reflects every directory source row already `
+                            + `configured for ${adapterName ?? "this adapter"} - each one is its own row with its own settings, `
+                            + `so unchecking removes a row and checking adds one.`
+                            : <>
+                                Check the folders you want to back up, or pick &quot;Back up everything&quot; for the whole adapter. This
+                                reflects every directory source row already configured for {adapterName ?? "this adapter"} - unchecking a
+                                folder removes its row, checking a new one adds one.
+                            </>}
                     </DialogDescription>
                 </DialogHeader>
                 <ScrollArea className="flex-1 min-h-0">
                     <div className="p-4">
                         {open && (
-                            <DirectoryTree key={configId} configId={configId} rows={rows} onRowsChange={setRows} />
+                            <DirectoryTree key={configId} configId={configId} rows={rows} onRowsChange={setRows} flat={flat} itemNoun={itemNoun} />
                         )}
                     </div>
                 </ScrollArea>
@@ -1884,12 +1940,18 @@ function DirectoryBrowseDialog({ open, onOpenChange, configId, adapterName, init
                     <Button
                         type="button"
                         onClick={() => {
-                            onConfirm(rows.map((r) => (r.path === "" ? { ...r, path: "/" } : r)));
+                            // The root convention only exists for a tree. In flat mode no row
+                            // can carry the empty path, so nothing is translated back.
+                            onConfirm(flat ? rows : rows.map((r) => (r.path === "" ? { ...r, path: "/" } : r)));
                             onOpenChange(false);
                         }}
                         disabled={rows.length === 0}
                     >
-                        {isEverything ? "Use Entire Adapter" : rows.length > 1 ? `Use ${rows.length} Selected Folders` : "Use Selected Folder"}
+                        {isEverything
+                            ? "Use Entire Adapter"
+                            : rows.length > 1
+                                ? `Use ${rows.length} Selected ${flat ? `${itemNoun ?? "item"}s` : "Folders"}`
+                                : `Use Selected ${flat ? itemNoun ?? "item" : "Folder"}`}
                     </Button>
                 </DialogFooter>
             </DialogContent>

@@ -2,11 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { registry } from "@/lib/core/registry";
 import { runAdapterTest } from "@/lib/transport/adapter-invoke";
 import { registerAdapters } from "@/lib/adapters";
-import { overlayCredentialsOnConfig } from "@/lib/adapters/config-resolver";
+import { applyStoredSecrets, overlayCredentialsOnConfig } from "@/lib/adapters/config-resolver";
 import { headers } from "next/headers";
 import prisma from "@/lib/prisma";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
 import { getPermissionForAdapter } from "@/lib/auth/adapter-permissions";
+import { canEditStoredConfig } from "@/lib/auth/adapter-config-access";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 
@@ -46,12 +47,20 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ success: false, message: "This adapter does not support connection testing." });
         }
 
+        // Secrets living in the config itself are redacted on their way to the
+        // browser, so an edit of a saved source submits them missing. Fill them
+        // back in before testing, or the test runs against a config the saved
+        // source never had.
+        const submittedConfig = typeof configId === "string" && configId && canEditStoredConfig(ctx, adapterId)
+            ? await applyStoredSecrets(adapterId, configId, { ...config })
+            : { ...config };
+
         // Overlay credential profiles onto the (plaintext) config so that the
         // adapter receives a fully merged, ready-to-use config. Required when
         // the user has assigned credential profiles instead of inline secrets.
         const mergedConfig = await overlayCredentialsOnConfig(
             adapterId,
-            { ...config },
+            submittedConfig,
             primaryCredentialId ?? null,
             sshCredentialId ?? null
         );

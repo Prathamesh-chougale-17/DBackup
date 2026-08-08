@@ -163,12 +163,15 @@ describe("ScrollArea max-height placement", () => {
      * The Viewport is the element Radix gives `overflow-y: scroll`, and our wrapper sizes it
      * with `size-full`. A `height: 100%` cannot resolve against a parent that only carries a
      * max-height, so a max-h on the ScrollArea root does not constrain the scrolling element.
-     * Whether that is visible depends on whether an ancestor clips, so the four existing cases
-     * need a look in the browser before being rewritten - the baseline stops new ones meanwhile.
+     * Whether that is visible depends on whether an ancestor clips, so the remaining cases need
+     * a look in the browser before being rewritten - the baseline stops new ones meanwhile.
+     *
+     * The credential dialog was one of them, and it did not scroll at all once the SSH fields
+     * grew. Fixed and the baseline lowered to match.
      *
      * Canonical form: *:data-[slot=scroll-area-viewport]:max-h-[...]
      */
-    const BASELINE = 4;
+    const BASELINE = 3;
 
     it("should not add new ScrollAreas with max-h on the root", () => {
         const violations = scan(collectTsx(SRC_DIR), (line) => {
@@ -198,7 +201,7 @@ describe("Dark mode color pairing", () => {
      * Semantic tokens (bg-muted, text-muted-foreground) are already theme-aware and are the
      * preferred fix; an explicit dark: variant is the fallback.
      */
-    const BASELINE = 124;
+    const BASELINE = 123;
 
     it("should not add new palette colors without a dark: counterpart", () => {
         const PALETTE =
