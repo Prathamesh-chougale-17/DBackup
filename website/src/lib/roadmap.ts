@@ -34,7 +34,7 @@ export const ROADMAP_ITEMS: RoadmapItem[] = [
     title: "Docker Volume Backups",
     description:
       "Docker volumes as a backup source, listed from the target host the way databases already are, so you pick them instead of typing paths. Containers using a selected volume are stopped for the export and started again afterwards, which you can turn off per job when the data is safe to copy live.",
-    status: "planned",
+    status: "in-progress",
     category: "backup-engine",
   },
   {

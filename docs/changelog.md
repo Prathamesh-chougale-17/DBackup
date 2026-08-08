@@ -7,34 +7,24 @@ All notable changes to DBackup are documented here.
 
 ### ✨ Features
 
-- **jobs**: A directory source can now say whether a backup may stop whatever holds it open while it is read. It appears on Docker volume sources, where the containers holding a volume are stopped for as long as reading takes, and defaults to allowing it.
-- **docker**: New **Docker Volumes** source (beta). Connects to a Docker daemon locally through its socket or on another machine over SSH, and lists the volumes it can see so they can be picked instead of typed. When the SSH server will not forward a Unix socket - which is the case for the embedded servers NetBird and Tailscale put on port 22 - it falls back to running the Docker CLI on that host, and says in the run log that it did. Volumes selected in one job are grouped by the containers holding them, so a container shared by two volumes is stopped once rather than twice, and is started again as soon as its own volumes are done instead of waiting out the rest of the job. Whether containers are stopped at all is set per job source. If a run is killed while containers are down, the next one finds what it left behind and starts them again - that state is recorded on the Docker host itself, not in memory. A volume is read as a single stream rather than file by file, and the permissions and owners inside it are carried into the backup and put back on restore. Symbolic links are recorded in the backup but not written back into a volume, since a link's target means something different inside whichever container mounts it later - restoring the same backup to a local path or over SFTP keeps them. A restore can go to the volume it came from or to a new name, and picking an existing volume empties it first so the result is the backup's state rather than a mixture of two. The run history shows what each backup did to prepare its sources: which containers were stopped and started again, by name, which helper container the volume was read through and from which image, and - for a source set not to stop its containers - that the result is crash-consistent rather than clean. Volumes are picked from a list of what is on the host, with **Every volume on this host** to take them all; each one becomes its own job row with its own exclude patterns and stop setting. A restore writes several files at once, and how many is set per connection. The connections list shows the socket a config points at. Both pickers - choosing volumes for a job and choosing one to restore into - list them flat, because a volume is taken whole and there is nothing to open inside it.
-- **adapters**: An adapter can now declare which roles it supports, so one that only works in a single direction cannot be saved as the other. The role picker states what applies instead of offering a choice that would be rejected, and all three write paths enforce it - including cloning as the opposite role, which exists specifically to flip it.
+- **docker**: New **Docker Volumes** source (beta) that reads volume contents through the local Docker socket or from another host over SSH. Volumes are picked from a list of what the daemon can see, and any container holding one is stopped while it is read unless the source says otherwise.
+
+### 🐛 Bug Fixes
+
+- **adapters**: Connection forms prefill the fields that carry a default again, such as a port or a base path. They had silently stopped being filled in for every adapter.
 
 ### 🎨 Improvements
 
-- **restore**: The progress line now shows bytes as well as a file count, the way a backup already did. The sizes were in the archive index all along, they were simply never added up - so a restore of one large file sat at "0/1" for its whole duration.
-- **transport**: Execution hosts can now open a stream to a Unix domain socket on the target machine, over SSH as well as locally. This is groundwork for reaching a container runtime that listens on a socket rather than a port, and has no effect on its own yet.
-- **transport**: Both execution hosts now key their binary lookup cache on a separator that no binary name can contain, so two different candidate lists can no longer share an entry. One of them held that separator as a raw null byte in the source file, which made the file read as binary to `grep` and every other text tool.
-- **backup**: Directory backups can now record a file's permissions and owner, and hand them back to the restore target. Nothing records them yet, and an archive that carries none restores exactly as before, so no existing job changes. This is what will let a restored container volume be usable by the program that owns it, since a data directory with the wrong owner stops PostgreSQL, MySQL and Redis from starting.
-- **backup**: An incremental backup now refreshes permissions and owner even for files it carries forward unchanged. Changing a file's mode changes no content, so it is not re-stored, and without this the chain would keep serving the permissions from whenever the file's contents last changed.
+- **restore**: The progress line now shows how many bytes have been restored next to the file count, the way a backup already does.
+- **adapters**: A connection form with a mode picker now asks for a mode instead of leaving the area below it blank until one is chosen.
 
 ### 🔄 Changed
 
-- **backup**: A shadow copy is now released as soon as the source that needed it has been collected, instead of at the end of the run. A job that snapshots one share and then spends an hour on another no longer holds the first snapshot open for that hour. A release that fails is still retried during cleanup, so nothing is left behind.
+- **backup**: A shadow copy is now released as soon as the source that needed it has been collected, instead of at the end of the run.
 
 ### 📝 Documentation
 
-- **docker**: New guide for the Docker Volumes source, covering socket access, what stopping containers does and does not promise, restoring to the same or a new volume, and the current limitations - directory permissions, empty directories and extended attributes are not yet restored.
-- **adapters**: The storage adapter developer guide now documents adapter roles, the members that prepare a source before it is read, and source grouping.
-
-### 🧪 Tests
-
-- **docker**: The run history a volume backup produces is covered, including the crash-consistency warning and the recovery of an interrupted run, as is the volume picker.
-- **docker**: The volume adapter is covered against a real Docker daemon, including the full round trip - collect a volume, restore it, and check the permissions and owners that come back - and the same round trip over SSH, which is the only automated coverage of a Unix socket carried through an SSH channel.
-- **transport**: Socket connections are covered for both execution hosts, including that a forwarding channel does not compete with command channels for the SSH session limit, and that a server refusing to forward reports which setting to change.
-- **backup**: The new collection grouping is covered on its own, including the case it exists to prevent: an adapter that leaves a source out of its plan fails the job before anything is collected, rather than producing a backup that reports success with a directory missing from it.
-- **backup**: The permission and owner fields are covered end to end - written into the archive index, carried across an incremental chain, and handed to the restore target - alongside the case that decides whether this is a no-op for existing jobs: a source that reports none.
+- **docker**: New guide for the Docker Volumes source, covering socket access, what stopping containers does and does not promise, and the current limitations.
 
 ### 🐳 Docker
 

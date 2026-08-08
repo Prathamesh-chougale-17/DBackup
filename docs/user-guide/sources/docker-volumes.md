@@ -63,7 +63,7 @@ Permissions and owners are carried into the backup and put back on restore. Symb
 
 ## Restoring
 
-Restore a volume from **Storage** → the backup file → **Restore**, choosing this adapter as the target and entering a volume name.
+Restore a volume from **Storage** → the backup file → **Restore**, choosing this adapter as the target. The volume button lists what is on the host so you can pick one, and typing a name that does not exist yet is equally valid.
 
 - **Same name**: the volume is **emptied completely** before the backup is written into it, so the result is the backup's state and not a mixture of two. The restore screen marks an existing volume as `Exists` and says so.
 - **New name**: the volume is created.

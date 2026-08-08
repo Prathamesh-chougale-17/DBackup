@@ -55,8 +55,9 @@ paid for it.
 
 ## Which adapters can do what
 
-**Every storage adapter can be a directory source.** What differs is how comfortable it is
-to configure and how a restore behaves:
+**Every storage adapter can be a directory source**, and
+[Docker Volumes](/user-guide/sources/docker-volumes) is a source and nothing else. What
+differs is how comfortable it is to configure and how a restore behaves:
 
 | Adapter | Pick folders by browsing | Restore one file without fetching the whole archive | Symbolic links |
 | :--- | :---: | :---: | :---: |
@@ -70,10 +71,15 @@ to configure and how a restore behaves:
 | Dropbox | ✅ | ✅ | — |
 | Microsoft OneDrive | ✅ | ✅ | — |
 | SMB / Samba | ✅ | ❌ | — |
+| Docker Volumes | ✅ volumes | n/a | ⚠️ |
 
 A dash means the protocol has no symbolic links at all, so there is nothing to preserve.
-⚠️ means links are detected and named in the run log but cannot be stored: FTP has no
-standard way to read a link's target.
+⚠️ means links are only handled in part: FTP detects them and names them in the run log but
+has no standard way to read a link's target, and a Docker volume stores them in the backup
+yet cannot write them back into a volume. `n/a` marks an adapter that can only ever be a
+source, so it never holds the backup the middle column describes. Docker Volumes browses
+volumes rather than folders, because a volume is taken whole and there is nothing to open
+inside it.
 
 ### Pick folders by browsing
 
@@ -133,6 +139,10 @@ into two groups:
 
 **Local Filesystem** has no transfer at all and is only bounded by the disk.
 
+**Docker Volumes** sidesteps the question on the way in: a volume arrives as one stream, so
+ten thousand small files cost no more round trips than one large one. A restore is the
+opposite and writes file by file, which is where its parallelism setting matters.
+
 ### Parallel Transfers
 
 Each directory source sets its own value under **Connections → Directory Sources → Configuration**.
@@ -143,6 +153,7 @@ The adapter decides the range, because the sensible limit is a property of the p
 | SFTP, Rsync (SSH) | 4 | 8 | Every transfer is an SSH login, and OpenSSH refuses connections past `MaxStartups` - ten at once by default. Eight leaves room for your own session. |
 | FTP / FTPS | 2 | 4 | Each transfer needs a control **and** a data connection, and servers commonly cap connections per address at around five. |
 | Dropbox | 4 | 4 | Dropbox throttles concurrent writes per account. Above four the time goes into retries, so the default is also the limit. |
+| Docker Volumes | 4 | 8 | Only the restore uses it, since a volume is *read* as one stream. Writing it back is one daemon request per file, and over SSH without socket forwarding each request starts a Docker CLI process on the target. |
 | Everything else | 4 | 16 | No protocol-level reason to stay lower. |
 
 Raising it helps most when the files are small and the link has latency. It helps least when one

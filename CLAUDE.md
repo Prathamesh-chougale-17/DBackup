@@ -79,6 +79,12 @@ Every change - feature, bug fix, refactor, docs, CI - gets an entry in `docs/cha
 
 The test is who the line is for. A reader upgrading their instance never needs to know a prompt file changed. Code that ships in the product still counts even when it exists to keep the assistant honest - a lint guard under `tests/` changes the build for every contributor, so it belongs in `### 🧪 Tests`.
 
+**Off `main`, first ask whether the change needs an entry at all.** A fix or behavior change to something already released does. A step in building the unreleased feature the branch exists for does not, and neither does a bug that only ever existed on that branch, because the feature gets one entry rather than one per step. Check it against `git log main..HEAD` instead of assuming: if the code being fixed arrived in one of those commits, nobody has ever run it.
+
+**Every entry is at most two sentences** and stays shallow. Say what the change is, not why it was made, how it works, or what it took to build. Anything needing a third sentence belongs in that feature's guide.
+
+**Inside an entry there is no `;`, no ` - ` and no `- `.** Stricter than the typography rule above, which allows a hyphen as a dash. A sentence reaching for one of them is doing too much work, so split it or cut it. The `- ` opening the line is the list marker and stays.
+
 **Find the active version**: either a `## vNEXT` block at the top, or the topmost `## vX.Y.Z` block marked `*Release: In Progress*`. If neither exists, run `pnpm changelog:next` first.
 
 **Section order** (skip sections with no entries, never reorder):

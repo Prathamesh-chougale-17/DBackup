@@ -9,7 +9,7 @@ export const GETTING_STARTED_URL = `${DOCS_URL}/user-guide/getting-started`;
 
 export const STATS = [
   { value: "9", label: "Database Engines" },
-  { value: "13", label: "Storage Adapters" },
+  { value: "14", label: "Storage Adapters" },
   { value: "9", label: "Notification Channels" },
   { value: "GPL-3.0", label: "Open Source" },
 ];
@@ -23,12 +23,12 @@ export const FEATURES = [
   {
     title: "File & Folder Backup",
     description:
-      "Back up an application's config and data directories alongside its database, in one job with one schedule, one retention policy and one key. Folder tree picker, reusable exclude presets, incremental chains, and VSS shadow copies on SMB.",
+      "Back up an application's config and data directories alongside its database, in one job with one schedule, one retention policy and one key. Folder tree picker, reusable exclude presets, incremental chains, Docker volumes read through the daemon, and VSS shadow copies on SMB.",
   },
   {
     title: "Storage & Destinations",
     description:
-      "13 storage adapters, usable as backup destinations or as directory sources, multi-destination jobs for redundancy, a Storage Explorer, and alerts for usage spikes or missing backups.",
+      "14 storage adapters, usable as backup destinations or as directory sources, multi-destination jobs for redundancy, a Storage Explorer, and alerts for usage spikes or missing backups.",
   },
   {
     title: "Restore & Recovery",
@@ -98,6 +98,7 @@ export const STORAGE_ADAPTERS: AdapterItem[] = [
   { id: "webdav", label: "WebDAV" },
   { id: "smb", label: "SMB/Samba" },
   { id: "rsync", label: "Rsync" },
+  { id: "docker-volume", label: "Docker Volumes (Beta)" },
 ];
 
 export const NOTIFICATION_CHANNELS: AdapterItem[] = [
@@ -142,7 +143,12 @@ export const FAQS = [
   {
     question: "Can DBackup back up files and folders, not just databases?",
     answer:
-      "Yes. Any storage adapter can serve as a directory source - local paths, SFTP, SMB, FTP, WebDAV, S3, Google Drive, Dropbox, OneDrive, or rsync over SSH. Files and databases can share one job, so the dump and the data directory that belongs to it land in the same archive and the same restore point. There is no agent to install: DBackup reads whatever those protocols reach. That agentless design is also its limit - a full run pulls the tree to the DBackup host and stages it there before packing, so it wants roughly twice the source size in free space and every byte crosses the network twice. It is built for the files that belong to the applications you already back up databases for, not for bulk media libraries; for those, restic or Borg run on the machine itself and are the better tool.",
+      "Yes. Any storage adapter can serve as a directory source - local paths, SFTP, SMB, FTP, WebDAV, S3, Google Drive, Dropbox, OneDrive, rsync over SSH, or Docker volumes read through the daemon. Files and databases can share one job, so the dump and the data directory that belongs to it land in the same archive and the same restore point. There is no agent to install: DBackup reads whatever those protocols reach. That agentless design is also its limit - a full run pulls the tree to the DBackup host and stages it there before packing, so it wants roughly twice the source size in free space and every byte crosses the network twice. It is built for the files that belong to the applications you already back up databases for, not for bulk media libraries; for those, restic or Borg run on the machine itself and are the better tool.",
+  },
+  {
+    question: "Can DBackup back up Docker volumes?",
+    answer:
+      "Yes, currently in beta. Pick the volumes from a list of what the Docker daemon can see, locally through its socket or on another host over SSH, and DBackup mounts them into a short-lived helper container to read them. Containers holding a selected volume are stopped for the read and started again right afterwards, per volume rather than for the whole job, and you can switch that off for data that is safe to copy live. Restoring goes back into the same volume or into a new one, though directory permissions and empty directories are not carried back yet, which is what keeps it in beta.",
   },
   {
     question: "Does DBackup deduplicate like restic or Borg?",
