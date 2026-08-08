@@ -1,6 +1,5 @@
 import type { ExecutionHost } from "@/lib/transport";
-import { MONGORESTORE, buildConnectionArgs } from "./args";
-import { maskSecrets } from "../redis/args";
+import { MONGORESTORE, buildConnectionArgs, maskSecrets } from "./args";
 import { withMongoMeta } from "./meta";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";

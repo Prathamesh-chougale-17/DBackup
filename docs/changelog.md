@@ -8,12 +8,21 @@ All notable changes to DBackup are documented here.
 ### ✨ Features
 
 - **docker**: New **Docker Volumes** source (beta) that reads volume contents through the local Docker socket or from another host over SSH. Volumes are picked from a list of what the daemon can see, and any container holding one is stopped while it is read unless the source says otherwise.
+- **MongoDB**: Sources can now reach **MongoDB Atlas** and other clusters that publish an SRV record. A hostname under `mongodb.net` is recognised on its own, and any other cluster can ask for the same by writing its host as `mongodb+srv://your.host`.
+- **MongoDB**: The **Host** field now takes a comma-separated seed list, so a replica set or a pair of `mongos` routers can be reached without a connection URI.
 
 ### 🐛 Bug Fixes
 
+- **MongoDB**: Connecting to an Atlas cluster no longer fails with `getaddrinfo ENOTFOUND`. DBackup built a plain `mongodb://host:port` connection for a hostname that only resolves through SRV.
+- **MongoDB**: A trailing slash, a scheme or a port pasted into the **Host** field no longer breaks the connection. The field is now read the way it is written.
+- **adapters**: Testing the connection of a saved source no longer fails for secrets that live in the config rather than in a credential profile, such as MongoDB's deprecated inline URI. The test ran against a config the saved source never had, so it failed while backups from the same source kept working.
 - **adapters**: Connection forms prefill the fields that carry a default again, such as a port or a base path. They had silently stopped being filled in for every adapter.
 - **storage**: Restore now opens for backups whose job name, source name, path or file name holds characters outside Latin-1, such as Chinese, Cyrillic, Greek, Hebrew or emoji. The button previously did nothing at all and only left an encoding error in the browser console. ([#139](https://github.com/Skyfay/DBackup/issues/139))
 - **storage**: Downloading a file whose name is not plain ASCII no longer fails with a server error. The name is now sent as UTF-8 and arrives intact instead of mangled.
+
+### 🔒 Security
+
+- **MongoDB**: A password carried inside a connection string is now masked in the run log. Only a password passed as its own argument was masked before.
 
 ### 🎨 Improvements
 
@@ -27,6 +36,12 @@ All notable changes to DBackup are documented here.
 ### 📝 Documentation
 
 - **docker**: New guide for the Docker Volumes source, covering socket access, what stopping containers does and does not promise, and the current limitations.
+- **MongoDB**: The source guide now describes how to reach Atlas, an SRV cluster and a replica set, and drops the connection URI field that the form has not offered since v2.6.0.
+
+### 🧪 Tests
+
+- **MongoDB**: Added unit tests for how the Host field is read, covering SRV clusters, seed lists, pasted connection strings and log masking.
+- **adapters**: Added unit tests for filling a submitted config back up with the secrets of the saved config it belongs to.
 
 ### 🐳 Docker
 

@@ -1,6 +1,5 @@
 import type { ExecutionHost } from "@/lib/transport";
-import { MONGODUMP, buildConnectionArgs } from "./args";
-import { maskSecrets } from "../redis/args";
+import { MONGODUMP, buildConnectionArgs, maskSecrets } from "./args";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import fs from "fs/promises";

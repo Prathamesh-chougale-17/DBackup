@@ -26,8 +26,7 @@ A [Credential Profile](/user-guide/security/credential-profiles) is **optional**
 | Field | Description | Default | Required |
 | :--- | :--- | :--- | :--- |
 | **Connection Mode** | Direct (TCP) or SSH | `Direct` | ✅ |
-| **Connection URI** | Full MongoDB URI (overrides other settings) | - | ❌ |
-| **Host** | Database server hostname | `localhost` | ✅ |
+| **Host** | Database server hostname, or a comma-separated seed list | `localhost` | ✅ |
 | **Port** | MongoDB port | `27017` | ✅ |
 | **Primary Credential** | `USERNAME_PASSWORD` credential profile (username + password) | - | ❌ |
 | **Auth Database** | Authentication database | `admin` | ❌ |
@@ -105,22 +104,40 @@ In SSH mode, the MongoDB tools must be installed on the remote server. DBackup e
 
 ## Connection Methods
 
-### Using Connection URI (Recommended)
+DBackup builds the connection string from the **Host** and **Port** fields plus the credential profile. There is no separate URI field.
 
-For complex setups (replica sets, Atlas, SRV records):
+### Single Server
 
-```
-mongodb+srv://user:password@cluster.mongodb.net/mydb?retryWrites=true
-```
-
-### Using Host/Port
-
-For simple setups:
 - **Host**: `mongodb.example.com`
 - **Port**: `27017`
-- **User**: `backup_user`
-- **Password**: `your_password`
+- **Primary Credential**: a `USERNAME_PASSWORD` profile
 - **Auth Database**: `admin`
+
+### MongoDB Atlas and Other SRV Clusters
+
+Put the cluster hostname in **Host** and nothing else:
+
+```
+cluster0.ab12c.mongodb.net
+```
+
+DBackup recognises it, connects with `mongodb+srv://` and leaves the **Port** field unused. TLS comes with that scheme, so it needs no separate setting. Any host under `mongodb.net` is recognised automatically. For a self-hosted cluster that publishes its own SRV record, write the scheme out to ask for the same treatment:
+
+```
+mongodb+srv://mongo.example.com
+```
+
+::: info Why the port is ignored here
+An SRV record names a port for every host it points at, so a connection string that also carries one is rejected. This is also why the plain hostname of an Atlas cluster resolves to nothing.
+:::
+
+### Replica Sets
+
+List the members in **Host**, separated by commas. Members without their own port use the **Port** field:
+
+```
+rs1.example.com:27017,rs2.example.com:27017,rs3.example.com:27017
+```
 
 ## Setting Up a Backup User
 
@@ -171,7 +188,7 @@ In SSH mode, DBackup:
 6. Uploads to the configured storage destination
 
 ::: tip Host in SSH Mode
-The **Host** field refers to the MongoDB hostname **as seen from the SSH server**. If MongoDB runs on the same machine as the SSH server, use `127.0.0.1` or `localhost`. Connection URIs also work in SSH mode.
+The **Host** field refers to the MongoDB hostname **as seen from the SSH server**. If MongoDB runs on the same machine as the SSH server, use `127.0.0.1` or `localhost`.
 :::
 
 ### Output Format
@@ -235,13 +252,8 @@ Multi-DB backups created before v0.9.1 cannot be restored with newer versions.
 
 ## Replica Set Configuration
 
-For replica sets, use the connection URI:
+Put the members in the **Host** field as a comma-separated list, as shown under [Connection Methods](#replica-sets). To read from a secondary instead of the primary:
 
-```
-mongodb://user:pass@rs1.example.com:27017,rs2.example.com:27017,rs3.example.com:27017/mydb?replicaSet=myRS
-```
-
-Or set read preference:
 ```bash
 # Additional Options
 --readPreference=secondaryPreferred
@@ -249,10 +261,10 @@ Or set read preference:
 
 ## Sharded Cluster Configuration
 
-For sharded clusters, connect to a `mongos` router:
+For sharded clusters, point **Host** at the `mongos` routers:
 
 ```
-mongodb://user:pass@mongos1.example.com:27017,mongos2.example.com:27017/admin
+mongos1.example.com:27017,mongos2.example.com:27017
 ```
 
 ::: warning Sharded Cluster Backup
@@ -274,8 +286,9 @@ Works automatically when you provide user/password.
 
 ### LDAP Authentication
 
-```
-mongodb://ldapuser:ldappass@host:27017/mydb?authMechanism=PLAIN&authSource=$external
+```bash
+# Additional Options
+--authenticationMechanism=PLAIN --authenticationDatabase='$external'
 ```
 
 ## Troubleshooting
@@ -301,7 +314,22 @@ no reachable servers
 1. Check network connectivity
 2. Verify hostname/port
 3. Check firewall rules
-4. For SRV records, ensure DNS is accessible
+4. For a cloud cluster, add the DBackup server's IP to the provider's access list
+
+### Host Not Found or Refused
+
+```
+Connection failed: getaddrinfo ENOTFOUND cluster0.ab12c.mongodb.net
+Connection failed: connect ECONNREFUSED 144.2.71.216:27017
+```
+
+DBackup did not recognise the cluster as an SRV one and tried to reach it directly.
+
+**Solutions**:
+1. Put the cluster **hostname** in **Host**, never an IP address. An IP cannot carry an SRV record, so the cluster can only be found by name
+2. Put nothing else in the field, so no `https://`, no trailing slash and no database name
+3. For a self-hosted SRV cluster outside `mongodb.net`, write the host as `mongodb+srv://your.host`
+4. Otherwise check that DBackup's own DNS can resolve the name, which in Docker means the container's DNS rather than the host's
 
 ### Insufficient Permissions
 
@@ -321,13 +349,6 @@ Required binary not found on remote server. Tried: mongodump
 ```
 
 **Solution:** Install MongoDB Database Tools on the remote server. See [MongoDB Database Tools Installation](https://www.mongodb.com/docs/database-tools/installation/).
-
-### SSH: Connection Refused
-
-**Solution:**
-1. Verify SSH is running: `systemctl status sshd`
-2. Check SSH port and firewall rules
-3. Test manually: `ssh user@host`
 
 ## Restore
 

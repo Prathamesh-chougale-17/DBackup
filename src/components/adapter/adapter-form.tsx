@@ -241,7 +241,7 @@ export function AdapterForm({ type, adapters, onSuccess, initialData, onBack, de
                  const testRes = await fetch('/api/adapters/test-connection', {
                      method: 'POST',
                      headers: { 'Content-Type': 'application/json' },
-                     body: JSON.stringify({ adapterId: data.adapterId, config: data.config, primaryCredentialId, sshCredentialId })
+                     body: JSON.stringify({ adapterId: data.adapterId, config: data.config, configId: initialData?.id, primaryCredentialId, sshCredentialId })
                  });
 
                  const testResult = await testRes.json();

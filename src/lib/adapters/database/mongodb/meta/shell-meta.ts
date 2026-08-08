@@ -1,6 +1,6 @@
 import type { ExecutionHost } from "@/lib/transport";
 import type { MongoDBConfig } from "@/lib/adapters/definitions";
-import { MONGOSH, SYSTEM_DATABASES, buildConnectionArgs } from "../args";
+import { MONGOSH, SYSTEM_DATABASES, buildShellConnectionArgs } from "../args";
 import type {
     MongoCollectionInfo,
     MongoDatabaseStats,
@@ -37,7 +37,7 @@ export class ShellMongoMeta implements MongoMeta {
     private async evaluate<T>(script: string, what: string): Promise<T> {
         const mongosh = await this.mongosh();
         const result = await this.host.exec([
-            mongosh, ...buildConnectionArgs(this.config), "--quiet", "--eval", script,
+            mongosh, ...buildShellConnectionArgs(this.config), "--quiet", "--eval", script,
         ]);
 
         if (result.code !== 0) {
@@ -60,7 +60,7 @@ export class ShellMongoMeta implements MongoMeta {
     async serverVersion(): Promise<string> {
         const mongosh = await this.mongosh();
         const result = await this.host.exec([
-            mongosh, ...buildConnectionArgs(this.config), "--quiet",
+            mongosh, ...buildShellConnectionArgs(this.config), "--quiet",
             "--eval", "print(db.adminCommand({buildInfo:1}).version)",
         ]);
 

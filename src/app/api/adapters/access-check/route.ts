@@ -3,10 +3,11 @@ import { registry } from "@/lib/core/registry";
 import { withHost } from "@/lib/transport";
 import type { DatabaseAdapter } from "@/lib/core/interfaces";
 import { registerAdapters } from "@/lib/adapters";
-import { overlayCredentialsOnConfig } from "@/lib/adapters/config-resolver";
+import { applyStoredSecrets, overlayCredentialsOnConfig } from "@/lib/adapters/config-resolver";
 import { headers } from "next/headers";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
 import { getPermissionForAdapter } from "@/lib/auth/adapter-permissions";
+import { canEditStoredConfig } from "@/lib/auth/adapter-config-access";
 
 // Ensure adapters are registered
 registerAdapters();
@@ -20,7 +21,7 @@ export async function POST(req: NextRequest) {
 
     try {
         const body = await req.json();
-        const { adapterId, config, primaryCredentialId, sshCredentialId } = body;
+        const { adapterId, config, configId, primaryCredentialId, sshCredentialId } = body;
 
         if (!adapterId || !config) {
             return NextResponse.json({ success: false, message: "Missing required fields" }, { status: 400 });
@@ -43,9 +44,16 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ success: false, message: "This adapter does not support listing databases." });
         }
 
+        // Same reason as in the connection test: a saved source submits the
+        // secrets held in its own config missing, because they are redacted on
+        // the way to the browser.
+        const submittedConfig = typeof configId === "string" && configId && canEditStoredConfig(ctx, adapterId)
+            ? await applyStoredSecrets(adapterId, configId, { ...config })
+            : { ...config };
+
         const mergedConfig = await overlayCredentialsOnConfig(
             adapterId,
-            { ...config },
+            submittedConfig,
             primaryCredentialId ?? null,
             sshCredentialId ?? null
         );

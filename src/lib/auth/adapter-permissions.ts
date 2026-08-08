@@ -43,3 +43,19 @@ const ADAPTER_PERMISSIONS: Record<string, Permission> = {
 export function getPermissionForAdapter(adapterId: string): Permission | null {
     return ADAPTER_PERMISSIONS[adapterId] ?? null;
 }
+
+/**
+ * The permission that governs editing a saved config of this adapter, derived
+ * from the read permission rather than listed a second time so a new adapter
+ * only ever has to be added to the map above.
+ */
+const MANAGE_BY_READ: Partial<Record<Permission, Permission>> = {
+    [PERMISSIONS.SOURCES.VIEW]: PERMISSIONS.SOURCES.WRITE,
+    [PERMISSIONS.DESTINATIONS.READ]: PERMISSIONS.DESTINATIONS.WRITE,
+    [PERMISSIONS.NOTIFICATIONS.READ]: PERMISSIONS.NOTIFICATIONS.WRITE,
+};
+
+export function getManagePermissionForAdapter(adapterId: string): Permission | null {
+    const read = getPermissionForAdapter(adapterId);
+    return read ? MANAGE_BY_READ[read] ?? null : null;
+}

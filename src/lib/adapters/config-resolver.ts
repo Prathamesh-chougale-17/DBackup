@@ -1,4 +1,5 @@
-import { decryptConfig } from "@/lib/crypto";
+import { decryptConfig, mergeSecrets } from "@/lib/crypto";
+import prisma from "@/lib/prisma";
 import { registry } from "@/lib/core/registry";
 import { ConfigurationError, NotFoundError, wrapError } from "@/lib/logging/errors";
 import { logger } from "@/lib/logging/logger";
@@ -152,6 +153,45 @@ export async function overlayCredentialsOnConfig(
     }
 
     return config;
+}
+
+/**
+ * Fills in the secrets a client-submitted config is missing from the saved
+ * config it belongs to.
+ *
+ * The adapter DTO deletes every key in `SENSITIVE_KEYS` before a config reaches
+ * the browser, so an edit-form round trip submits secrets missing rather than
+ * unchanged. For a secret held in a credential profile that is harmless, since
+ * the profile is resolved server-side. For a secret that lives in the config
+ * itself, such as MongoDB's deprecated inline `uri` or a legacy inline SSH key,
+ * the submitted config is one the saved source never had, which is why a
+ * connection test could fail while backups from that same source kept working.
+ *
+ * Caller-supplied values always win, so this only restores what is absent.
+ * Permission is the caller's job: only somebody who may edit the source should
+ * be handed its stored secrets.
+ */
+export async function applyStoredSecrets(
+    adapterId: string,
+    configId: string,
+    config: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+    try {
+        const stored = await prisma.adapterConfig.findUnique({
+            where: { id: configId },
+            select: { adapterId: true, config: true },
+        });
+
+        // A config of another type holds other keys, so merging one into the
+        // other would only ever produce a config nobody asked about.
+        if (!stored || stored.adapterId !== adapterId) return config;
+
+        return mergeSecrets(config, decryptConfig(JSON.parse(stored.config)));
+    } catch (e) {
+        // A stored config that cannot be read is no reason to refuse the request.
+        log.error("Failed to merge stored secrets into config", { adapterId, configId }, wrapError(e));
+        return config;
+    }
 }
 
 async function loadAndValidate(
