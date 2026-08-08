@@ -28,6 +28,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { RedisRestoreWizard } from "@/components/dashboard/storage/redis-restore-wizard";
 import { ArchiveFileTree, ArchiveTreeSelection } from "@/components/dashboard/storage/archive-file-tree";
 import { FolderPickerDialog } from "@/components/dashboard/storage/folder-picker-dialog";
+import { ADAPTER_DEFINITIONS } from "@/lib/adapters/definitions";
 import { getExcludePatternPresets } from "@/app/actions/templates";
 import type { ExcludePatternPreset } from "@prisma/client";
 import { resolveExcludePatterns, parseJsonStringArray } from "@/lib/exclude-groups";
@@ -456,6 +457,19 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
     const handleDirTargetConfigChange = (entryId: string, targetConfigId: string) => {
         setDirConfig(prev => prev.map(d => d.entryId === entryId ? { ...d, targetConfigId, checkStatus: undefined } : d));
     };
+
+    /**
+     * How a restore target's picker behaves, read off the adapter definition.
+     *
+     * A flat adapter has nothing below its root - a Docker volume is taken whole - which
+     * changes the icon, the placeholder and what "already there" means. Keyed on the
+     * definition rather than on an adapter id, so the next flat adapter needs no change here.
+     */
+    const browseShapeFor = useCallback((targetConfigId?: string) => {
+        const adapterId = storageDestinations.find(sd => sd.id === targetConfigId)?.adapterId;
+        const definition = ADAPTER_DEFINITIONS.find(d => d.id === adapterId);
+        return { flat: definition?.flatBrowse === true, noun: definition?.browseNoun ?? "folder" };
+    }, [storageDestinations]);
 
     const handleDirTargetPathChange = (entryId: string, targetPath: string) => {
         setDirConfig(prev => prev.map(d => d.entryId === entryId ? { ...d, targetPath, checkStatus: undefined } : d));
@@ -1325,11 +1339,9 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                                                     <Input
                                                         value={d.targetPath}
                                                         onChange={(e) => handleDirTargetPathChange(d.entryId, e.target.value)}
-                                                        placeholder={
-                                                            storageDestinations.find(sd => sd.id === d.targetConfigId)?.adapterId === "docker-volume"
-                                                                ? "volume-name"
-                                                                : "/restore/path"
-                                                        }
+                                                        placeholder={browseShapeFor(d.targetConfigId).flat
+                                                            ? `${browseShapeFor(d.targetConfigId).noun}-name`
+                                                            : "/restore/path"}
                                                         className="h-8 text-sm"
                                                         disabled={!d.selected}
                                                     />
@@ -1340,9 +1352,13 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                                                         className="h-8 w-8 shrink-0"
                                                         disabled={!d.selected || !d.targetConfigId}
                                                         onClick={() => setFolderPickerFor(d.entryId)}
-                                                        aria-label="Browse folders"
+                                                        aria-label={browseShapeFor(d.targetConfigId).flat
+                                                            ? `Pick a ${browseShapeFor(d.targetConfigId).noun}`
+                                                            : "Browse folders"}
                                                     >
-                                                        <FolderOpen className="h-3.5 w-3.5" />
+                                                        {browseShapeFor(d.targetConfigId).flat
+                                                            ? <HardDrive className="h-3.5 w-3.5" />
+                                                            : <FolderOpen className="h-3.5 w-3.5" />}
                                                     </Button>
                                                     {d.selected && d.checkStatus === 'checking' && (
                                                         <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
@@ -1353,9 +1369,7 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                                                                 <TooltipTrigger>
                                                                     <Badge variant="destructive" className="text-[10px] px-1.5 py-0 shrink-0">
                                                                         <AlertTriangle className="h-3 w-3 mr-1" />
-                                                                        {storageDestinations.find(sd => sd.id === d.targetConfigId)?.adapterId === "docker-volume"
-                                                                            ? "Exists"
-                                                                            : "Occupied"}
+                                                                        {browseShapeFor(d.targetConfigId).flat ? "Exists" : "Occupied"}
                                                                     </Badge>
                                                                 </TooltipTrigger>
                                                                 <TooltipContent>
@@ -1363,8 +1377,8 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                                                                         promise from overwriting files of the same name - saying the wrong
                                                                         one here is how somebody loses data they meant to keep. */}
                                                                     <p>
-                                                                        {storageDestinations.find(sd => sd.id === d.targetConfigId)?.adapterId === "docker-volume"
-                                                                            ? "This volume already exists - everything in it is deleted before the backup is restored into it"
+                                                                        {browseShapeFor(d.targetConfigId).flat
+                                                                            ? `This ${browseShapeFor(d.targetConfigId).noun} already exists - everything in it is deleted before the backup is restored into it`
                                                                             : "This path already contains files - matching filenames will be overwritten"}
                                                                     </p>
                                                                 </TooltipContent>
@@ -1434,12 +1448,15 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                         const editing = dirConfig.find(d => d.entryId === folderPickerFor);
                         const targetAdapter = storageDestinations.find(sd => sd.id === editing?.targetConfigId);
                         if (!editing || !targetAdapter) return null;
+                        const shape = browseShapeFor(targetAdapter.id);
                         return (
                             <FolderPickerDialog
                                 open
                                 onOpenChange={(o) => { if (!o) setFolderPickerFor(null); }}
                                 configId={targetAdapter.id}
                                 configName={targetAdapter.name}
+                                flat={shape.flat}
+                                itemNoun={shape.noun}
                                 onSelect={(path) => handleDirTargetPathChange(editing.entryId, path)}
                             />
                         );
