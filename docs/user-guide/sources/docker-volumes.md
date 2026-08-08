@@ -80,6 +80,7 @@ Containers using the target are always stopped for a restore, whatever the job's
 | Extended attributes and ACLs are not preserved | On SELinux hosts, labels have to be reapplied with `restorecon` after a restore. |
 | Hard links, device nodes and sockets are not backed up | They are reported as failures in the run, so the backup is honestly incomplete rather than quietly so. |
 | Incremental backups save storage but not transfer | The volume arrives as one stream, so unchanged files still travel; they are simply not stored again. |
+| A restore writes file by file | Reading a volume is one stream, but putting it back is one request per file. Several run at once - see **Parallel Transfers** on the connection - though a volume with many small files still restores considerably more slowly than it was read. Over SSH without socket forwarding it is slower again, because each request starts a Docker CLI process on the target. |
 
 ## Troubleshooting
 
