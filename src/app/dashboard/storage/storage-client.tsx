@@ -33,6 +33,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import { DataTable, type BulkAction } from "@/components/ui/data-table";
 import { requestBulk } from "@/lib/bulk-request";
+import { encodeUrlPayload } from "@/lib/url-payload";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { getColumns, FileInfo, RestoreMode } from "./columns";
@@ -215,7 +216,7 @@ export function StorageClient({ canDownload, canRestore, canDelete, canManageVau
             toast.error("Permission denied");
             return;
         }
-        const encoded = btoa(JSON.stringify(file));
+        const encoded = encodeUrlPayload(file);
         // The mode is only passed for backups holding both databases and directories -
         // everything else has exactly one thing to restore and needs no choice.
         const modeParam = mode && mode !== "all" ? `&mode=${mode}` : "";

@@ -6,6 +6,7 @@ import * as encryptionService from "@/services/backup/encryption-service";
 import { buildRecoveryKit, RecoveryKitProfile } from "@/services/backup/recovery-kit";
 import { auditService } from "@/services/audit-service";
 import { AUDIT_ACTIONS, AUDIT_RESOURCES } from "@/lib/core/audit-types";
+import { attachmentDisposition } from "@/lib/server/content-disposition";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 
@@ -71,7 +72,7 @@ export async function GET(request: NextRequest) {
             status: 200,
             headers: {
                 "Content-Type": "application/zip",
-                "Content-Disposition": `attachment; filename="${filename}"`,
+                "Content-Disposition": attachmentDisposition(filename),
             },
         });
     } catch (error: unknown) {

@@ -11,6 +11,7 @@ import { AUDIT_ACTIONS, AUDIT_RESOURCES } from "@/lib/core/audit-types";
 import { planFileRestore, restoreFilesToStorage, streamFileRestore, FileRestoreInput } from "@/services/restore/file-restore";
 import { generateSelectionDownloadToken, consumeSelectionDownloadToken } from "@/lib/auth/download-tokens";
 import { keyRequiredResponse } from "@/lib/server/key-required-response";
+import { attachmentDisposition } from "@/lib/server/content-disposition";
 import { logger } from "@/lib/logging/logger";
 import { wrapError, getErrorMessage } from "@/lib/logging/errors";
 
@@ -105,7 +106,7 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
             return new NextResponse(Readable.toWeb(stream as Readable) as ReadableStream, {
                 headers: {
                     "Content-Type": "application/gzip",
-                    "Content-Disposition": `attachment; filename="${archiveName}-files.tar.gz"`,
+                    "Content-Disposition": attachmentDisposition(`${archiveName}-files.tar.gz`),
                     // Length is unknown up front because the payload is produced on the fly.
                     "Cache-Control": "no-store",
                 },
@@ -179,7 +180,7 @@ export async function GET(req: NextRequest, props: { params: Promise<{ id: strin
         return new NextResponse(Readable.toWeb(stream as Readable) as ReadableStream, {
             headers: {
                 "Content-Type": "application/gzip",
-                "Content-Disposition": `attachment; filename="${claim.selection.fileName}"`,
+                "Content-Disposition": attachmentDisposition(claim.selection.fileName),
                 // Length is unknown up front because the payload is produced on the fly.
                 "Cache-Control": "no-store",
             },

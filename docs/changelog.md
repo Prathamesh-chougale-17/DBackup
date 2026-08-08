@@ -12,6 +12,8 @@ All notable changes to DBackup are documented here.
 ### 🐛 Bug Fixes
 
 - **adapters**: Connection forms prefill the fields that carry a default again, such as a port or a base path. They had silently stopped being filled in for every adapter.
+- **storage**: Restore now opens for backups whose job name, source name, path or file name holds characters outside Latin-1, such as Chinese, Cyrillic, Greek, Hebrew or emoji. The button previously did nothing at all and only left an encoding error in the browser console. ([#139](https://github.com/Skyfay/DBackup/issues/139))
+- **storage**: Downloading a file whose name is not plain ASCII no longer fails with a server error. The name is now sent as UTF-8 and arrives intact instead of mangled.
 
 ### 🎨 Improvements
 

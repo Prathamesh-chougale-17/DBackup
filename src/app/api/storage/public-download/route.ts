@@ -6,6 +6,7 @@ import path from "path";
 import os from "os";
 import fs from "fs";
 import fsPromises from "fs/promises";
+import { attachmentDisposition } from "@/lib/server/content-disposition";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 
@@ -95,7 +96,7 @@ export async function GET(req: NextRequest) {
 
         return new NextResponse(readableStream, {
             headers: {
-                "Content-Disposition": `attachment; filename="${downloadFilename}"`,
+                "Content-Disposition": attachmentDisposition(downloadFilename),
                 "Content-Type": result.isZip ? "application/zip" : "application/octet-stream",
                 "Content-Length": String(stat.size),
             }

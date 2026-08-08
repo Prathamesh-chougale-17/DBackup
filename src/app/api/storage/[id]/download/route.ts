@@ -12,6 +12,7 @@ import { logger } from "@/lib/logging/logger";
 import { wrapError, getErrorMessage } from "@/lib/logging/errors";
 import { generateFileDownloadToken, consumeFileDownloadToken, markTokenUsed } from "@/lib/auth/download-tokens";
 import { keyRequiredResponse } from "@/lib/server/key-required-response";
+import { attachmentDisposition } from "@/lib/server/content-disposition";
 import { z } from "zod";
 
 const log = logger.child({ route: "storage/download" });
@@ -53,7 +54,7 @@ function buildDownloadResponse(tempFile: string, file: string, decrypt: boolean,
 
     return new NextResponse(readableStream, {
         headers: {
-            "Content-Disposition": `attachment; filename="${downloadFilename}"`,
+            "Content-Disposition": attachmentDisposition(downloadFilename),
             "Content-Type": isZip ? "application/zip" : "application/octet-stream",
             "Content-Length": String(stat.size),
         }
@@ -80,7 +81,7 @@ function buildPreparedResponse(tempFile: string, fileName: string, contentType: 
 
     return new NextResponse(readableStream, {
         headers: {
-            "Content-Disposition": `attachment; filename="${fileName}"`,
+            "Content-Disposition": attachmentDisposition(fileName),
             "Content-Type": contentType,
             "Content-Length": String(stat.size),
         }

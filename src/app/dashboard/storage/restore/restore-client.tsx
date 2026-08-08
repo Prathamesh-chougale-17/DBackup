@@ -32,6 +32,7 @@ import { ADAPTER_DEFINITIONS } from "@/lib/adapters/definitions";
 import { getExcludePatternPresets } from "@/app/actions/templates";
 import type { ExcludePatternPreset } from "@prisma/client";
 import { resolveExcludePatterns, parseJsonStringArray } from "@/lib/exclude-groups";
+import { decodeUrlPayload } from "@/lib/url-payload";
 import { computeRestoreValidity } from "./restore-validation";
 import { parseRestoreScope, normalizeRestoreScope } from "@/components/dashboard/storage/restore-scope";
 import { EncryptionKeyResolutionDialog, type KeyResolutionResult } from "@/components/common/encryption-key-resolution-dialog";
@@ -107,15 +108,10 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
     const { autoRedirectOnJobStart } = useUserPreferences();
 
     // Parse file info and destination from URL
-    const file = useMemo<FileInfo | null>(() => {
-        try {
-            const encoded = searchParams.get("file");
-            if (!encoded) return null;
-            return JSON.parse(atob(encoded));
-        } catch {
-            return null;
-        }
-    }, [searchParams]);
+    const file = useMemo<FileInfo | null>(
+        () => decodeUrlPayload<FileInfo>(searchParams.get("file")),
+        [searchParams]
+    );
 
     const destinationId = searchParams.get("destinationId") || "";
 
