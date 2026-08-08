@@ -541,7 +541,12 @@ describe('executeCombinedDump - shadow copies', () => {
         await executeCombinedDump(ctx);
         createdTempFiles.push(ctx.tempFile!);
 
-        expect(releaseSnapshot).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'old-set|old-copy|\\\\server\\share' }));
+        expect(releaseSnapshot).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({ id: 'old-set|old-copy|\\\\server\\share' }),
+            // The adapter gets the run's log here too, so what a leftover put back is visible.
+            expect.any(Function),
+        );
         expect(createSnapshot).toHaveBeenCalledTimes(1);
     });
 
@@ -659,7 +664,11 @@ describe('executeCombinedDump - grouped collection', () => {
         // One preparation, one teardown, both volumes named in it. Two preparations would
         // mean stopping the shared container twice.
         expect(createSnapshot).toHaveBeenCalledTimes(1);
-        expect(createSnapshot).toHaveBeenCalledWith(expect.anything(), ['/v-web', '/v-cache'], { stopContainers: true });
+        expect(createSnapshot).toHaveBeenCalledWith(
+            expect.anything(),
+            ['/v-web', '/v-cache'],
+            expect.objectContaining({ stopContainers: true }),
+        );
         expect(releaseSnapshot).toHaveBeenCalledTimes(1);
         expect(adapter.downloadDirectory).toHaveBeenCalledTimes(2);
     });
@@ -691,7 +700,11 @@ describe('executeCombinedDump - grouped collection', () => {
         await executeCombinedDump(ctx);
         createdTempFiles.push(ctx.tempFile!);
 
-        expect(createSnapshot).toHaveBeenCalledWith(expect.anything(), ['/v-live'], { stopContainers: false });
+        expect(createSnapshot).toHaveBeenCalledWith(
+            expect.anything(),
+            ['/v-live'],
+            expect.objectContaining({ stopContainers: false }),
+        );
     });
 
     it('gives each group its own preparation, released before the next begins', async () => {

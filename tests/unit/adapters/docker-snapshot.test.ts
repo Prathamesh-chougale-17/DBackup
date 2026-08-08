@@ -187,6 +187,101 @@ describe("releaseDockerSnapshot", () => {
     });
 });
 
+describe("what reaches the run's history", () => {
+    /** Collects what the adapter writes into the execution log, as the runner would. */
+    function recorder() {
+        const lines: Array<{ msg: string; level?: string }> = [];
+        return {
+            lines,
+            onLog: (msg: string, level?: string) => { lines.push({ msg, level }); },
+            text: () => lines.map((l) => l.msg).join("\n"),
+        };
+    }
+
+    it("names the containers it stops and starts again", async () => {
+        // These went to the server console only, so the history showed a volume being read
+        // and gave no hint that two services had been taken down to do it.
+        const engine = useEngine(createFakeDockerEngine({
+            volumes: ["v-web"],
+            containers: [container("dbackup-demo-nginx-1", ["v-web"])],
+        }));
+        const rec = recorder();
+
+        const handle = await createDockerSnapshot(config, ["v-web"], { stopContainers: true, onLog: rec.onLog as never });
+        await releaseDockerSnapshot(config, handle, rec.onLog as never);
+
+        expect(rec.text()).toContain("Stopped container 'dbackup-demo-nginx-1'");
+        expect(rec.text()).toContain("Started container 'dbackup-demo-nginx-1' again");
+        void engine;
+    });
+
+    it("says which helper container it is reading through, and from which image", async () => {
+        const engine = useEngine(createFakeDockerEngine({ volumes: ["v-web"], containers: [] }));
+        const rec = recorder();
+
+        await createDockerSnapshot(config, ["v-web"], { stopContainers: true, onLog: rec.onLog as never });
+
+        expect(rec.text()).toMatch(/Reading through helper container 'helper-1' \(alpine:3\)/);
+        void engine;
+    });
+
+    it("warns in the history that a backup taken without stopping is crash-consistent", async () => {
+        // The most important line the feature produces. Someone who set this once would
+        // otherwise never see again that their backups carry a weaker promise.
+        useEngine(createFakeDockerEngine({
+            volumes: ["v-live"],
+            containers: [container("web", ["v-live"])],
+        }));
+        const rec = recorder();
+
+        await createDockerSnapshot(config, ["v-live"], { stopContainers: false, onLog: rec.onLog as never });
+
+        expect(rec.text()).toContain("crash-consistent");
+        expect(rec.lines.some((l) => l.level === "warning")).toBe(true);
+    });
+
+    it("says so when nothing had to be stopped, rather than staying silent", async () => {
+        // "Nothing was running" reads very differently from "the option was off".
+        useEngine(createFakeDockerEngine({ volumes: ["v-web"], containers: [] }));
+        const rec = recorder();
+
+        await createDockerSnapshot(config, ["v-web"], { stopContainers: true, onLog: rec.onLog as never });
+
+        expect(rec.text()).toContain("No container is using v-web");
+    });
+
+    it("reports an interrupted run's leftovers by name", async () => {
+        // The one message that tells an operator their services were down between two runs.
+        useEngine(createFakeDockerEngine({
+            volumes: ["v-web"],
+            containers: [
+                container("web", ["v-web"], false),
+                container("helper-old", ["v-web"], false, {
+                    "com.dbackup.temp": "1",
+                    "com.dbackup.stopped": "web|dbackup-demo-nginx-1",
+                }),
+            ],
+        }));
+        const rec = recorder();
+
+        await createDockerSnapshot(config, ["v-web"], { stopContainers: true, onLog: rec.onLog as never });
+
+        expect(rec.text()).toContain("from an interrupted run");
+        expect(rec.text()).toContain("dbackup-demo-nginx-1");
+    });
+
+    it("says nothing at all when the runner hands in no log", async () => {
+        // Every call site outside the runner - and the runner itself before this existed -
+        // passes nothing, and that must stay a no-op rather than a crash.
+        useEngine(createFakeDockerEngine({
+            volumes: ["v-web"],
+            containers: [container("web", ["v-web"])],
+        }));
+
+        await expect(createDockerSnapshot(config, ["v-web"], { stopContainers: true })).resolves.toBeDefined();
+    });
+});
+
 describe("orphan recovery", () => {
     /** A helper container left behind by a run that was killed mid-backup. */
     const leftover = () => container("helper-old", ["v-web"], false, {

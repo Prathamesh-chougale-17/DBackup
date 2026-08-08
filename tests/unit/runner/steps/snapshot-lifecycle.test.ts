@@ -55,7 +55,11 @@ describe('stepCleanup - shadow copy release', () => {
 
         await stepCleanup(ctx);
 
-        expect(release).toHaveBeenCalledWith({ address: '//server/share' }, expect.objectContaining({ id: 'set-1|copy-1|\\\\server\\share' }));
+        expect(release).toHaveBeenCalledWith(
+            { address: '//server/share' },
+            expect.objectContaining({ id: 'set-1|copy-1|\\\\server\\share' }),
+            expect.any(Function),
+        );
         expect(ctx.shadowCopies).toEqual([]);
     });
 
@@ -98,7 +102,7 @@ describe('stepCleanup - shadow copy release', () => {
         await expect(stepCleanup(ctx)).resolves.toBeUndefined();
 
         const logged = (ctx.log as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0])).join('\n');
-        expect(logged).toContain('Could not release the shadow copy');
+        expect(logged).toContain('Could not release the snapshot');
         expect(logged).toContain('server unreachable');
     });
 

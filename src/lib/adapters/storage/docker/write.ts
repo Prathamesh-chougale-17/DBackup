@@ -19,7 +19,7 @@ import { pipeline } from "node:stream/promises";
 import { pack } from "tar-stream";
 
 import type { UploadOptions } from "@/lib/core/interfaces";
-import { startAll, stopRunning } from "./containers";
+import { startAll, stopRunning, type StoppedContainer } from "./containers";
 import type { DockerEngine } from "./engine/types";
 import { mountPathFor } from "./temp-container";
 
@@ -59,7 +59,7 @@ export function splitVolumePath(remotePath: string): VolumePath {
  */
 export interface PreparedVolume {
     containerId: string;
-    stoppedContainerIds: string[];
+    stoppedContainers: StoppedContainer[];
 }
 
 export async function prepareVolumeForRestore(
@@ -76,7 +76,7 @@ export async function prepareVolumeForRestore(
     const holders = await engine.containersUsingVolume(volume);
     // Not optional the way it is for a backup: writing into a volume a container is reading
     // is how a half-restored database happens.
-    const stoppedContainerIds = await stopRunning(engine, holders, log);
+    const stoppedContainers = await stopRunning(engine, holders, log);
 
     try {
         if (!existing) {
@@ -88,9 +88,9 @@ export async function prepareVolumeForRestore(
         }
 
         const containerId = await engine.createMountContainer([volume], helperImage, {});
-        return { containerId, stoppedContainerIds };
+        return { containerId, stoppedContainers };
     } catch (e: unknown) {
-        await startAll(engine, stoppedContainerIds, log);
+        await startAll(engine, stoppedContainers, log);
         throw e;
     }
 }
@@ -102,7 +102,7 @@ export async function finishVolumeRestore(
     log: Log,
 ): Promise<void> {
     await engine.removeMountContainer(prepared.containerId).catch(() => { });
-    await startAll(engine, prepared.stoppedContainerIds, log);
+    await startAll(engine, prepared.stoppedContainers, log);
 }
 
 /** Writes one file into a prepared volume, with the metadata the backup recorded. */

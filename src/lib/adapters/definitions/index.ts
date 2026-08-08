@@ -42,6 +42,10 @@ export const ADAPTER_DEFINITIONS: AdapterDefinition[] = [
         credentials: { ssh: "SSH_KEY" },
         // Somewhere to read data out of, never somewhere to put archives.
         supportedRoles: [STORAGE_ROLES.SOURCE],
+        // A volume is a name, not a folder. Nothing to expand into, and "back up everything"
+        // has to mean "tick them all" rather than a root path the adapter cannot mount.
+        flatBrowse: true,
+        browseNoun: "volume",
         // A volume is read as one tar stream from a helper container, not file by file, so
         // there is no per-file round trip to parallelise and nothing for a connection
         // setting to tune.

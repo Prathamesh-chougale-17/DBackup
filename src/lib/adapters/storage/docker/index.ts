@@ -93,10 +93,13 @@ export const DockerVolumeAdapter: StorageAdapter = {
                 .map((volume) => ({ name: volume.name, path: volume.name }))
                 .sort((a, b) => a.name.localeCompare(b.name));
         }, (message) => {
-            // Browsing is interactive: an unreachable host should leave the picker empty
-            // with the error in the log, not throw into the dialog.
+            // Thrown, not swallowed. This used to return an empty list so an unreachable
+            // host would not break the dialog - but "no volumes on this host" and "this
+            // host cannot be reached" are the two answers a person most needs to tell
+            // apart, and one of them was being shown for both. The browse route turns this
+            // into its error response, which the picker already reports.
             log.warn("Could not list Docker volumes", {}, wrapError(new Error(message)));
-            return [];
+            throw new Error(message);
         });
     },
 

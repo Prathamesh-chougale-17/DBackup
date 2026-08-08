@@ -13,6 +13,9 @@ All notable changes to DBackup are documented here.
 
 ### 🎨 Improvements
 
+- **backup**: The run history now shows what a backup did to prepare each source: which containers were stopped and started again, by name; which helper container a volume was read through and from which image; and whether anything had to be stopped at all. A run that reads its sources in groups says which group it is on and what is in it.
+- **backup**: The log stops calling every kind of prepared source a shadow copy. A Windows share still says shadow copy, a container runtime says helper container.
+- **jobs**: The directory picker no longer offers to expand a Docker volume, which could only ever reveal that it has nothing inside it, and uses a storage icon rather than a folder.
 - **transport**: Execution hosts can now open a stream to a Unix domain socket on the target machine, over SSH as well as locally. This is groundwork for reaching a container runtime that listens on a socket rather than a port, and has no effect on its own yet.
 - **transport**: Both execution hosts now key their binary lookup cache on a separator that no binary name can contain, so two different candidate lists can no longer share an entry. One of them held that separator as a raw null byte in the source file, which made the file read as binary to `grep` and every other text tool.
 - **backup**: Directory backups can now record a file's permissions and owner, and hand them back to the restore target. Nothing records them yet, and an archive that carries none restores exactly as before, so no existing job changes. This is what will let a restored container volume be usable by the program that owns it, since a data directory with the wrong owner stops PostgreSQL, MySQL and Redis from starting.
@@ -29,6 +32,8 @@ All notable changes to DBackup are documented here.
 
 ### 🧪 Tests
 
+- **backup**: The messages a Docker volume backup writes into the run history are covered, including the crash-consistency warning and the recovery of an interrupted run - both of which reached nobody before.
+- **jobs**: The flat directory picker is covered: no expand control, and the select-all checkbox produces one row per volume rather than a single unusable root row.
 - **docker**: The volume adapter is covered against a real Docker daemon, including the full round trip - collect a volume, restore it, and check the permissions and owners that come back - and the same round trip over SSH, which is the only automated coverage of a Unix socket carried through an SSH channel.
 - **transport**: Socket connections are covered for both execution hosts, including that a forwarding channel does not compete with command channels for the SSH session limit, and that a server refusing to forward reports which setting to change.
 - **backup**: The new collection grouping is covered on its own, including the case it exists to prevent: an adapter that leaves a source out of its plan fails the job before anything is collected, rather than producing a backup that reports success with a directory missing from it.

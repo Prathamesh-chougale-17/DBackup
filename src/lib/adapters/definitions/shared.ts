@@ -43,6 +43,20 @@ export type AdapterDefinition = {
      * the role picker runs in the browser, and definitions are plain data.
      */
     supportedRoles?: readonly StorageRole[];
+    /**
+     * Storage only: this adapter's browse has no level below its root.
+     *
+     * A Docker volume is a name, not a folder - there is nothing to expand into. The picker
+     * would otherwise show an expand control at every row that reveals "No subfolders", and
+     * offer a "back up everything" checkbox that stores a root path the adapter cannot read.
+     */
+    flatBrowse?: true;
+    /**
+     * Storage only: what one browsable item is called, singular. Defaults to "folder".
+     *
+     * Used for the picker's own wording, so a volume list does not talk about folders.
+     */
+    browseNoun?: string;
 }
 
 // Validation: Reject paths with null bytes or obvious shell injection patterns

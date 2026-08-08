@@ -44,7 +44,7 @@ A process that can talk to the Docker socket can start containers, and a contain
 3. For **SSH**, pick an `SSH_KEY` credential profile and enter the host. For **Direct**, leave the socket path empty unless it is somewhere unusual.
 4. Click **Test Connection**. It reports the Docker version and how many volumes it can see.
 5. Save, then open or create a job.
-6. Under **Directory Sources**, pick this adapter and click the folder button. It lists the volumes on that host - tick the ones to back up.
+6. Under **Directory Sources**, pick this adapter and click the volume button. It lists the volumes on that host - tick the ones to back up, or use **Every volume on this host** to tick them all. Each ticked volume becomes its own row with its own settings, and a volume created later is not swept in automatically.
 7. Optionally expand a source row to set **Stop containers while reading** and exclude patterns.
 
 ## How It Works
@@ -55,7 +55,9 @@ A volume cannot be read from outside a container, so DBackup mounts the ones it 
 
 **Stopping is per source and optional.** With it off, the volume is read while it is being written to, which makes the backup exactly as consistent as one taken during a power cut - fine for uploads or static files, not for a database.
 
-**If a run is killed** while containers are down - the process is force-terminated, the machine reboots - the next run finds what it left behind and starts them again. That state is written onto the Docker host itself rather than kept in memory, which is what makes the recovery possible at all.
+**If a run is killed** while containers are down - the process is force-terminated, the machine reboots - the next run finds what it left behind and starts them again, and says which containers those were. That state is written onto the Docker host itself rather than kept in memory, which is what makes the recovery possible at all.
+
+**The run history shows all of it**: which containers were stopped and started again, which helper container the volume was read through and from which image, and - when a source is set not to stop its containers - that the resulting backup is crash-consistent rather than clean.
 
 Permissions, owners and symbolic links inside a volume are carried into the backup and put back on restore.
 

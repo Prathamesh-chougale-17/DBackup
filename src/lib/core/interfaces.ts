@@ -594,6 +594,16 @@ export interface SnapshotOptions {
      * where half the sources allow it and half do not.
      */
     stopContainers?: boolean;
+    /**
+     * Writes into the run's execution log.
+     *
+     * Preparing a source can be the most consequential thing a backup does - stopping a
+     * database, emptying nothing but touching everything, discovering that an earlier run
+     * left services down. Without this the adapter could only talk to the server console,
+     * so none of it reached the history someone actually reads. Same shape as the callback
+     * `downloadDirectory`, `upload` and `openSession` already take.
+     */
+    onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void;
 }
 
 export interface SnapshotHandle {
@@ -607,6 +617,15 @@ export interface SnapshotHandle {
     configOverride: Record<string, unknown>;
     /** Human-readable location, for the execution log. */
     label: string;
+    /**
+     * What this kind of snapshot is called, for the runner's own log lines. Defaults to
+     * "snapshot".
+     *
+     * A shadow copy and a helper container are not the same thing, and a log that calls one
+     * by the other's name is worse than a vague one. SMB says "shadow copy" and reads
+     * exactly as it always has; a container runtime says "helper container".
+     */
+    noun?: string;
 }
 
 export interface StorageAdapter extends BaseAdapter {
@@ -792,8 +811,18 @@ export interface StorageAdapter extends BaseAdapter {
         options?: SnapshotOptions
     ): Promise<SnapshotHandle>;
 
-    /** Releases a snapshot. Must tolerate one that is already gone. */
-    releaseSnapshot?(config: AdapterConfig, handle: SnapshotHandle): Promise<void>;
+    /**
+     * Releases a snapshot. Must tolerate one that is already gone.
+     *
+     * `onLog` is separate from the create side's because a release happens twice: once when
+     * the group is done, and once more from cleanup if that failed. Both want to say what
+     * they undid, and the second one no longer has the options object.
+     */
+    releaseSnapshot?(
+        config: AdapterConfig,
+        handle: SnapshotHandle,
+        onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
+    ): Promise<void>;
 
     /**
      * Finds snapshots this adapter left behind on the server, so a run killed before it

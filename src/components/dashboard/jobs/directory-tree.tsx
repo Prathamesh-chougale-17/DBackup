@@ -33,6 +33,17 @@ interface DirectoryTreeProps {
     onRowsChange: (rows: DirectoryTreeRow[]) => void;
     /** Renders the per-root panel (exclude pattern editing) below a checked/indeterminate root-level row. */
     renderRootPanel?: (row: DirectoryTreeRow, onChange: (patch: Partial<DirectoryTreeRow>) => void) => ReactNode;
+    /**
+     * This adapter has no level below its root - a Docker volume is a name, not a folder.
+     *
+     * Drops the expand controls, which would only ever reveal "No subfolders", and turns the
+     * top row from "back up this adapter's root" into "tick every one of them". The root
+     * path is not a thing an adapter like this can read, so selecting it has to mean
+     * selecting the items instead.
+     */
+    flat?: boolean;
+    /** What one item is called, singular. Only used for wording. */
+    itemNoun?: string;
 }
 
 function isAtOrUnder(candidate: string, base: string): boolean {
@@ -59,7 +70,14 @@ function relativeTo(path: string, base: string): string {
  * so this same mechanism handles both hydrating an existing job's selection and every
  * subsequent live edit.
  */
-export function DirectoryTree({ configId, rows, onRowsChange, renderRootPanel }: DirectoryTreeProps) {
+export function DirectoryTree({
+    configId,
+    rows,
+    onRowsChange,
+    renderRootPanel,
+    flat = false,
+    itemNoun = "folder",
+}: DirectoryTreeProps) {
     const [nodesByKey, setNodesByKey] = useState<Map<string, TreeNodeInfo>>(new Map());
     const [childrenByKey, setChildrenByKey] = useState<Map<string, string[] | "loading">>(new Map());
     const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
@@ -206,7 +224,34 @@ export function DirectoryTree({ configId, rows, onRowsChange, renderRootPanel }:
         toggleAtPath(path);
     }, [reconstructPath, toggleAtPath]);
 
-    const toggleRoot = useCallback(() => toggleAtPath(""), [toggleAtPath]);
+    /**
+     * The top row.
+     *
+     * For a tree it stores the adapter's root as one row, and everything under it comes
+     * along. For a flat adapter that path is not readable - a Docker volume source with an
+     * empty name would mount nothing - so here it means "tick them all", producing exactly
+     * the rows you would get by clicking each one. A volume created later is then not
+     * silently swept in, which for a backup is the safer direction.
+     */
+    const toggleRoot = useCallback(() => {
+        if (!flat) {
+            toggleAtPath("");
+            return;
+        }
+        const names = (childrenByKey.get("") === "loading" ? [] : (childrenByKey.get("") ?? []) as string[])
+            .map((key) => nodesByKey.get(key)?.name)
+            .filter((name): name is string => !!name);
+        const allSelected = names.length > 0 && names.every((name) => rows.some((r) => r.path === name));
+
+        onRowsChange(allSelected
+            ? rows.filter((r) => !names.includes(r.path))
+            : [
+                ...rows,
+                ...names
+                    .filter((name) => !rows.some((r) => r.path === name))
+                    .map((name) => ({ path: name, excludePatterns: [], excludePatternPresetIds: [] })),
+            ]);
+    }, [flat, toggleAtPath, childrenByKey, nodesByKey, rows, onRowsChange]);
 
     const handleExpandToggle = useCallback((key: string) => {
         setExpandedKeys((prev) => {
@@ -245,19 +290,27 @@ export function DirectoryTree({ configId, rows, onRowsChange, renderRootPanel }:
                     )}
                     style={{ paddingLeft: depth * 24 + 8 }}
                 >
-                    <button
-                        type="button"
-                        className="p-0.5 rounded hover:bg-muted shrink-0"
-                        onClick={() => handleExpandToggle(key)}
-                    >
-                        {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                    </button>
+                    {flat ? (
+                        // The spacer keeps the checkboxes aligned with the row above, which
+                        // still has to sit where the expand control used to.
+                        <span className="w-5 h-4 shrink-0" />
+                    ) : (
+                        <button
+                            type="button"
+                            className="p-0.5 rounded hover:bg-muted shrink-0"
+                            onClick={() => handleExpandToggle(key)}
+                        >
+                            {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                        </button>
+                    )}
                     <Checkbox
                         className="size-4.5"
                         checked={state === "indeterminate" ? "indeterminate" : state === "checked"}
                         onCheckedChange={() => toggleNode(key)}
                     />
-                    <Folder className="h-4.5 w-4.5 text-amber-500 shrink-0" />
+                    {flat
+                        ? <HardDrive className="h-4.5 w-4.5 text-muted-foreground shrink-0" />
+                        : <Folder className="h-4.5 w-4.5 text-amber-500 shrink-0" />}
                     <span className="text-sm truncate flex-1">{info.name}</span>
                     {isRoot && renderRootPanel && (
                         <button
@@ -293,7 +346,18 @@ export function DirectoryTree({ configId, rows, onRowsChange, renderRootPanel }:
         );
     };
 
-    const rootState = getNodeState("");
+    const flatNames = flat
+        ? ((childrenByKey.get("") === "loading" ? [] : (childrenByKey.get("") ?? []) as string[])
+            .map((key) => nodesByKey.get(key)?.name)
+            .filter((name): name is string => !!name))
+        : [];
+    const flatSelected = flatNames.filter((name) => rows.some((r) => r.path === name)).length;
+    // Derived from the items rather than from a stored root row, because for a flat adapter
+    // there is no root row - the checkbox describes a selection, not a path.
+    const rootState = flat
+        ? (flatSelected === 0 ? "unchecked" : flatSelected === flatNames.length ? "checked" : "indeterminate")
+        : getNodeState("");
+
     const rootRow = (
         <div
             className={cn(
@@ -309,7 +373,11 @@ export function DirectoryTree({ configId, rows, onRowsChange, renderRootPanel }:
                 onCheckedChange={toggleRoot}
             />
             <HardDrive className="h-4.5 w-4.5 text-muted-foreground shrink-0" />
-            <span className="text-sm font-medium flex-1">Back up everything (this adapter&apos;s root)</span>
+            <span className="text-sm font-medium flex-1">
+                {flat
+                    ? `Every ${itemNoun} on this host`
+                    : "Back up everything (this adapter's root)"}
+            </span>
         </div>
     );
 

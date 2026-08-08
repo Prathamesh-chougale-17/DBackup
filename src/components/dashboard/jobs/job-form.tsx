@@ -12,7 +12,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
-import { Lock, History, ChevronsUpDown, Plus, Trash2, ChevronDown, ChevronRight, Database, Info, Loader2, FileText, CalendarClock, Pencil, FolderInput, FolderOpen, Filter, type LucideIcon } from "lucide-react";
+import { Lock, History, ChevronsUpDown, Plus, Trash2, ChevronDown, ChevronRight, Database, Info, Loader2, FileText, CalendarClock, Pencil, FolderInput, FolderOpen, HardDrive, Filter, type LucideIcon } from "lucide-react";
+import { ADAPTER_DEFINITIONS } from "@/lib/adapters/definitions";
 import { SchedulePicker } from "./schedule-picker";
 import { RetentionPolicyPicker, DEFAULT_RETENTION_SENTINEL } from "@/components/templates/retention-policy-picker";
 import { NamingTemplatePicker } from "@/components/templates/naming-template-picker";
@@ -1653,8 +1654,14 @@ function DirectorySourceRow({ index, form, directorySourceOptions, isExpanded, o
     const excludePatternPresetIds: string[] = form.watch(`directorySources.${index}.excludePatternPresetIds`) || [];
     // Only an adapter that stops something has anything to say about stopping it. Named the
     // same way the connection form decides which adapter-specific panels to render.
-    const isDockerVolume = currentAdapter?.adapterId === "docker-volume";
-    const stopsContainers = isDockerVolume;
+    // How this adapter's browse behaves, declared on the definition rather than guessed
+    // from its id - the next adapter with a flat list should work without touching this.
+    const definition = ADAPTER_DEFINITIONS.find((d) => d.id === currentAdapter?.adapterId);
+    const browseShape = {
+        flat: definition?.flatBrowse === true,
+        noun: definition?.browseNoun ?? "folder",
+    };
+    const stopsContainers = currentAdapter?.adapterId === "docker-volume";
 
     return (
         <div className="border rounded-lg">
@@ -1715,7 +1722,7 @@ function DirectorySourceRow({ index, form, directorySourceOptions, isExpanded, o
                     <FormItem className="flex-1 space-y-0">
                         <FormControl>
                             <Input
-                                placeholder={isDockerVolume ? "volume-name" : "/path/to/directory"}
+                                placeholder={browseShape.flat ? `${browseShape.noun}-name` : "/path/to/directory"}
                                 className="h-9"
                                 {...field}
                             />
@@ -1730,12 +1737,12 @@ function DirectorySourceRow({ index, form, directorySourceOptions, isExpanded, o
                     size="sm"
                     className="h-9 px-2"
                     title={currentAdapter?.supportsBrowse
-                        ? (isDockerVolume ? "Load volumes from this host" : "Browse folders")
+                        ? (browseShape.flat ? `Pick ${browseShape.noun}s on this host` : "Browse folders")
                         : "Select an adapter that supports browsing first"}
                     disabled={!currentAdapter?.supportsBrowse}
                     onClick={() => setBrowseOpen(true)}
                 >
-                    <FolderOpen className="h-4 w-4" />
+                    {browseShape.flat ? <HardDrive className="h-4 w-4" /> : <FolderOpen className="h-4 w-4" />}
                 </Button>
 
                 <Button
@@ -1854,6 +1861,8 @@ function DirectorySourceRow({ index, form, directorySourceOptions, isExpanded, o
                         .filter((s) => s.configId === currentAdapter.id)
                         .map((s) => ({ path: s.path, excludePatterns: s.excludePatterns ?? [], excludePatternPresetIds: s.excludePatternPresetIds ?? [] }))}
                     onConfirm={(rows) => onSync(currentAdapter.id, rows)}
+                    flat={browseShape.flat}
+                    itemNoun={browseShape.noun}
                 />
             )}
         </div>
@@ -1868,6 +1877,9 @@ interface DirectoryBrowseDialogProps {
     /** Every directorySources row currently configured for this adapter, regardless of which row's "Browse" button opened the dialog. */
     initialRows: DirectoryTreeRow[];
     onConfirm: (rows: DirectoryTreeRow[]) => void;
+    /** This adapter has nothing below its root - see DirectoryTree. */
+    flat?: boolean;
+    itemNoun?: string;
 }
 
 /**
@@ -1881,7 +1893,7 @@ interface DirectoryBrowseDialogProps {
  * the path field renders something meaningful and passes the required-path validation. Translated
  * at this boundary only.
  */
-function DirectoryBrowseDialog({ open, onOpenChange, configId, adapterName, initialRows, onConfirm }: DirectoryBrowseDialogProps) {
+function DirectoryBrowseDialog({ open, onOpenChange, configId, adapterName, initialRows, onConfirm, flat, itemNoun }: DirectoryBrowseDialogProps) {
     const [rows, setRows] = useState<DirectoryTreeRow[]>([]);
 
     useEffect(() => {
@@ -1907,7 +1919,7 @@ function DirectoryBrowseDialog({ open, onOpenChange, configId, adapterName, init
                 <ScrollArea className="flex-1 min-h-0">
                     <div className="p-4">
                         {open && (
-                            <DirectoryTree key={configId} configId={configId} rows={rows} onRowsChange={setRows} />
+                            <DirectoryTree key={configId} configId={configId} rows={rows} onRowsChange={setRows} flat={flat} itemNoun={itemNoun} />
                         )}
                     </div>
                 </ScrollArea>

@@ -11,9 +11,21 @@ import type { ContainerInfo, DockerEngine } from "./engine/types";
 type Log = (message: string, level?: "info" | "warning" | "error") => void;
 
 /**
+ * A container this run took down, and has to put back.
+ *
+ * The name travels with the id because that is what a person reads. An id is what Docker
+ * needs; "Started container 'a49343f55d83' again" tells an operator nothing about which of
+ * their services was down.
+ */
+export interface StoppedContainer {
+    id: string;
+    name: string;
+}
+
+/**
  * Stops every running container in the list and reports which ones were stopped.
  *
- * Only the returned ids are ever started again. A container that was already down is left
+ * Only the returned ones are ever started again. A container that was already down is left
  * out, which is what stops a backup from starting something the user had switched off.
  *
  * A failure to stop is fatal for the group: reading a volume out from under a running
@@ -24,15 +36,15 @@ export async function stopRunning(
     engine: DockerEngine,
     containers: readonly ContainerInfo[],
     log: Log
-): Promise<string[]> {
+): Promise<StoppedContainer[]> {
     const running = containers.filter((container) => container.running);
     if (running.length === 0) return [];
 
-    const stopped: string[] = [];
+    const stopped: StoppedContainer[] = [];
     try {
         for (const container of running) {
             await engine.stopContainer(container.id);
-            stopped.push(container.id);
+            stopped.push({ id: container.id, name: container.name });
             log(`Stopped container '${container.name}'`);
         }
     } catch (e: unknown) {
@@ -54,17 +66,18 @@ export async function stopRunning(
  */
 export async function startAll(
     engine: DockerEngine,
-    containerIds: readonly string[],
+    containers: readonly StoppedContainer[],
     log: Log
 ): Promise<void> {
-    for (const id of containerIds) {
+    for (const container of containers) {
+        const label = container.name || short(container.id);
         try {
-            await engine.startContainer(id);
-            log(`Started container '${short(id)}' again`);
+            await engine.startContainer(container.id);
+            log(`Started container '${label}' again`);
         } catch (e: unknown) {
             const message = e instanceof Error ? e.message : String(e);
             log(
-                `Could not start container '${short(id)}' again: ${message}. It was running before this backup and has to be started by hand.`,
+                `Could not start container '${label}' again: ${message}. It was running before this backup and has to be started by hand.`,
                 "error"
             );
         }

@@ -16,6 +16,7 @@
 
 import { randomUUID } from "node:crypto";
 import { connectDocker, type DockerConnection } from "./engine/connect";
+import type { StoppedContainer } from "./containers";
 import type { DockerEngine } from "./engine/types";
 
 export interface DockerSession {
@@ -24,7 +25,7 @@ export interface DockerSession {
     /** Helper container holding this group's volumes, as `/vol/<name>`. */
     readonly containerId: string;
     /** Containers this session stopped and therefore has to start again. */
-    readonly stoppedContainerIds: readonly string[];
+    readonly stoppedContainers: readonly StoppedContainer[];
     readonly volumes: readonly string[];
     /**
      * Files per volume, for the progress denominator. Null when the helper could not be run

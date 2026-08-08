@@ -15,6 +15,8 @@ import os from "os";
 import type { ChainPlan } from "@/services/backup/chain-planner";
 import type { RunnerContext, DirectorySourceContext } from "../types";
 import type { IndexFileLine } from "@/lib/archive/types";
+import type { SnapshotHandle } from "@/lib/core/interfaces";
+import type { LogLevel, LogType } from "@/lib/core/logs";
 import { ArchiveSourceEntry, FileMetadata, SourceFileEntry } from "@/lib/archive/types";
 import { downloadDirectory } from "@/lib/adapters/storage/common/download-directory";
 import { fileKey } from "@/lib/archive/chain";
@@ -36,6 +38,9 @@ const HASH_CONCURRENCY = Math.max(2, Math.min(8, os.cpus().length || 4));
 
 /** How often the hashing phase refreshes its progress text. */
 const HASH_PROGRESS_EVERY = 25;
+
+/** What an adapter is handed to write into the run's log. Same shape as everywhere else. */
+type SnapshotLog = (msg: string, level?: LogLevel, type?: LogType, details?: string) => void;
 
 export interface CollectDirectoriesInput {
     ctx: RunnerContext;
@@ -76,10 +81,21 @@ export async function collectDirectories(input: CollectDirectoriesInput): Promis
     const groups = await planCollectionGroups(ctx.sources);
 
     let dirDone = 0;
-    for (const group of groups) {
-        // Checked before the snapshot, so a cancelled run never creates a shadow copy it
-        // then has to release.
+    for (const [index, group] of groups.entries()) {
+        // Checked before the snapshot, so a cancelled run never creates a snapshot it then
+        // has to release.
         ctx.abortSignal?.throwIfAborted();
+
+        // Only the runner knows how the run is carved up, so it says so. Which containers a
+        // group takes down and what it reads through is the adapter's story, told below.
+        // Said only when there is more than one, since "Group 1 of 1" is noise.
+        if (groups.length > 1) {
+            ctx.log(
+                `[${group.sources[0].configName}] Group ${index + 1} of ${groups.length}: `
+                + group.sources.map((s) => s.remotePath || "/").join(", "),
+                'info', 'storage'
+            );
+        }
 
         const prepared = await acquireGroupSnapshot(ctx, group);
         try {
@@ -349,16 +365,27 @@ async function acquireGroupSnapshot(ctx: RunnerContext, group: CollectionGroup):
     const displayPath = source.remotePath || "/";
     const logPrefix = `[Directory: ${displayPath} via ${source.configName}]`;
 
+    // What this adapter's preparation is called. A shadow copy and a helper container are
+    // not the same thing, and a log that calls one by the other's name is worse than a vague
+    // one. Only known once a handle exists, so the pre-create lines stay generic.
+    const nounOf = (handle?: SnapshotHandle) => handle?.noun ?? "snapshot";
+
+    // The adapter's own voice in the execution log. Preparing a source is often the most
+    // consequential thing a backup does - stopping a database, finding services an earlier
+    // run left down - and without this none of it reached the history.
+    const say: SnapshotLog = (msg, level, type, details) =>
+        ctx.log(`${logPrefix} ${msg}`, level, type ?? 'storage', details);
+
     const wanted = adapter.alwaysSnapshot === true || config?.useVss === true;
     if (!wanted) return { readConfig: config, release: async () => { } };
 
     if (!adapter.createSnapshot || !adapter.supportsSnapshot || !adapter.releaseSnapshot) {
-        throw new Error(`${source.configName}: shadow copies are enabled but adapter '${adapter.id}' cannot create them`);
+        throw new Error(`${source.configName}: this source has to be read from a snapshot, but adapter '${adapter.id}' cannot create one`);
     }
 
     const support = await adapter.supportsSnapshot(config, source.remotePath);
     if (!support.supported) {
-        throw new Error(`${source.configName}: shadow copies are enabled but unavailable - ${support.message}`);
+        throw new Error(`${source.configName}: this source has to be read from a snapshot, which is unavailable - ${support.message}`);
     }
 
     // A run killed before cleanup leaves its snapshot behind, and the server refuses a new
@@ -366,9 +393,9 @@ async function acquireGroupSnapshot(ctx: RunnerContext, group: CollectionGroup):
     if (adapter.findOrphanedSnapshots) {
         const orphans = await adapter.findOrphanedSnapshots(config, source.remotePath).catch(() => []);
         for (const orphan of orphans) {
-            ctx.log(`${logPrefix} Removing a shadow copy left over from an earlier run (${orphan.label})`, 'warning', 'storage');
-            await adapter.releaseSnapshot(config, orphan).catch((e: unknown) => {
-                ctx.log(`${logPrefix} Could not remove the leftover shadow copy: ${e instanceof Error ? e.message : String(e)}`, 'warning', 'storage');
+            ctx.log(`${logPrefix} Removing a ${nounOf(orphan)} left over from an earlier run (${orphan.label})`, 'warning', 'storage');
+            await adapter.releaseSnapshot(config, orphan, say).catch((e: unknown) => {
+                ctx.log(`${logPrefix} Could not remove the leftover ${nounOf(orphan)}: ${e instanceof Error ? e.message : String(e)}`, 'warning', 'storage');
             });
         }
     }
@@ -378,7 +405,7 @@ async function acquireGroupSnapshot(ctx: RunnerContext, group: CollectionGroup):
     const handle = await adapter.createSnapshot(
         config,
         group.sources.map((s) => s.remotePath),
-        { stopContainers: source.stopContainers ?? true },
+        { stopContainers: source.stopContainers ?? true, onLog: say },
     );
 
     const record = {
@@ -391,22 +418,22 @@ async function acquireGroupSnapshot(ctx: RunnerContext, group: CollectionGroup):
     };
     ctx.shadowCopies = ctx.shadowCopies ?? [];
     ctx.shadowCopies.push(record);
-    ctx.log(`${logPrefix} Reading from shadow copy ${handle.label}`, 'info', 'storage');
+    ctx.log(`${logPrefix} Reading from ${nounOf(handle)} ${handle.label}`, 'info', 'storage');
 
     return {
         readConfig: { ...config, ...handle.configOverride },
         release: async () => {
             if (record.released) return;
             try {
-                await adapter.releaseSnapshot!(config, handle);
+                await adapter.releaseSnapshot!(config, handle, say);
                 // Only a release that worked counts. A failed one stays unmarked so
                 // stepCleanup tries again at the end of the run.
                 record.released = true;
-                ctx.log(`[${source.configName}] Shadow copy released`, 'info', 'storage');
+                ctx.log(`${logPrefix} Released the ${nounOf(handle)}`, 'info', 'storage');
             } catch (e: unknown) {
                 const message = e instanceof Error ? e.message : String(e);
                 ctx.log(
-                    `${logPrefix} Could not release the shadow copy yet (${handle.label}): ${message}. Retrying at the end of the run.`,
+                    `${logPrefix} Could not release the ${nounOf(handle)} yet (${handle.label}): ${message}. Retrying at the end of the run.`,
                     'warning', 'storage'
                 );
             }

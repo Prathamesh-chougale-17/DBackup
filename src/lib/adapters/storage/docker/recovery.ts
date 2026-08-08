@@ -13,7 +13,7 @@
 
 import type { DockerEngine } from "./engine/types";
 import { startAll } from "./containers";
-import { TEMP_CONTAINER_LABEL, stoppedContainersFrom } from "./labels";
+import { TEMP_CONTAINER_LABEL, stoppedContainersFrom, type LabelledContainer } from "./labels";
 import { isLiveContainer } from "./session";
 
 type Log = (message: string, level?: "info" | "warning" | "error") => void;
@@ -21,7 +21,7 @@ type Log = (message: string, level?: "info" | "warning" | "error") => void;
 export interface OrphanedHelper {
     containerId: string;
     /** Containers the dead run had stopped, read back off the helper's labels. */
-    stoppedContainerIds: string[];
+    stoppedContainers: LabelledContainer[];
     label: string;
 }
 
@@ -38,7 +38,7 @@ export async function findOrphanedHelpers(engine: DockerEngine): Promise<Orphane
         .filter((container) => !isLiveContainer(container.id))
         .map((container) => ({
             containerId: container.id,
-            stoppedContainerIds: stoppedContainersFrom(container.labels),
+            stoppedContainers: stoppedContainersFrom(container.labels),
             label: `helper container ${container.id.slice(0, 12)}`,
         }));
 }
@@ -55,12 +55,17 @@ export async function releaseOrphanedHelper(
     orphan: OrphanedHelper,
     log: Log
 ): Promise<void> {
-    if (orphan.stoppedContainerIds.length > 0) {
+    if (orphan.stoppedContainers.length > 0) {
+        // Named, not counted. This is the one message that tells an operator their services
+        // were down between two runs, and "3 container(s)" leaves them to work out which.
+        const names = orphan.stoppedContainers
+            .map((c) => c.name || c.id.slice(0, 12))
+            .join(", ");
         log(
-            `Found ${orphan.label} from an interrupted run, with ${orphan.stoppedContainerIds.length} container(s) it had stopped. Starting them again.`,
+            `Found ${orphan.label} from an interrupted run. It had stopped ${names} - starting them again.`,
             "warning"
         );
-        await startAll(engine, orphan.stoppedContainerIds, log);
+        await startAll(engine, orphan.stoppedContainers, log);
     }
     await engine.removeMountContainer(orphan.containerId);
 }

@@ -8,8 +8,9 @@
  */
 
 import type { SnapshotHandle, SnapshotOptions } from "@/lib/core/interfaces";
+import type { LogLevel, LogType } from "@/lib/core/logs";
 import { logger } from "@/lib/logging/logger";
-import { startAll, stopRunning } from "./containers";
+import { startAll, stopRunning, type StoppedContainer } from "./containers";
 import type { ContainerInfo, DockerEngine } from "./engine/types";
 import { planVolumeGroups } from "./grouping";
 import { findOrphanedHelpers, releaseOrphanedHelper } from "./recovery";
@@ -26,14 +27,27 @@ const log = logger.child({ adapter: "docker-volume" });
 
 const DEFAULT_HELPER_IMAGE = "alpine:latest";
 
-/** Routes the adapter's own progress into the execution log the same way as elsewhere. */
 type Log = (message: string, level?: "info" | "warning" | "error") => void;
 
-const toLog: Log = (message, level) => {
-    if (level === "error") log.error(message);
-    else if (level === "warning") log.warn(message);
-    else log.info(message);
-};
+/** What the runner hands in so the adapter can write into the run's own history. */
+type ExecutionLog = (msg: string, level?: LogLevel, type?: LogType, details?: string) => void;
+
+/**
+ * Says something into the run's history, and into the server log as well.
+ *
+ * Both, deliberately: the history is what an operator reads after the fact, the server log
+ * is what someone debugging a broken host reads while it happens. Until the runner started
+ * handing a callback in, this only had the second - so "your containers were left stopped by
+ * an earlier run" and "this backup is only crash-consistent" reached nobody who needed them.
+ */
+function sayVia(onLog?: ExecutionLog): Log {
+    return (message, level) => {
+        if (level === "error") log.error(message);
+        else if (level === "warning") log.warn(message);
+        else log.info(message);
+        onLog?.(message, level ?? "info", "storage");
+    };
+}
 
 /**
  * Answers without a round trip, deliberately.
@@ -69,15 +83,16 @@ export async function createDockerSnapshot(
     volumes: string[],
     options?: SnapshotOptions
 ): Promise<SnapshotHandle> {
+    const say = sayVia(options?.onLog);
     const connection = openConnection(config);
     const engine = connection.engine;
     const helperImage = typeof config.helperImage === "string" && config.helperImage.length > 0
         ? config.helperImage
         : DEFAULT_HELPER_IMAGE;
 
-    let stopped: string[] = [];
+    let stopped: StoppedContainer[] = [];
     try {
-        await clearOrphans(engine);
+        await clearOrphans(engine, say);
 
         // Every container holding any of the group's volumes. Deduplicated because that is
         // the point of the grouping - a container holding two of them appears twice here.
@@ -85,24 +100,30 @@ export async function createDockerSnapshot(
 
         if (options?.stopContainers === false) {
             if (holders.some((c) => c.running)) {
-                toLog(
+                say(
                     `Reading ${volumes.join(", ")} while its container(s) keep running, because this source is set not to stop them. `
                     + `The backup is crash-consistent, not clean.`,
                     "warning"
                 );
             }
+        } else if (holders.length === 0) {
+            // Worth saying rather than staying silent: nothing was stopped because nothing
+            // was holding it, which reads very differently from nothing being stopped
+            // because the option was off.
+            say(`No container is using ${volumes.join(", ")}, so nothing had to be stopped`);
         } else {
-            stopped = await stopRunning(engine, holders, toLog);
+            stopped = await stopRunning(engine, holders, say);
         }
 
         const containerId = await createHelper(engine, volumes, helperImage, sessionLabel(volumes), stopped);
+        say(`Reading through helper container '${short(containerId)}' (${helperImage})`);
 
         // Costs a few percent of the export it describes, and buys a real "x of y" instead
         // of a number ticking up against nothing. Null when the helper could not be run,
         // which is a nicety lost rather than a backup failed.
         const entryCounts = await engine.countEntriesPerVolume(containerId);
         if (!entryCounts) {
-            toLog(
+            say(
                 `Could not count the files in ${volumes.join(", ")} beforehand, so progress will show a running count without a total. `
                 + `The backup itself is unaffected.`,
                 "warning"
@@ -110,19 +131,21 @@ export async function createDockerSnapshot(
         }
 
         const session = registerSession(
-            { engine, containerId, stoppedContainerIds: stopped, volumes, entryCounts },
+            { engine, containerId, stoppedContainers: stopped, volumes, entryCounts },
             connection
         );
 
         return {
             id: containerId,
             configOverride: { [SESSION_CONFIG_KEY]: session.id },
-            label: `helper container for ${volumes.join(", ")}`,
+            // Kept short because the runner puts its own noun in front of it.
+            label: `'${short(containerId)}'`,
+            noun: "helper container",
         };
     } catch (e: unknown) {
         // Anything already stopped comes back before the failure leaves this function. The
         // helper does not exist yet on this path, so there is nothing else to undo.
-        await startAll(engine, stopped, toLog);
+        await startAll(engine, stopped, say);
         await connection.close().catch(() => { });
         throw e;
     }
@@ -137,8 +160,10 @@ export async function createDockerSnapshot(
  */
 export async function releaseDockerSnapshot(
     config: Record<string, unknown>,
-    handle: SnapshotHandle
+    handle: SnapshotHandle,
+    onLog?: ExecutionLog
 ): Promise<void> {
+    const say = sayVia(onLog);
     const sessionId = handle.configOverride?.[SESSION_CONFIG_KEY];
     const session = typeof sessionId === "string" ? getSession(sessionId) : undefined;
 
@@ -146,10 +171,12 @@ export async function releaseDockerSnapshot(
         try {
             // Helper first, then the containers: the helper holds nothing anyone is waiting
             // for, while a container left down is the failure that matters.
-            await removeHelper(session.engine, session.containerId).catch((e: unknown) => {
-                toLog(`Could not remove the helper container: ${describe(e)}. It will be cleaned up by the next run.`, "warning");
-            });
-            await startAll(session.engine, session.stoppedContainerIds, toLog);
+            await removeHelper(session.engine, session.containerId)
+                .then(() => say(`Removed helper container '${short(session.containerId)}'`))
+                .catch((e: unknown) => {
+                    say(`Could not remove the helper container: ${describe(e)}. It will be cleaned up by the next run.`, "warning");
+                });
+            await startAll(session.engine, session.stoppedContainers, say);
         } finally {
             await disposeSession(sessionId as string);
         }
@@ -163,7 +190,7 @@ export async function releaseDockerSnapshot(
         const orphans = await findOrphanedHelpers(connection.engine);
         const match = orphans.find((o) => o.containerId === handle.id);
         if (!match) return;
-        await releaseOrphanedHelper(connection.engine, match, toLog);
+        await releaseOrphanedHelper(connection.engine, match, say);
     } finally {
         await connection.close().catch(() => { });
     }
@@ -205,13 +232,18 @@ export async function findOrphanedDockerSnapshots(
  * only when the runner happens to ask. Failing here does not fail the backup: a leftover
  * helper is harmless, and the containers it recorded are reported either way.
  */
-async function clearOrphans(engine: DockerEngine): Promise<void> {
+async function clearOrphans(engine: DockerEngine, say: Log): Promise<void> {
     const orphans = await findOrphanedHelpers(engine).catch(() => []);
     for (const orphan of orphans) {
-        await releaseOrphanedHelper(engine, orphan, toLog).catch((e: unknown) => {
-            toLog(`Could not clean up ${orphan.label}: ${describe(e)}`, "warning");
+        await releaseOrphanedHelper(engine, orphan, say).catch((e: unknown) => {
+            say(`Could not clean up ${orphan.label}: ${describe(e)}`, "warning");
         });
     }
+}
+
+/** Container ids read as a person would: the short form Docker itself prints. */
+function short(id: string): string {
+    return id.slice(0, 12);
 }
 
 async function containersHolding(engine: DockerEngine, volumes: readonly string[]): Promise<ContainerInfo[]> {

@@ -108,6 +108,15 @@ describe("Docker volume adapter", () => {
         expect(await adapter().browseDirectories!(config, "some-volume")).toEqual([]);
     });
 
+    it("reports an unreachable host when browsing, rather than an empty list", async () => {
+        // These are the two answers a person most needs to tell apart, and returning [] for
+        // both meant "this Docker host cannot be reached" was shown as "it has no volumes".
+        await expect(adapter().browseDirectories!(
+            { connectionMode: "direct", socketPath: "/tmp/definitely-not-a-docker-socket" },
+            "",
+        )).rejects.toThrow(/socket was not found|ENOENT/);
+    });
+
     it("reports a bad socket as a failed test rather than throwing", async () => {
         // The health check runs this every minute and treats a rejection very differently
         // from `{ success: false }` - this is the line between "offline" and a crashed task.

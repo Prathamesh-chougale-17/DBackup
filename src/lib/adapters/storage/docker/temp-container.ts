@@ -11,7 +11,7 @@
  */
 
 import type { DockerEngine } from "./engine/types";
-import { labelsFor } from "./labels";
+import { labelsFor, type LabelledContainer } from "./labels";
 
 /**
  * Volumes appear under `/vol/<name>`, one directory per volume, which is what lets a single
@@ -41,13 +41,13 @@ export async function createHelper(
     volumes: readonly string[],
     image: string,
     sessionId: string,
-    stoppedContainerIds: readonly string[]
+    stoppedContainers: readonly LabelledContainer[]
 ): Promise<string> {
     try {
         // Pulled only when absent. The very first backup on a host would otherwise fail on a
         // missing image, for a setting most people will never touch.
         await engine.ensureImage(image);
-        return await engine.createMountContainer([...volumes], image, labelsFor(sessionId, stoppedContainerIds));
+        return await engine.createMountContainer([...volumes], image, labelsFor(sessionId, stoppedContainers));
     } catch (e: unknown) {
         const message = e instanceof Error ? e.message : String(e);
         // The one requirement of the backup path that is not obvious from the outside, so it

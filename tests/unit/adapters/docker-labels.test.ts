@@ -24,8 +24,15 @@ describe("labelsFor", () => {
         expect(labels[EXECUTION_LABEL]).toBe("exec-1");
     });
 
-    it("records the containers the run stopped", () => {
-        expect(labelsFor("exec-1", ["abc", "def"])[STOPPED_LABEL]).toBe("abc,def");
+    it("records the containers the run stopped, with their names", () => {
+        // The name travels with the id because a later run reads this label to say which
+        // services an interrupted run left down, and an id alone leaves that to the operator.
+        const labels = labelsFor("exec-1", [
+            { id: "abc", name: "web" },
+            { id: "def", name: "db" },
+        ]);
+
+        expect(labels[STOPPED_LABEL]).toBe("abc|web,def|db");
     });
 
     it("writes an empty list rather than omitting it", () => {
@@ -38,7 +45,21 @@ describe("labelsFor", () => {
 
 describe("stoppedContainersFrom", () => {
     it("reads back what labelsFor wrote", () => {
-        expect(stoppedContainersFrom(labelsFor("exec-1", ["abc", "def"]))).toEqual(["abc", "def"]);
+        const written = labelsFor("exec-1", [{ id: "abc", name: "web" }, { id: "def", name: "db" }]);
+
+        expect(stoppedContainersFrom(written)).toEqual([
+            { id: "abc", name: "web" },
+            { id: "def", name: "db" },
+        ]);
+    });
+
+    it("still reads a label written before names were carried", () => {
+        // Such a helper belongs to a run from an older version. Dropping it would leave
+        // exactly the containers that version stopped down for good.
+        expect(stoppedContainersFrom({ [STOPPED_LABEL]: "abc,def" })).toEqual([
+            { id: "abc", name: "" },
+            { id: "def", name: "" },
+        ]);
     });
 
     it("reports nothing for a run that stopped nothing", () => {
@@ -52,6 +73,9 @@ describe("stoppedContainersFrom", () => {
     });
 
     it("survives whitespace and stray separators", () => {
-        expect(stoppedContainersFrom({ [STOPPED_LABEL]: " abc , ,def, " })).toEqual(["abc", "def"]);
+        expect(stoppedContainersFrom({ [STOPPED_LABEL]: " abc|web , ,def, " })).toEqual([
+            { id: "abc", name: "web" },
+            { id: "def", name: "" },
+        ]);
     });
 });
