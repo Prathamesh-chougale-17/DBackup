@@ -188,6 +188,23 @@ export function DirectoryTree({
 
     /** Core toggle logic keyed by an already-resolved path - shared by real tree nodes and the synthetic root row (path=""). */
     const toggleAtPath = useCallback((path: string) => {
+        // A flat adapter has no hierarchy, so none of the tree's machinery below applies:
+        // no root row that owns the others, and no structural `<child>/**` exclude to stand
+        // in for an unticked child. Each item is simply its own row.
+        //
+        // Sharing that machinery was the bug behind two symptoms at once. A leftover root
+        // row made `findOwningRow` claim every volume, so unticking one wrote
+        // `<volume>/**` into that row's exclude patterns instead of removing a row - and the
+        // root row itself was invisible in flat mode, so it could never be unticked and came
+        // back on every save as a `/` source the adapter cannot read.
+        if (flat) {
+            const existing = rows.find((r) => r.path === path);
+            onRowsChange(existing
+                ? rows.filter((r) => r !== existing)
+                : [...rows, { path, excludePatterns: [], excludePatternPresetIds: [] }]);
+            return;
+        }
+
         const state = getNodeState(path);
 
         if (state === "checked") {
@@ -216,7 +233,7 @@ export function DirectoryTree({
                 onRowsChange(rows.map((r) => (r === owningRow ? { ...r, excludePatterns: newExcludes } : r)));
             }
         }
-    }, [getNodeState, findOwningRow, rows, onRowsChange]);
+    }, [flat, getNodeState, findOwningRow, rows, onRowsChange]);
 
     const toggleNode = useCallback((key: string) => {
         const path = reconstructPath(key);

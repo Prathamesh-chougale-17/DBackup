@@ -102,6 +102,58 @@ describe("the picker for a flat adapter", () => {
         expect(rows.find((r) => r.path === "web-config")).toEqual(existing);
     });
 
+    it("removes a row when a volume is unticked, instead of excluding it from another row", async () => {
+        const rows = VOLUMES.map((path) => ({ path, excludePatterns: [], excludePatternPresetIds: [] }));
+        const { onRowsChange } = renderTree(rows);
+        await waitFor(() => expect(screen.getByText("web-config")).toBeTruthy());
+
+        // Index 0 is the top row, so web-config is the third volume in load order.
+        await userEvent.click(screen.getAllByRole("checkbox")[3]);
+
+        const after = onRowsChange.mock.calls.at(-1)![0];
+        expect(after.map((r) => r.path)).toEqual(["app-data", "web-config"]);
+        expect(after.flatMap((r) => r.excludePatterns)).toEqual([]);
+    });
+
+    it("ignores a leftover root row instead of letting it own every volume", async () => {
+        // The actual bug, and it needs the root row to reproduce: the tree stands in for
+        // "not this subfolder" with a `<child>/**` exclude on the row that owns it, and a
+        // row with the empty path owns everything. So unticking one volume wrote the others
+        // into that row's exclude patterns rather than removing a row - and because the root
+        // row has no checkbox of its own in flat mode, it could never be cleared.
+        //
+        // The dialog strips such a row when it opens, but a job saved by an older version
+        // still carries one, so the tree has to be right on its own.
+        const { onRowsChange } = renderTree([
+            { path: "", excludePatterns: [], excludePatternPresetIds: [] },
+            { path: "app-data", excludePatterns: [], excludePatternPresetIds: [] },
+        ]);
+        await waitFor(() => expect(screen.getByText("app-data")).toBeTruthy());
+
+        await userEvent.click(screen.getAllByRole("checkbox")[1]);
+
+        const after = onRowsChange.mock.calls.at(-1)![0];
+        expect(after.flatMap((r) => r.excludePatterns)).toEqual([]);
+        expect(after.map((r) => r.path)).not.toContain("app-data");
+    });
+
+    it("never produces a row for the root itself", async () => {
+        // `/` becomes an empty volume name in the adapter, so a job built that way cannot
+        // run. Neither ticking everything nor ticking each one may create it.
+        const { onRowsChange } = renderTree();
+        await waitFor(() => expect(screen.getByText("app-data")).toBeTruthy());
+
+        await userEvent.click(screen.getAllByRole("checkbox")[0]);
+        for (let i = 1; i <= VOLUMES.length; i++) {
+            await userEvent.click(screen.getAllByRole("checkbox")[i]);
+        }
+
+        for (const call of onRowsChange.mock.calls) {
+            expect(call[0].map((r: { path: string }) => r.path)).not.toContain("");
+            expect(call[0].map((r: { path: string }) => r.path)).not.toContain("/");
+        }
+    });
+
     it("still lets a single volume be picked on its own", async () => {
         const { onRowsChange } = renderTree();
         await waitFor(() => expect(screen.getByText("web-content")).toBeTruthy());

@@ -1898,12 +1898,18 @@ function DirectoryBrowseDialog({ open, onOpenChange, configId, adapterName, init
 
     useEffect(() => {
         if (open) {
-            setRows(initialRows.map((r) => (r.path === "/" ? { ...r, path: "" } : r)));
+            // A flat adapter has no root to select, so a stored root row is dropped rather
+            // than translated. Keeping it made a row the UI could not show and therefore not
+            // untick, which came back on every save as a source the adapter cannot read.
+            const seeded = flat
+                ? initialRows.filter((r) => r.path !== "/" && r.path !== "")
+                : initialRows.map((r) => (r.path === "/" ? { ...r, path: "" } : r));
+            setRows(seeded);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open]);
 
-    const isEverything = rows.length === 1 && rows[0].path === "";
+    const isEverything = !flat && rows.length === 1 && rows[0].path === "";
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
@@ -1911,9 +1917,15 @@ function DirectoryBrowseDialog({ open, onOpenChange, configId, adapterName, init
                 <DialogHeader className="p-4 pb-3 border-b shrink-0">
                     <DialogTitle>Browse {adapterName ?? "Adapter"}</DialogTitle>
                     <DialogDescription>
-                        Check the folders you want to back up, or pick &quot;Back up everything&quot; for the whole adapter. This
-                        reflects every directory source row already configured for {adapterName ?? "this adapter"} - unchecking a
-                        folder removes its row, checking a new one adds one.
+                        {flat
+                            ? `Check the ${itemNoun ?? "item"}s you want to back up. This reflects every directory source row already `
+                            + `configured for ${adapterName ?? "this adapter"} - each one is its own row with its own settings, `
+                            + `so unchecking removes a row and checking adds one.`
+                            : <>
+                                Check the folders you want to back up, or pick &quot;Back up everything&quot; for the whole adapter. This
+                                reflects every directory source row already configured for {adapterName ?? "this adapter"} - unchecking a
+                                folder removes its row, checking a new one adds one.
+                            </>}
                     </DialogDescription>
                 </DialogHeader>
                 <ScrollArea className="flex-1 min-h-0">
@@ -1928,12 +1940,18 @@ function DirectoryBrowseDialog({ open, onOpenChange, configId, adapterName, init
                     <Button
                         type="button"
                         onClick={() => {
-                            onConfirm(rows.map((r) => (r.path === "" ? { ...r, path: "/" } : r)));
+                            // The root convention only exists for a tree. In flat mode no row
+                            // can carry the empty path, so nothing is translated back.
+                            onConfirm(flat ? rows : rows.map((r) => (r.path === "" ? { ...r, path: "/" } : r)));
                             onOpenChange(false);
                         }}
                         disabled={rows.length === 0}
                     >
-                        {isEverything ? "Use Entire Adapter" : rows.length > 1 ? `Use ${rows.length} Selected Folders` : "Use Selected Folder"}
+                        {isEverything
+                            ? "Use Entire Adapter"
+                            : rows.length > 1
+                                ? `Use ${rows.length} Selected ${flat ? `${itemNoun ?? "item"}s` : "Folders"}`
+                                : `Use Selected ${flat ? itemNoun ?? "item" : "Folder"}`}
                     </Button>
                 </DialogFooter>
             </DialogContent>

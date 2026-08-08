@@ -50,7 +50,8 @@ export function connectDocker(
         // of later behaviour - the fallback needs the Docker CLI on the target - and finding
         // that out from a stack trace is an hour nobody should spend.
         onLog?.(
-            `Could not forward the Docker socket, falling back to running the Docker CLI over SSH. ${reason}`
+            `Could not forward the Docker socket, so the Docker CLI on that host is used instead `
+            + `(it runs there, not here). ${reason}`
         );
     });
 

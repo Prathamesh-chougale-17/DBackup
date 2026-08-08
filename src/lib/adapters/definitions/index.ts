@@ -46,10 +46,14 @@ export const ADAPTER_DEFINITIONS: AdapterDefinition[] = [
         // has to mean "tick them all" rather than a root path the adapter cannot mount.
         flatBrowse: true,
         browseNoun: "volume",
-        // A volume is read as one tar stream from a helper container, not file by file, so
-        // there is no per-file round trip to parallelise and nothing for a connection
-        // setting to tune.
-        transferConcurrency: { default: 1, max: 1 },
+        // Reading a volume is one tar stream and ignores this entirely. Writing one is not:
+        // a restore puts each file back with its own API request, so the round trip is the
+        // limit exactly as it is over SFTP - and the same measurement applies, where many
+        // small files gain roughly linearly up to eight.
+        //
+        // It was 1 here at first, reasoned only about the read path, which quietly held every
+        // restore to one file at a time.
+        transferConcurrency: { default: 4, max: 8 },
     },
     { id: "s3-aws", type: "storage", group: "Cloud Storage (S3)", name: "Amazon S3", configSchema: S3AWSSchema },
     { id: "s3-generic", type: "storage", group: "Cloud Storage (S3)", name: "S3 Compatible (Generic)", configSchema: S3GenericSchema },
