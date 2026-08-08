@@ -359,23 +359,29 @@ describe("collecting a volume", () => {
                         { mode: entry.mode, uid: entry.uid, gid: entry.gid },
                     );
                 }
-                // Links go through the adapter rather than the session, as the restore does.
-                for (const entry of collected.entries.filter((e) => e.linkTarget !== undefined)) {
-                    await adapter().createSymlink!(config, `${target}/${entry.relativePath}`, entry.linkTarget!);
-                }
+                // Nothing here restores the symlink: the adapter declares no createSymlink,
+                // so the restore reports links as skipped. See the assertion below.
             } finally {
                 await session.close();
             }
 
             const listing = await execFileAsync("docker", [
                 "run", "--rm", "-v", `${target}:/vol`, HELPER_IMAGE, "sh", "-c",
-                "cd /vol && ls -lnR . && echo '---' && cat sub/private.txt && readlink link",
+                // No `readlink` here: the link is deliberately not restored, so asking for it
+                // would fail the command rather than the assertion.
+                "cd /vol && ls -lnR . && echo '---' && cat sub/private.txt",
             ]);
 
             expect(listing.stdout).toMatch(/-rw-------\s+1\s+0\s+0\s+.*private\.txt/);
             expect(listing.stdout).toMatch(/-rw-r--r--\s+1\s+1234\s+5678\s+.*owned\.txt/);
             expect(listing.stdout).toContain("secret");
             expect(listing.stdout).toContain("plain.txt");
+            // The symlink was collected - it is in the backup and restores to a local path
+            // or over SFTP - but a Docker volume declares it cannot hold one, so nothing was
+            // written for it here. Matched on the arrow `ls -l` prints for a link, so this
+            // cannot pass by accident on a name that appears elsewhere in the listing.
+            expect(collected.entries.some((e) => e.linkTarget !== undefined)).toBe(true);
+            expect(listing.stdout).not.toMatch(/link -> /);
         } finally {
             await fs.rm(localPath, { recursive: true, force: true });
             await removeVolume(source);

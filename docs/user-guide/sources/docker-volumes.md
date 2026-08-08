@@ -10,7 +10,7 @@ Directory permissions and ownership are not yet restored, and empty directories 
 
 ## Prerequisites
 
-- Access to the Docker daemon socket, either locally or on a host reachable over SSH.
+- Access to the Docker daemon socket, either locally or on a host reachable over SSH. Over SSH the socket is forwarded when the server allows it; when it does not - see [Troubleshooting](#forwarding-was-refused-over-ssh) - DBackup falls back to running the Docker CLI on that host, which then has to be installed there.
 - A small image on the Docker host to mount the volumes into, `alpine:latest` by default. DBackup pulls it once if it is not already there.
 
 When DBackup itself runs in a container, the socket has to be mounted into it:
@@ -59,7 +59,7 @@ A volume cannot be read from outside a container, so DBackup mounts the ones it 
 
 **The run history shows all of it**: which containers were stopped and started again, which helper container the volume was read through and from which image, and - when a source is set not to stop its containers - that the resulting backup is crash-consistent rather than clean.
 
-Permissions, owners and symbolic links inside a volume are carried into the backup and put back on restore.
+Permissions and owners are carried into the backup and put back on restore. Symbolic links are recorded in the backup but are not written back into a volume - see [Known limitations](#known-limitations).
 
 ## Restoring
 
@@ -76,6 +76,7 @@ Containers using the target are always stopped for a restore, whatever the job's
 | :--- | :--- |
 | Directory permissions and ownership are not restored | A restored directory is owned by root with default permissions. A PostgreSQL data directory restored this way will not start until its ownership and mode are corrected by hand. |
 | Empty directories are not preserved | A directory containing no files is missing after a restore. |
+| Symbolic links are backed up but not restored into a volume | A link's target is a path inside whichever container mounts the volume, which is not the container it was written from - so an absolute target means something else there, and a relative one leaving the volume is refused outright. The restore reports each link as skipped and the run as Partial. Restoring the same backup to a local path, over SFTP, or as a `.tar.gz` download keeps the links. |
 | Extended attributes and ACLs are not preserved | On SELinux hosts, labels have to be reapplied with `restorecon` after a restore. |
 | Hard links, device nodes and sockets are not backed up | They are reported as failures in the run, so the backup is honestly incomplete rather than quietly so. |
 | Incremental backups save storage but not transfer | The volume arrives as one stream, so unchanged files still travel; they are simply not stored again. |
@@ -110,11 +111,25 @@ Could not create the helper container from image 'alpine:latest': No such image
 ### Forwarding was refused over SSH
 
 ```
-ssh://user@host:22 would not forward the socket /var/run/docker.sock.
-This needs OpenSSH 6.7 or newer with AllowStreamLocalForwarding enabled.
+ssh://user@host:22 would not forward the socket /var/run/docker.sock:
+(SSH) Channel open failure: unsupported channel type.
 ```
 
-**Solution:** The SSH server refuses to forward Unix sockets. Set `AllowStreamLocalForwarding yes` in `sshd_config` and reload sshd.
+This is not an error on its own - DBackup falls back to running the Docker CLI on that host and says so in the run log. It only becomes a failure if that host has no `docker` command.
+
+**Two causes, and they need different fixes:**
+
+- **The SSH server is not OpenSSH.** A mesh VPN often answers on port 22 with its own embedded server: NetBird redirects port 22 to its own SSH implementation when SSH is enabled for a peer, and Tailscale SSH does the same. Neither can forward a Unix socket at all, and NetBird's port forwarding works only through the `netbird ssh` client, not a normal SSH client. Turning that feature off for the peer hands port 22 back to the machine's real sshd. Otherwise the fallback covers it, provided the Docker CLI is installed there.
+- **A real OpenSSH server has it disabled.** Set `AllowStreamLocalForwarding yes` in `sshd_config` and reload sshd. Note that `AllowTcpForwarding no` disables socket forwarding as a side effect.
+
+### The Docker CLI is missing on the target
+
+```
+'docker system dial-stdio' exited with 127 on ssh://user@host:22:
+sh: docker: not found
+```
+
+**Solution:** This appears only on the fallback path, so the SSH server would not forward the socket **and** the host has no Docker CLI. Install the CLI on that host, or make socket forwarding work using the section above.
 
 ### Progress shows a count without a total
 

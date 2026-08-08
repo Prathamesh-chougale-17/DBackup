@@ -1,3 +1,5 @@
+import { DEFAULT_DOCKER_SOCKET } from "@/lib/adapters/definitions/storage";
+
 export const STORAGE_CONNECTION_KEYS = [
     'host', 'port',
     'endpoint', 'region',
@@ -54,12 +56,12 @@ export const PLACEHOLDERS: Record<string, string> = {
     "email.port": "587",
     "mongodb.uri": "mongodb://user:password@localhost:27017/db?authSource=admin",
 
-    // Generic SSH fields (shared across all SSH-capable adapters)
-    // Adapter-scoped rather than bare, so a future adapter with a field of the same name
-    // does not silently inherit a Docker-specific hint.
-    "docker-volume.socketPath": "/var/run/docker.sock",
+    // Docker. Adapter-scoped rather than bare, so a future adapter with a field of the same
+    // name does not silently inherit a Docker-specific hint.
+    "docker-volume.socketPath": DEFAULT_DOCKER_SOCKET,
     "docker-volume.helperImage": "alpine:latest",
 
+    // Generic SSH fields (shared across all SSH-capable adapters)
     "sshHost": "192.168.1.10",
     "sshPort": "22",
     "sshUsername": "root",

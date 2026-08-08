@@ -20,7 +20,6 @@ import {
     prepareVolumeForRestore,
     splitVolumePath,
     writeFile,
-    writeSymlink,
     type PreparedVolume,
 } from "./write";
 
@@ -30,33 +29,7 @@ const DEFAULT_HELPER_IMAGE = "alpine:latest";
 
 type OnLog = (msg: string, level?: LogLevel, type?: LogType, details?: string) => void;
 
-export interface DockerRestoreSession extends StorageSession {
-    /** Recreates a symbolic link inside a prepared volume. */
-    createSymlink(remotePath: string, target: string): Promise<void>;
-}
-
-/**
- * Open restore sessions, so `createSymlink` can find the one it belongs to.
- *
- * Symbolic links are the one part of a directory restore that goes through the adapter
- * rather than the session - `archive-restore.ts` calls `adapter.createSymlink(config, …)`
- * directly. For every other adapter that is fine, because a link is a single stateless
- * operation. Here it has to land in the same helper container as the files around it, so the
- * session registers itself and the adapter looks it up.
- *
- * Keyed the way `createDestinationSessions` keys its own sessions, on the config itself, and
- * the links are restored while that session is still open.
- */
-const openSessions = new Map<string, DockerRestoreSession>();
-
-function sessionKey(config: Record<string, unknown>): string {
-    return JSON.stringify(config);
-}
-
-/** The session for this config, or undefined outside a restore. */
-export function restoreSessionFor(config: Record<string, unknown>): DockerRestoreSession | undefined {
-    return openSessions.get(sessionKey(config));
-}
+export type DockerRestoreSession = StorageSession;
 
 /**
  * Never throws, and connects nothing.
@@ -85,7 +58,7 @@ export function openDockerRestoreSession(
         else log.info(message);
     };
 
-    const engine = () => (connection ??= connectDocker(config)).engine;
+    const engine = () => (connection ??= connectDocker(config, (m) => say(m, "warning"))).engine;
 
     /**
      * The helper for one volume, prepared once.
@@ -113,12 +86,6 @@ export function openDockerRestoreSession(
             return true;
         },
 
-        async createSymlink(remotePath, target) {
-            const { volume, inner } = splitVolumePath(remotePath);
-            const helper = await helperFor(volume);
-            await writeSymlink(engine(), helper.containerId, volume, inner, target);
-        },
-
         async close() {
             // Every volume is finished independently. One helper that will not go away must
             // not keep another volume's containers down.
@@ -130,13 +97,11 @@ export function openDockerRestoreSession(
                 });
             }
             prepared.clear();
-            openSessions.delete(sessionKey(config));
             await connection?.close().catch(() => { });
             connection = null;
         },
     };
 
-    openSessions.set(sessionKey(config), session);
     return session;
 }
 

@@ -292,21 +292,28 @@ export class SshHost extends BaseHost {
      * `connect` and `forwardPort` skip it for the same reason.
      *
      * The failure gets its own message because ssh2 reports a refused forward as
-     * a bare channel-open failure, which names neither of the two causes that
-     * actually occur: an sshd older than 6.7, which has no such channel type at
-     * all, and `AllowStreamLocalForwarding no`.
+     * a bare channel-open failure, which names none of the causes that actually
+     * occur: an sshd older than 6.7, which has no such channel type at all,
+     * `AllowStreamLocalForwarding no`, and - the one that costs the most time -
+     * an SSH server that is not OpenSSH. NetBird and Tailscale both intercept
+     * port 22 with an embedded server that cannot forward a socket, so pointing
+     * the reader at sshd_config sends them to a file that decides nothing.
      */
     async connectSocket(socketPath: string): Promise<Duplex> {
         const client = await this.client();
         return new Promise((resolve, reject) => {
             client.openssh_forwardOutStreamLocal(socketPath, (err, channel) => {
                 if (err) {
-                    reject(
-                        new Error(
-                            `${this.label} would not forward the socket ${socketPath}: ${err.message}. ` +
-                            `This needs OpenSSH 6.7 or newer with AllowStreamLocalForwarding enabled.`,
-                        ),
+                    const error = new Error(
+                        `${this.label} would not forward the socket ${socketPath}: ${err.message}. ` +
+                        `This needs OpenSSH 6.7 or newer with AllowStreamLocalForwarding enabled. ` +
+                        `If the host is on a mesh VPN, check which SSH server actually answers: ` +
+                        `NetBird and Tailscale redirect port 22 to an embedded server that cannot forward a socket at all.`,
                     );
+                    // Marked so a caller can tell "this server has no such channel type" from
+                    // "the socket is not there", and fall back rather than give up.
+                    (error as { streamLocalUnsupported?: boolean }).streamLocalUnsupported = true;
+                    reject(error);
                     return;
                 }
                 resolve(channel);

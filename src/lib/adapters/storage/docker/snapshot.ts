@@ -84,7 +84,7 @@ export async function createDockerSnapshot(
     options?: SnapshotOptions
 ): Promise<SnapshotHandle> {
     const say = sayVia(options?.onLog);
-    const connection = openConnection(config);
+    const connection = openConnection(config, (message) => say(message, "warning"));
     const engine = connection.engine;
     const helperImage = typeof config.helperImage === "string" && config.helperImage.length > 0
         ? config.helperImage
@@ -185,7 +185,7 @@ export async function releaseDockerSnapshot(
 
     // No live session: an orphan, or a release attempted twice. Both are handled by reading
     // the state off the host rather than trusting anything in memory.
-    const connection = openConnection(config);
+    const connection = openConnection(config, (message) => say(message, "warning"));
     try {
         const orphans = await findOrphanedHelpers(connection.engine);
         const match = orphans.find((o) => o.containerId === handle.id);

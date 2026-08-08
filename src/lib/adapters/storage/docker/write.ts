@@ -135,17 +135,3 @@ export async function writeFile(
         written,
     ]);
 }
-
-/** Recreates a symbolic link, which carries a target rather than bytes. */
-export async function writeSymlink(
-    engine: DockerEngine,
-    containerId: string,
-    volume: string,
-    inner: string,
-    target: string,
-): Promise<void> {
-    const tar = pack();
-    tar.entry({ name: inner, type: "symlink", linkname: target, mtime: new Date(0) });
-    tar.finalize();
-    await engine.importPath(containerId, mountPathFor(volume), tar);
-}

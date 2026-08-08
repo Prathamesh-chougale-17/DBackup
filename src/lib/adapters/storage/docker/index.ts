@@ -5,7 +5,7 @@ import { wrapError, getErrorMessage } from "@/lib/logging/errors";
 import { connectDocker } from "./engine/connect";
 import type { DockerEngine } from "./engine/types";
 import { downloadVolume } from "./read";
-import { openDockerRestoreSession, restoreSessionFor } from "./restore-session";
+import { openDockerRestoreSession } from "./restore-session";
 import {
     createDockerSnapshot,
     planDockerSourceGroups,
@@ -158,18 +158,16 @@ export const DockerVolumeAdapter: StorageAdapter = {
         );
     },
 
-    /**
-     * The one part of a directory restore that reaches the adapter rather than the session,
-     * so it looks up the session it belongs to - the link has to land in the same helper
-     * container as the files around it.
-     */
-    async createSymlink(config, remotePath, target): Promise<void> {
-        const session = restoreSessionFor(config);
-        if (!session) {
-            throw new Error("A Docker volume can only be restored through a restore session.");
-        }
-        await session.createSymlink(remotePath, target);
-    },
+    // `createSymlink` is deliberately absent, which is how an adapter says it cannot store
+    // symbolic links - the restore then reports them as skipped rather than failed, the same
+    // as every other destination that cannot hold one.
+    //
+    // Not because the daemon refuses outright: a link pointing inside its own volume does
+    // restore. But a link's target is a path inside whichever container mounts the volume
+    // later, which is a different place from the one it was written in - an absolute target
+    // means something else there, and a relative one that leaves the volume is rejected by
+    // the daemon. Restoring the ones that happen to work would leave a user unable to tell
+    // which of their links survived.
 
     async download(): Promise<boolean> {
         throw new Error("A Docker volume is collected as a directory, not as a single file.");

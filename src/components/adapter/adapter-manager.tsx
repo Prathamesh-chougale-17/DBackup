@@ -12,6 +12,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import { ADAPTER_DEFINITIONS, AdapterDefinition } from "@/lib/adapters/definitions";
+import { DEFAULT_DOCKER_SOCKET } from "@/lib/adapters/definitions/storage";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DataTable, type BulkAction } from "@/components/ui/data-table";
 import { requestBulk } from "@/lib/bulk-request";
@@ -183,6 +184,19 @@ export function AdapterManager({ type, title, description, canManage = true, per
                 }
                 case 'local-filesystem':
                     return <span className="text-muted-foreground">{config.basePath}</span>;
+                case 'docker-volume': {
+                    // The socket is this adapter's whole address, so it is what belongs here.
+                    // Shown as the default when the field was left empty, because that is
+                    // what the backup will actually use.
+                    const socket = config.socketPath || DEFAULT_DOCKER_SOCKET;
+                    return (
+                        <span className="text-muted-foreground">
+                            {config.connectionMode === 'ssh' && config.sshHost
+                                ? `${config.sshHost} · ${socket}`
+                                : socket}
+                        </span>
+                    );
+                }
                 case 'smb':
                     return <span className="text-muted-foreground">{config.pathPrefix || config.address}</span>;
                 case 'sftp':

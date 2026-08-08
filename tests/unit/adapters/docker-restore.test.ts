@@ -23,7 +23,7 @@ vi.mock("@/lib/logging/logger", () => ({
     logger: { child: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }) },
 }));
 
-const { openDockerRestoreSession, restoreSessionFor } = await import("@/lib/adapters/storage/docker/restore-session");
+const { openDockerRestoreSession } = await import("@/lib/adapters/storage/docker/restore-session");
 const { splitVolumePath } = await import("@/lib/adapters/storage/docker/write");
 
 const config = { connectionMode: "direct", helperImage: "alpine:3" };
@@ -196,30 +196,18 @@ describe("the restore session", () => {
     });
 });
 
-describe("symlinks during a restore", () => {
-    it("finds the session the surrounding files are being written through", async () => {
-        // Links reach the adapter rather than the session, so they have to look up the
-        // session themselves or they would land in a helper of their own.
-        const engine = useEngine(createFakeDockerEngine({ volumes: ["v-target"], containers: [] }));
+describe("symbolic links", () => {
+    it("are not offered at all, so the restore reports them as skipped rather than failed", async () => {
+        // A link's target is a path inside whichever container mounts the volume later,
+        // which is not where it was written - an absolute one means something else there,
+        // and a relative one leaving the volume is refused by the daemon. Declaring the
+        // capability and restoring only the ones that happen to work would leave a user
+        // unable to tell which of their links survived.
+        //
+        // An adapter says it cannot store links by not implementing `createSymlink`, which
+        // archive-restore.ts reads as a capability limit: one warning, counted as skipped.
+        const { DockerVolumeAdapter } = await import("@/lib/adapters/storage/docker");
 
-        const session = openDockerRestoreSession(config);
-        try {
-            expect(restoreSessionFor(config)).toBe(session);
-            await session.upload(sourceFile, "v-target/a.txt");
-            await session.createSymlink("v-target/link", "a.txt");
-            expect(engine.calls.created).toHaveLength(1);
-        } finally {
-            await session.close();
-        }
-    });
-
-    it("is gone once the restore is over", async () => {
-        const engine = useEngine(createFakeDockerEngine({ volumes: ["v-target"], containers: [] }));
-        void engine;
-
-        const session = openDockerRestoreSession(config);
-        await session.close();
-
-        expect(restoreSessionFor(config)).toBeUndefined();
+        expect(DockerVolumeAdapter.createSymlink).toBeUndefined();
     });
 });

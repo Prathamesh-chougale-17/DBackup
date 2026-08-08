@@ -2,6 +2,17 @@ import { z } from "zod";
 import { safePath, sshFields } from "./shared";
 
 /**
+ * Where a Docker daemon listens unless told otherwise.
+ *
+ * Lives here because the definitions are plain data and safe on both sides: the schema
+ * defaults to it, the connection form shows it as a placeholder, the connections table
+ * shows it for a config that left the field empty, and the adapter falls back to it at run
+ * time. Four readers, one value - it was three separate literals before, which is how they
+ * drift apart.
+ */
+export const DEFAULT_DOCKER_SOCKET = "/var/run/docker.sock";
+
+/**
  * Docker volumes as a directory source.
  *
  * Reuses `sshFields` verbatim so the connection form, the credential profiles and the Test
@@ -19,8 +30,8 @@ export const DockerVolumeSchema = z.object({
     // collapsed Advanced block - a form refusing to save with nothing visibly wrong.
     socketPath: z.preprocess(
         (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
-        safePath("Docker socket path").default("/var/run/docker.sock"),
-    ).describe("Path to the Docker daemon socket, as seen from the host DBackup connects to. Leave empty for /var/run/docker.sock."),
+        safePath("Docker socket path").default(DEFAULT_DOCKER_SOCKET),
+    ).describe(`Path to the Docker daemon socket, as seen from the host DBackup connects to. Leave empty for ${DEFAULT_DOCKER_SOCKET}.`),
     helperImage: z.preprocess(
         (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
         z.string().min(1).default("alpine:latest"),

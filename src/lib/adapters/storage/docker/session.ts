@@ -96,7 +96,16 @@ export async function disposeSession(sessionId: string): Promise<void> {
     await connection?.close().catch(() => { });
 }
 
-/** Opens a connection for work that is not part of a prepared group. */
-export function openConnection(config: Record<string, unknown>): DockerConnection {
-    return connectDocker(config);
+/**
+ * Opens a connection for work that is not part of a prepared group.
+ *
+ * `onLog` is optional because half the callers are interactive - a connection test, a volume
+ * listing - and have no run to write into. A backup passes it, so the one line that matters
+ * (which pipe the connection settled on) lands in the history.
+ */
+export function openConnection(
+    config: Record<string, unknown>,
+    onLog?: (message: string) => void,
+): DockerConnection {
+    return connectDocker(config, onLog);
 }
