@@ -7,12 +7,15 @@ All notable changes to DBackup are documented here.
 
 ### ✨ Features
 
+- **credentials**: An SSH credential profile can now generate its own keypair instead of taking a pasted one, in Ed25519, RSA 4096 or ECDSA and with an optional passphrase. The private key is created on the server and stored encrypted, and the public key is shown with a copy button and a `.pub` download so it can be installed on the host. ([#143](https://github.com/Skyfay/DBackup/issues/143))
 - **docker**: New **Docker Volumes** source (beta) that reads volume contents through the local Docker socket or from another host over SSH. Volumes are picked from a list of what the daemon can see, and any container holding one is stopped while it is read unless the source says otherwise.
 - **MongoDB**: Sources can now reach **MongoDB Atlas** and other clusters that publish an SRV record. A hostname under `mongodb.net` is recognised on its own, and any other cluster can ask for the same by writing its host as `mongodb+srv://your.host`.
 - **MongoDB**: The **Host** field now takes a comma-separated seed list, so a replica set or a pair of `mongos` routers can be reached without a connection URI.
 
 ### 🐛 Bug Fixes
 
+- **credentials**: Renaming an SSH credential profile or changing its description no longer fails with a validation error. The dialog submitted an empty secret payload whenever it was opened for editing.
+- **ui**: The credential profile dialog now scrolls when its content does not fit the window. The lower part was cut off instead, with no way to reach the buttons.
 - **MongoDB**: Connecting to an Atlas cluster no longer fails with `getaddrinfo ENOTFOUND`. DBackup built a plain `mongodb://host:port` connection for a hostname that only resolves through SRV.
 - **MongoDB**: A trailing slash, a scheme or a port pasted into the **Host** field no longer breaks the connection. The field is now read the way it is written.
 - **adapters**: Testing the connection of a saved source no longer fails for secrets that live in the config rather than in a credential profile, such as MongoDB's deprecated inline URI. The test ran against a config the saved source never had, so it failed while backups from the same source kept working.

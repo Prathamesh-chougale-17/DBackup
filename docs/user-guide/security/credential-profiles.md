@@ -66,6 +66,26 @@ You can create a profile without leaving the source/destination dialog:
 This is the fastest path during initial setup or when you need a fresh secret
 for a single adapter.
 
+## Generating an SSH Keypair
+
+An `SSH_KEY` profile does not need a key made somewhere else. Set **Auth method** to **Private Key**, switch **Private key** to **Generate a new keypair**, and DBackup creates one when you save.
+
+| Field | Description | Default |
+|---|---|---|
+| **Key type** | `Ed25519`, `RSA 4096`, `ECDSA P-256`, or `ECDSA P-384`. Ed25519 unless the host is too old to accept it. | `Ed25519` |
+| **Comment** | Written into the public key so it stays identifiable in `authorized_keys`. | `dbackup@<profile-name>` |
+| **Key passphrase** | Optional. Encrypts the private key with `bcrypt` and `aes256-ctr`, the same way `ssh-keygen` does. Stored with the key so backups still run unattended. | empty |
+
+The key is generated on the server in OpenSSH format, so the private half never reaches a browser and is stored encrypted like any other secret. After saving, the dialog shows the public key with a copy button and a `.pub` download. Install that line in `~/.ssh/authorized_keys` on the target host before running a backup through the profile.
+
+The public key is not a secret, so it stays available afterwards. The **key** action on the profile row shows it again, along with the `SHA256:...` fingerprint that `ssh-keygen -lf` prints for the same key. Pasted keys get the same action wherever DBackup can read the public half from them.
+
+To rotate, edit the profile and generate again. Every adapter referencing the profile picks up the new key on its next operation, so install the new public key on the host first.
+
+::: warning Rsync cannot use a passphrase-protected key
+The Rsync destination drives the OpenSSH client with `BatchMode=yes`, which has no way to answer a passphrase prompt. This applies to pasted encrypted keys just as much as generated ones. Everywhere else, SFTP and every SSH tunnel, a passphrase works.
+:::
+
 ## Slots: `primary` vs `ssh`
 
 Every adapter has up to two slots:
@@ -118,7 +138,7 @@ adapter and encryption permissions:
 
 | Permission | Allows |
 |---|---|
-| `CREDENTIALS.READ` | List and view sanitized profiles (no secret payload) |
+| `CREDENTIALS.READ` | List and view sanitized profiles (no secret payload), including the public key of an SSH profile |
 | `CREDENTIALS.WRITE` | Create and update profiles, including rotating the secret |
 | `CREDENTIALS.DELETE` | Delete profiles (still subject to the reference check) |
 | `CREDENTIALS.REVEAL` | View the decrypted secret payload via the eye action / API |

@@ -17,12 +17,14 @@ import {
     DialogTitle,
 } from "@/components/ui/dialog";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "sonner";
 import { DateDisplay } from "@/components/utils/date-display";
 import {
     CredentialProfileDialog,
     type CredentialProfileSummary,
 } from "./credential-profile-dialog";
+import { SshPublicKeyPanel } from "./ssh-public-key-panel";
 import type { CredentialType } from "@/lib/core/credentials";
 
 const TYPE_LABELS: Record<CredentialType, string> = {
@@ -73,6 +75,7 @@ export function CredentialProfilesList({ canReveal }: { canReveal: boolean }) {
         payload: Record<string, string>;
     } | null>(null);
     const [isRevealing, setIsRevealing] = useState<string | null>(null);
+    const [publicKeyProfile, setPublicKeyProfile] = useState<CredentialProfileSummary | null>(null);
 
     const fetchProfiles = async () => {
         setLoading(true);
@@ -245,6 +248,16 @@ export function CredentialProfilesList({ canReveal }: { canReveal: boolean }) {
                 const p = row.original;
                 return (
                     <div className="flex justify-end gap-1">
+                        {p.publicKey && (
+                            <Button
+                                variant="ghost"
+                                size="icon"
+                                title="Show public key"
+                                onClick={() => setPublicKeyProfile(p)}
+                            >
+                                <KeyRound className="h-4 w-4" />
+                            </Button>
+                        )}
                         {canReveal && (
                             <Button
                                 variant="ghost"
@@ -388,6 +401,42 @@ export function CredentialProfilesList({ canReveal }: { canReveal: boolean }) {
                             Delete
                         </Button>
                     </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Public key dialog - not a secret, so no reveal permission and no audit entry */}
+            <Dialog open={!!publicKeyProfile} onOpenChange={(o) => !o && setPublicKeyProfile(null)}>
+                <DialogContent className="sm:max-w-xl max-h-[90vh] p-0">
+                    <div className="px-6 pt-6 pb-4 shrink-0">
+                        <DialogHeader>
+                            <DialogTitle>Public key: {publicKeyProfile?.name}</DialogTitle>
+                            <DialogDescription>
+                                The public half of the SSH key stored in this profile.
+                            </DialogDescription>
+                        </DialogHeader>
+                    </div>
+
+                    {/* An RSA public key runs to a dozen wrapped lines, so this scrolls. Two
+                        budgets covering header, footer and the two gap-4 between them, the
+                        larger one for below sm: where DialogFooter stacks its buttons. See
+                        credential-profile-dialog.tsx for the measurement. */}
+                    <ScrollArea className="*:data-[slot=scroll-area-viewport]:max-h-[calc(90vh-20rem)] sm:*:data-[slot=scroll-area-viewport]:max-h-[calc(90vh-16rem)]">
+                        <div className="px-6 pb-4">
+                            {publicKeyProfile?.publicKey && (
+                                <SshPublicKeyPanel
+                                    publicKey={publicKeyProfile.publicKey}
+                                    fingerprint={publicKeyProfile.fingerprint}
+                                    fileName={publicKeyProfile.name}
+                                />
+                            )}
+                        </div>
+                    </ScrollArea>
+
+                    <div className="px-6 pt-2 pb-6 shrink-0">
+                        <DialogFooter>
+                            <Button onClick={() => setPublicKeyProfile(null)}>Close</Button>
+                        </DialogFooter>
+                    </div>
                 </DialogContent>
             </Dialog>
 
