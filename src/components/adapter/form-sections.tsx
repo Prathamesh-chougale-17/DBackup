@@ -29,14 +29,16 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { STORAGE_ROLES, type StorageRole } from "@/lib/core/storage-roles";
+import { sshManagedKeys } from "@/lib/adapters/ssh-key-convention";
 import { cn } from "@/lib/utils";
-import { AlertTriangle, Check, FolderOpen, Loader2 } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, FolderOpen, Loader2 } from "lucide-react";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AdapterDefinition } from "@/lib/adapters/definitions";
 import { SchemaField } from "./schema-field";
 import { EmailTagField } from "./email-tag-field";
 import { FirebirdAliasFields } from "./firebird-alias-fields";
-import { STORAGE_CONFIG_KEYS, STORAGE_CONNECTION_KEYS, NOTIFICATION_CONNECTION_KEYS, NOTIFICATION_CONFIG_KEYS } from "./form-constants";
+import { STORAGE_ADVANCED_KEYS, STORAGE_CONFIG_KEYS, STORAGE_CONNECTION_KEYS, NOTIFICATION_CONNECTION_KEYS, NOTIFICATION_CONFIG_KEYS } from "./form-constants";
 import { GoogleDriveOAuthButton } from "./google-drive-oauth-button";
 import { GoogleDriveFolderBrowser } from "./google-drive-folder-browser";
 import { DropboxOAuthButton } from "./dropbox-oauth-button";
@@ -109,6 +111,53 @@ function SshCredentialPickerSlot({
             label="SSH Credential Profile"
             description="Reusable SSH credential used for the tunnel or remote command execution."
         />
+    );
+}
+
+/**
+ * Stands in for the form until a mode has been picked.
+ *
+ * Every adapter with more than one connection mode deliberately shows nothing until one is
+ * chosen, because the modes ask for different things and guessing would present the wrong
+ * form. Rendering nothing at all left a blank panel that reads like a broken dialog, so it
+ * says what it is waiting for instead.
+ */
+function ChooseConnectionModeHint({ label = "connection mode" }: { label?: string }) {
+    return (
+        <p className="text-sm text-muted-foreground pt-4">
+            Choose a {label} above to continue.
+        </p>
+    );
+}
+
+/**
+ * Settings that are correct out of the box and exist only for the case that is not.
+ *
+ * Collapsed by default, so the common path is not asked a question it has no way to answer.
+ * Everything in here must have a working default, or hiding it would turn a required field
+ * into an invisible one.
+ */
+function AdvancedSettings({ adapter, keys }: { adapter: AdapterDefinition; keys: string[] }) {
+    const [open, setOpen] = useState(false);
+
+    return (
+        <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg border">
+            <CollapsibleTrigger asChild>
+                <Button
+                    type="button"
+                    variant="ghost"
+                    className="w-full justify-between px-4 py-3 h-auto font-normal"
+                >
+                    <span className="text-sm font-medium">Advanced</span>
+                    <ChevronDown className={cn("h-4 w-4 text-muted-foreground transition-transform", open && "rotate-180")} />
+                </Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+                <div className="space-y-4 border-t p-4">
+                    <FieldList keys={keys} adapter={adapter} />
+                </div>
+            </CollapsibleContent>
+        </Collapsible>
     );
 }
 
@@ -450,7 +499,9 @@ export function DatabaseFormContent({
     };
 
     if (adapter.id === "sqlite") {
-        if (!mode) return null;
+        // SQLite calls it "Mode" rather than "Connection Mode", so the hint follows the
+        // label the user is actually looking at.
+        if (!mode) return <ChooseConnectionModeHint label="mode" />;
 
         return (
             <div className="space-y-4 pt-2">
@@ -568,7 +619,7 @@ export function DatabaseFormContent({
         adapter.configSchema.shape && "connectionMode" in adapter.configSchema.shape
     );
     if (hasConnectionMode && !connectionMode) {
-        return null;
+        return <ChooseConnectionModeHint />;
     }
 
     const isSSH = connectionMode === "ssh";
@@ -870,9 +921,9 @@ export function StorageFormContent({
     storageRole,
     onStorageRoleChange,
     primaryCredentialId,
-    sshCredentialId: _sshCredentialId,
+    sshCredentialId,
     onPrimaryChange,
-    onSshChange: _onSshChange,
+    onSshChange,
 }: { adapter: AdapterDefinition; initialData?: AdapterConfig; healthNotificationsDisabled?: boolean; onHealthNotificationsDisabledChange?: (disabled: boolean) => void; skipVerification?: boolean; onSkipVerificationChange?: (disabled: boolean) => void; storageRole?: StorageRole; onStorageRoleChange?: (role: StorageRole) => void } & CredentialPickerHostProps) {
     const { watch, setValue, getValues } = useFormContext();
     const authType = watch("config.authType");
@@ -881,11 +932,20 @@ export function StorageFormContent({
     // SMB is the only adapter that can snapshot today (via MS-FSRVP).
     const supportsSnapshots = adapter.id === 'smb';
     const hasRealConfigKeys = hasFields(adapter, STORAGE_CONFIG_KEYS);
+    const hasAdvancedKeys = hasFields(adapter, STORAGE_ADVANCED_KEYS);
     // Always show Configuration tab for storage adapters (health check, verification and the role picker live there)
-    const hasConfigKeys = hasRealConfigKeys || !!onHealthNotificationsDisabledChange || !!onSkipVerificationChange || !!onStorageRoleChange || supportsSnapshots;
+    const hasConfigKeys = hasRealConfigKeys || hasAdvancedKeys || !!onHealthNotificationsDisabledChange || !!onSkipVerificationChange || !!onStorageRoleChange || supportsSnapshots;
     const isGoogleDrive = adapter.id === 'google-drive';
     const isDropbox = adapter.id === 'dropbox';
     const isOneDrive = adapter.id === 'onedrive';
+
+    // Storage reached over SSH is new - every other storage adapter either talks to its
+    // service directly or brings its own SSH client. Read from the schema, never from an
+    // adapter id, so the next one to need it works without touching this file.
+    const connectionMode = watch("config.connectionMode");
+    const sshAuthType = watch("config.sshAuthType");
+    const hasConnectionMode = "connectionMode" in ((adapter.configSchema as unknown as { shape: Record<string, unknown> }).shape ?? {});
+    const isSSH = connectionMode === "ssh";
 
     const connectionKeys = STORAGE_CONNECTION_KEYS;
     const configKeys = STORAGE_CONFIG_KEYS;
@@ -901,16 +961,50 @@ export function StorageFormContent({
     const [credentialRefreshKey, setCredentialRefreshKey] = useState(0);
     const handleOAuthAuthorized = useCallback(() => setCredentialRefreshKey((k) => k + 1), []);
 
+    // Nothing is shown until a mode is picked. The two modes ask for different things, and
+    // guessing one would present a form that is wrong rather than merely empty. Same rule
+    // the database form has always applied.
+    if (hasConnectionMode && !connectionMode) {
+        return <ChooseConnectionModeHint />;
+    }
+
     return (
-        <Tabs defaultValue="connection" className="w-full">
-            <TabsList className={cn("grid w-full", hasConfigKeys ? "grid-cols-2" : "grid-cols-1")}>
+        // Keyed on the mode so switching it lands on the first tab rather than on one the
+        // new mode does not populate.
+        <Tabs defaultValue={isSSH ? "ssh" : "connection"} className="w-full" key={connectionMode ?? "default"}>
+            {/* SSH gets its own tab rather than a block on top of the connection fields, so
+                the two halves of the question stay separate: how to reach the machine, and
+                what to talk to once there. Same three-tab shape as a database source. */}
+            <TabsList className={cn("grid w-full", isSSH ? "grid-cols-3" : (hasConfigKeys ? "grid-cols-2" : "grid-cols-1"))}>
+                {isSSH && <TabsTrigger value="ssh">SSH Connection</TabsTrigger>}
                 <TabsTrigger value="connection">Connection</TabsTrigger>
                 {hasConfigKeys && (
                     <TabsTrigger value="configuration">Configuration</TabsTrigger>
                 )}
             </TabsList>
 
+            {isSSH && (
+                <TabsContent value="ssh" className="space-y-4 pt-4">
+                    <SshCredentialPickerSlot
+                        adapter={adapter}
+                        sshCredentialId={sshCredentialId}
+                        onSshChange={onSshChange}
+                    />
+                    <SshConfigSection
+                        adapter={adapter}
+                        sshAuthType={sshAuthType}
+                        sshCredentialId={sshCredentialId}
+                        description="SSH access to the machine this storage lives on."
+                    />
+                </TabsContent>
+            )}
+
             <TabsContent value="connection" className="space-y-4 pt-4">
+                {isSSH && (
+                    <p className="text-sm text-muted-foreground">
+                        The storage as seen from the SSH host, not from DBackup.
+                    </p>
+                )}
                 <PrimaryCredentialPickerSlot
                     adapter={adapter}
                     primaryCredentialId={primaryCredentialId}
@@ -1004,7 +1098,11 @@ export function StorageFormContent({
                             onChange={onHealthNotificationsDisabledChange}
                         />
                     )}
-                    {onSkipVerificationChange && (
+                    {/* Only for a backup destination. `metadata.skipVerification` has exactly
+                        one consumer - the weekly integrity sweep over destinations - so on a
+                        directory source it is a switch that controls nothing. The stored value
+                        is left alone, so flipping a config's role and back does not lose it. */}
+                    {onSkipVerificationChange && storageRole !== STORAGE_ROLES.SOURCE && (
                         <DisableVerificationSwitch
                             disabled={skipVerification ?? false}
                             onChange={onSkipVerificationChange}
@@ -1018,8 +1116,11 @@ export function StorageFormContent({
                         />
                     )}
                     {/* Only for a directory source. A backup destination receives one archive
-                        plus two small sidecars per run, so there is nothing to parallelise. */}
-                    {storageRole === STORAGE_ROLES.SOURCE && (
+                        plus two small sidecars per run, so there is nothing to parallelise.
+                        And only where there is a choice: an adapter that reads its source as
+                        a single stream would otherwise show a disabled 1 next to an
+                        explanation about rate limits that does not apply to it. */}
+                    {storageRole === STORAGE_ROLES.SOURCE && transferConcurrencyRange(adapter.id).max > 1 && (
                         <TransferConcurrencyField
                             adapterId={adapter.id}
                             value={watch("config.maxConcurrentFiles")}
@@ -1036,10 +1137,11 @@ export function StorageFormContent({
                             getConfig={() => ({
                                 config: (getValues("config") ?? {}) as Record<string, unknown>,
                                 primaryCredentialId: primaryCredentialId ?? null,
-                                sshCredentialId: _sshCredentialId ?? null,
+                                sshCredentialId: sshCredentialId ?? null,
                             })}
                         />
                     )}
+                    {hasAdvancedKeys && <AdvancedSettings adapter={adapter} keys={STORAGE_ADVANCED_KEYS} />}
                 </TabsContent>
             )}
         </Tabs>
@@ -1387,17 +1489,10 @@ function getCredentialManagedKeys(adapter: AdapterDefinition): Set<string> {
     }
 
     if (reqs.ssh === "SSH_KEY") {
-        if (reqs.primary !== undefined) {
-            // DB adapters with SSH tunnel: ssh-prefixed keys
-            ["sshUsername", "sshAuthType", "sshPassword", "sshPrivateKey", "sshPassphrase"].forEach(
-                (k) => hidden.add(k)
-            );
-        } else {
-            // Adapter with no primary slot (SQLite SSH mode): unprefixed keys
-            ["username", "authType", "password", "privateKey", "passphrase"].forEach((k) =>
-                hidden.add(k)
-            );
-        }
+        // Which names the profile owns is a property of the schema, not of whether the
+        // adapter also has a primary slot. The same list drives the overlay that writes
+        // them, so the form cannot hide one set while the resolver fills another.
+        sshManagedKeys(adapter.configSchema as never).forEach((k) => hidden.add(k));
     }
 
     return hidden;

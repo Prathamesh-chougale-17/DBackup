@@ -3,6 +3,7 @@ import { registry } from "@/lib/core/registry";
 import { ConfigurationError, NotFoundError, wrapError } from "@/lib/logging/errors";
 import { logger } from "@/lib/logging/logger";
 import { getDecryptedCredentialData } from "@/services/auth/credential-service";
+import { usesPrefixedSshKeys } from "@/lib/adapters/ssh-key-convention";
 import type {
     CredentialData,
     CredentialType,
@@ -101,8 +102,7 @@ export async function resolveAdapterConfig(adapter: AdapterConfigInput): Promise
             adapter.adapterId,
             "ssh"
         );
-        const useSshPrefix = requirements.primary !== undefined;
-        applySshOverlay(parsed, profile as SshKeyData, useSshPrefix);
+        applySshOverlay(parsed, profile as SshKeyData, usesPrefixedSshKeys(adapterDef.configSchema));
     }
 
     return parsed;
@@ -148,8 +148,7 @@ export async function overlayCredentialsOnConfig(
             adapterId,
             "ssh"
         );
-        const useSshPrefix = requirements.primary !== undefined;
-        applySshOverlay(config, profile as SshKeyData, useSshPrefix);
+        applySshOverlay(config, profile as SshKeyData, usesPrefixedSshKeys(adapterDef.configSchema));
     }
 
     return config;
@@ -253,11 +252,16 @@ function applyPrimaryOverlay(
 
 /**
  * Overlays an SSH-slot credential onto the config.
- * - If the adapter also has a primary slot (DB adapters with SSH tunnel),
- *   credentials are written to `ssh*` prefixed fields to avoid clobbering
- *   primary credentials.
- * - If the adapter has no primary slot (e.g. SQLite SSH mode), unprefixed
- *   field names are used to match the schema.
+ *
+ * Which names it writes is decided by the adapter's schema, not by whether it also has a
+ * primary slot - see `ssh-key-convention.ts`. Most adapters spread `sshFields` and get
+ * `ssh*` names, which keeps an SSH identity from clobbering a database login. SQLite has no
+ * database login and reuses the plain names.
+ *
+ * This used to be inferred from the primary slot, which was a proxy that held only while
+ * SQLite was the sole adapter without one. Docker volumes has no primary slot either - a
+ * Docker socket has no login - but prefixed names, and the mismatch meant its SSH mode
+ * could never connect.
  */
 function applySshOverlay(
     config: Record<string, unknown>,

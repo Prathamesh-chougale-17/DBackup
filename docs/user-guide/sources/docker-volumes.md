@@ -34,17 +34,18 @@ A process that can talk to the Docker socket can start containers, and a contain
 | **Connection Mode** | `Direct` for the host DBackup runs on, `SSH` for another machine | `Direct` | ✅ |
 | **SSH Host / Port** | The machine running Docker (SSH mode only) | `22` | SSH only |
 | **SSH Credential** | `SSH_KEY` [credential profile](/user-guide/security/credential-profiles) | - | SSH only |
-| **Docker socket path** | Path to the daemon socket, as seen from the host DBackup connects to | `/var/run/docker.sock` | ✅ |
-| **Helper image** | Image the volumes are mounted into. Needs a shell, and is never started during a backup | `alpine:latest` | ✅ |
+| **Docker socket path** | Path to the daemon socket, as seen from the host DBackup connects to. Leave empty for the default | `/var/run/docker.sock` | ❌ |
+| **Helper image** | Under **Advanced**. Image the volumes are mounted into. Needs a shell, and is never started during a backup. Leave empty for the default | `alpine:latest` | ❌ |
 
 ## Setup Guide
 
-1. Go to **Connections** → **Directory Sources** → **Add New** and pick **Docker Volumes**.
-2. Choose **Direct** or **SSH**, and for SSH select a credential profile.
-3. Click **Test Connection**. It reports the Docker version and how many volumes it can see.
-4. Save, then open or create a job.
-5. Under **Directory Sources**, pick this adapter and click the folder button. It lists the volumes on that host - tick the ones to back up.
-6. Optionally expand a source row to set **Stop containers while reading** and exclude patterns.
+1. Go to **Connections** → **Directory Sources** → **Add New** and pick **Docker Volumes**. It is offered here only - a container runtime cannot be a backup destination.
+2. Choose a **Connection Mode**. The rest of the form appears once you have, because the two modes ask for different things.
+3. For **SSH**, pick an `SSH_KEY` credential profile and enter the host. For **Direct**, leave the socket path empty unless it is somewhere unusual.
+4. Click **Test Connection**. It reports the Docker version and how many volumes it can see.
+5. Save, then open or create a job.
+6. Under **Directory Sources**, pick this adapter and click the folder button. It lists the volumes on that host - tick the ones to back up.
+7. Optionally expand a source row to set **Stop containers while reading** and exclude patterns.
 
 ## How It Works
 

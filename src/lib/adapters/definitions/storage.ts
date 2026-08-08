@@ -13,10 +13,18 @@ import { safePath, sshFields } from "./shared";
  */
 export const DockerVolumeSchema = z.object({
     ...sshFields,
-    socketPath: safePath("Docker socket path").default("/var/run/docker.sock")
-        .describe("Path to the Docker daemon socket, as seen from the host DBackup connects to"),
-    helperImage: z.string().min(1).default("alpine:latest")
-        .describe("Image used to empty a volume during a restore. Only needs a shell, and is never started during a backup"),
+    // Both fields treat an empty value as "use the default", because the runtime already
+    // does (`connect.ts`, `snapshot.ts`, `restore-session.ts`). Without the preprocess a
+    // cleared field fails `.min(1)`, and for the helper image that error would sit inside a
+    // collapsed Advanced block - a form refusing to save with nothing visibly wrong.
+    socketPath: z.preprocess(
+        (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+        safePath("Docker socket path").default("/var/run/docker.sock"),
+    ).describe("Path to the Docker daemon socket, as seen from the host DBackup connects to. Leave empty for /var/run/docker.sock."),
+    helperImage: z.preprocess(
+        (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+        z.string().min(1).default("alpine:latest"),
+    ).describe("Image the volumes are mounted into. Only needs a shell, and is never started during a backup. Leave empty for alpine:latest."),
 });
 
 export const LocalStorageSchema = z.object({

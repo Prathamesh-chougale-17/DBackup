@@ -34,6 +34,10 @@ export const DockerVolumeAdapter: StorageAdapter = {
     type: "storage",
     name: "Docker Volumes",
     configSchema: DockerVolumeSchema,
+    // Read by the config resolver to decide whether an assigned profile is overlaid at all.
+    // No primary slot: a Docker socket has no login of its own, so reaching the host that
+    // owns it is the entire access question.
+    credentials: { ssh: "SSH_KEY" },
 
     /**
      * A volume has no live path at all - its contents are only reachable through a

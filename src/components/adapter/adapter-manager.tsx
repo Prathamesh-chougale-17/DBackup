@@ -2,7 +2,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { STORAGE_ROLES, storageRoleLabel, type StorageRole } from "@/lib/core/storage-roles";
+import { STORAGE_ROLES, storageRoleLabel, supportsStorageRole, canOfferCounterpart, counterpartStorageRole, type StorageRole } from "@/lib/core/storage-roles";
 import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
@@ -86,11 +86,25 @@ export function AdapterManager({ type, title, description, canManage = true, per
         }
     }, [type, applyRoleFilter]);
 
+    // The role a config created here will hold. Destinations and Directory Sources are two
+    // instances over the same `type="storage"` list, so the type alone cannot say which
+    // adapters belong on this page.
+    const pickerRole = defaultRole ?? roleFilter;
+
+    // The dialogs used to say "Destination" for every storage adapter, so the Directory
+    // Sources page invited you to add a destination and then filed it under sources.
+    const storageNoun = pickerRole ? storageRoleLabel(pickerRole) : "Storage Connection";
+
     useEffect(() => {
-        // Filter definitions by type
-        setAvailableAdapters(ADAPTER_DEFINITIONS.filter(d => d.type === type));
+        // Filtered by type, and for storage also by the role this page creates. An adapter
+        // that cannot serve that role has no business being offered - the API refuses it,
+        // so picking it could only ever end in a rejected save.
+        setAvailableAdapters(ADAPTER_DEFINITIONS.filter(d =>
+            d.type === type
+            && (type !== 'storage' || !pickerRole || supportsStorageRole(d.supportedRoles, pickerRole))
+        ));
         fetchConfigs();
-    }, [type, fetchConfigs]);
+    }, [type, pickerRole, fetchConfigs]);
 
     // Poll every 10 seconds to keep health status up to date
     useEffect(() => {
@@ -321,9 +335,12 @@ export function AdapterManager({ type, title, description, canManage = true, per
                                     <Copy className="h-4 w-4" />
                                 </Button>
                                 {type === 'storage' && (() => {
-                                    const counterpart = (row.original.storageRole ?? STORAGE_ROLES.DESTINATION) === STORAGE_ROLES.SOURCE
-                                        ? STORAGE_ROLES.DESTINATION
-                                        : STORAGE_ROLES.SOURCE;
+                                    const current = row.original.storageRole ?? STORAGE_ROLES.DESTINATION;
+                                    const counterpart = counterpartStorageRole(current);
+                                    // An adapter that only works one way round has no counterpart, and the
+                                    // API refuses the clone - the button could only produce a rejected save.
+                                    const definition = ADAPTER_DEFINITIONS.find((d) => d.id === row.original.adapterId);
+                                    if (!canOfferCounterpart(definition?.supportedRoles, current)) return null;
                                     return (
                                         <Button
                                             variant="ghost"
@@ -481,7 +498,7 @@ export function AdapterManager({ type, title, description, canManage = true, per
             <Dialog open={isPickerOpen} onOpenChange={setIsPickerOpen}>
                 <DialogContent className="sm:max-w-2xl max-h-[90vh] p-0" aria-describedby={undefined}>
                     <DialogHeader className="px-6 pt-6 pb-2 shrink-0">
-                        <DialogTitle>{type === 'notification' ? "Select Notification Type" : (type === 'database' ? "Select Database Type" : (type === 'storage' ? "Select Destination Type" : "Select Type"))}</DialogTitle>
+                        <DialogTitle>{type === 'notification' ? "Select Notification Type" : (type === 'database' ? "Select Database Type" : (type === 'storage' ? `Select ${storageNoun} Type` : "Select Type"))}</DialogTitle>
                     </DialogHeader>
                     <ScrollArea className="*:data-[slot=scroll-area-viewport]:max-h-[calc(90vh-9rem)]">
                         <div className="px-6 pb-6">
@@ -502,7 +519,7 @@ export function AdapterManager({ type, title, description, canManage = true, per
             <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
                 <DialogContent className="sm:max-w-2xl max-h-[90vh] p-0" aria-describedby={undefined}>
                     <DialogHeader className="px-6 pt-6 pb-2 shrink-0">
-                        <DialogTitle>{editingId ? "Edit Configuration" : (type === 'notification' ? "Add New Notification" : (type === 'database' ? "Add New Source" : (type === 'storage' ? "Add New Destination" : "Add New Configuration")))}</DialogTitle>
+                        <DialogTitle>{editingId ? "Edit Configuration" : (type === 'notification' ? "Add New Notification" : (type === 'database' ? "Add New Source" : (type === 'storage' ? `Add New ${storageNoun}` : "Add New Configuration")))}</DialogTitle>
                     </DialogHeader>
                     {isDialogOpen && (
                         <AdapterForm

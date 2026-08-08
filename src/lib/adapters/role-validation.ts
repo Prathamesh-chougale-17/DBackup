@@ -1,6 +1,6 @@
 import { ADAPTER_DEFINITIONS } from "@/lib/adapters/definitions";
 import { ValidationError } from "@/lib/logging/errors";
-import { storageRoleLabel, type StorageRole } from "@/lib/core/storage-roles";
+import { storageRoleLabel, supportsStorageRole, type StorageRole } from "@/lib/core/storage-roles";
 
 /**
  * Refuses a role the adapter cannot serve.
@@ -23,10 +23,12 @@ import { storageRoleLabel, type StorageRole } from "@/lib/core/storage-roles";
 export function validateStorageRole(adapterId: string, storageRole: StorageRole): void {
     const definition = ADAPTER_DEFINITIONS.find((d) => d.id === adapterId);
     const allowed = definition?.supportedRoles;
-    if (!allowed || allowed.includes(storageRole)) return;
+    // The same predicate the picker uses, so a config the UI would never offer is also one
+    // the boundary refuses - and neither can drift from the other.
+    if (!definition || !allowed || supportsStorageRole(allowed, storageRole)) return;
 
     throw new ValidationError(
-        `'${definition!.name}' cannot be used as a ${storageRoleLabel(storageRole)}. `
+        `'${definition.name}' cannot be used as a ${storageRoleLabel(storageRole)}. `
         + `It supports: ${allowed.map(storageRoleLabel).join(", ")}.`
     );
 }

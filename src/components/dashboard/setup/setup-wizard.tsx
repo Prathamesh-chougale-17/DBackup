@@ -17,6 +17,7 @@ import {
     PartyPopper,
 } from "lucide-react";
 import { ADAPTER_DEFINITIONS } from "@/lib/adapters/definitions";
+import { STORAGE_ROLES, supportsStorageRole } from "@/lib/core/storage-roles";
 import { WelcomeStep } from "./steps/welcome-step";
 import { SourceStep } from "./steps/source-step";
 import { DestinationStep } from "./steps/destination-step";
@@ -68,7 +69,15 @@ export function SetupWizard({
 }: SetupWizardProps) {
     // Import adapter definitions client-side (Zod schemas are not serializable across Server→Client boundary)
     const databaseAdapters = useMemo(() => ADAPTER_DEFINITIONS.filter((a) => a.type === "database"), []);
-    const storageAdapters = useMemo(() => ADAPTER_DEFINITIONS.filter((a) => a.type === "storage"), []);
+    // The wizard's storage step is a backup destination by definition - it posts without a
+    // role and takes the column default - so an adapter that can only be a source has no
+    // place here.
+    const storageAdapters = useMemo(
+        () => ADAPTER_DEFINITIONS.filter((a) =>
+            a.type === "storage" && supportsStorageRole(a.supportedRoles, STORAGE_ROLES.DESTINATION)
+        ),
+        []
+    );
     const notificationAdapters = useMemo(() => ADAPTER_DEFINITIONS.filter((a) => a.type === "notification"), []);
     // Build dynamic step list based on permissions
     const steps: StepDefinition[] = useMemo(() => [

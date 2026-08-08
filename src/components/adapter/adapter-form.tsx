@@ -26,34 +26,7 @@ import { useAdapterConnection } from "./use-adapter-connection";
 import { DatabaseFormContent, GenericFormContent, NotificationFormContent, StorageFormContent } from "./form-sections";
 import { SchemaField } from "./schema-field";
 import { SecretStatusProvider } from "./secret-status-context";
-
-/**
- * Walks a Zod schema shape and calls form.setValue for every field that has a
- * Zod .default(...) value AND whose current form value is undefined.
- * This seeds enum/boolean/number defaults without wiping values already typed.
- */
-function seedSchemaDefaults(schema: z.ZodTypeAny, form: any) {
-    if (!(schema instanceof z.ZodObject)) return;
-    const shape = (schema as z.ZodObject<any>).shape;
-    for (const [key, raw] of Object.entries(shape)) {
-        const currentVal = form.getValues(`config.${key}`);
-        if (currentVal !== undefined) continue;
-        // Walk wrappers (Optional, Nullable) to find ZodDefault
-        let s = raw as z.ZodTypeAny;
-        while (s) {
-            const typeName = (s as any)._def?.typeName;
-            if (typeName === "ZodDefault") {
-                form.setValue(`config.${key}`, (s as any)._def.defaultValue());
-                break;
-            }
-            if ((s as any)._def?.innerType) {
-                s = (s as any)._def.innerType;
-            } else {
-                break;
-            }
-        }
-    }
-}
+import { seedSchemaDefaults } from "./schema-defaults";
 
 export function AdapterForm({ type, adapters, onSuccess, initialData, onBack, defaultRole }: { type: string, adapters: AdapterDefinition[], onSuccess: () => void, initialData?: AdapterConfig, onBack?: () => void, defaultRole?: StorageRole }) {
     const [selectedAdapterId, setSelectedAdapterId] = useState<string>(initialData?.adapterId || "");
