@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
-import { useTheme } from "next-themes";
 import { BrowserFrame } from "@/components/site/browser-frame";
 import { SectionHeading } from "@/components/site/section-heading";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -74,7 +73,6 @@ const SCREENSHOTS = [
 const AUTO_ADVANCE_MS = 5000;
 
 export function ProductTour() {
-  const { resolvedTheme } = useTheme();
   const [index, setIndex] = useState(0);
   const [paused, setPaused] = useState(false);
   const [inView, setInView] = useState(true);
@@ -156,23 +154,40 @@ export function ProductTour() {
 
         <BrowserFrame>
           <div className="relative aspect-[2/1] overflow-hidden">
-            {SCREENSHOTS.map((shot, i) => (
-              <Image
-                key={shot.id}
-                src={resolvedTheme === "light" && shot.lightSrc ? shot.lightSrc : shot.src}
-                alt={`DBackup ${shot.label} screenshot`}
-                fill
-                sizes="(min-width: 1024px) 1152px, 100vw"
-                priority={i === 0}
-                loading={i === 0 ? undefined : "eager"}
-                className={cn(
-                  // Scaled up slightly to mask sub-pixel rounding gaps that object-cover
-                  // can leave at certain viewport widths (e.g. exactly 1920px).
-                  "scale-[1.02] object-cover object-top transition-opacity duration-500 motion-reduce:transition-none",
-                  i === index ? "opacity-100" : "opacity-0"
-                )}
-              />
-            ))}
+            {/*
+              Both variants are rendered and the theme picks one in CSS rather than in JS.
+              next-themes cannot know the theme while rendering on the server, so choosing
+              the src from `resolvedTheme` made the server emit the dark screenshot and the
+              client the light one, which React reports as a hydration mismatch. The class
+              on <html> is set by next-themes before first paint, so the right one is
+              showing from the start rather than after a swap.
+
+              The off-theme copy is `display: none`, and a lazy image with no box is never
+              fetched, so a visitor still downloads one screenshot per slide.
+            */}
+            {SCREENSHOTS.flatMap((shot, i) =>
+              ([
+                { theme: "light", src: shot.lightSrc },
+                { theme: "dark", src: shot.src },
+              ] as const).map(({ theme, src }) => (
+                <Image
+                  key={`${shot.id}-${theme}`}
+                  src={src}
+                  alt={`DBackup ${shot.label} screenshot`}
+                  fill
+                  sizes="(min-width: 1024px) 1152px, 100vw"
+                  priority={i === 0}
+                  loading={i === 0 ? undefined : "lazy"}
+                  className={cn(
+                    // Scaled up slightly to mask sub-pixel rounding gaps that object-cover
+                    // can leave at certain viewport widths (e.g. exactly 1920px).
+                    "scale-[1.02] object-cover object-top transition-opacity duration-500 motion-reduce:transition-none",
+                    i === index ? "opacity-100" : "opacity-0",
+                    theme === "light" ? "dark:hidden" : "hidden dark:block"
+                  )}
+                />
+              ))
+            )}
           </div>
         </BrowserFrame>
       </div>

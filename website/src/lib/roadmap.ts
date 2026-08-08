@@ -30,14 +30,6 @@ export interface RoadmapItem {
 
 export const ROADMAP_ITEMS: RoadmapItem[] = [
   {
-    slug: "docker-volume-backups",
-    title: "Docker Volume Backups",
-    description:
-      "Docker volumes as a backup source, listed from the target host the way databases already are, so you pick them instead of typing paths. Containers using a selected volume are stopped for the export and started again afterwards, which you can turn off per job when the data is safe to copy live.",
-    status: "in-progress",
-    category: "backup-engine",
-  },
-  {
     slug: "dbackup-agent",
     title: "DBackup Agent",
     description:
@@ -233,6 +225,15 @@ export interface ShippedItem {
 }
 
 export const SHIPPED_ITEMS: ShippedItem[] = [
+  {
+    slug: "docker-volume-backups",
+    title: "Docker Volume Backups",
+    description:
+      "Docker volumes as a backup source (beta), listed from the target host the way databases already are, so you pick them instead of typing paths. Containers using a selected volume are stopped for the export and started again afterwards, which you can turn off per source when the data is safe to copy live.",
+    version: "v3.2.0",
+    releaseDate: "2026-08-08",
+    changelogAnchor: "v3-2-0-docker-volumes-backup-ssh-key-generation-mongodb-atlas-support-and-bug-fixes",
+  },
   {
     slug: "file-folder-backups",
     title: "File & Folder Backups",

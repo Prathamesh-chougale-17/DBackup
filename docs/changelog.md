@@ -2,13 +2,13 @@
 
 All notable changes to DBackup are documented here.
 
-## vNEXT
-*Release: In Progress*
+## v3.2.0 - Docker Volumes Backup, SSH Key Generation, MongoDB Atlas Support, and Bug Fixes
+*Released: Aug 8, 2026*
 
 ### ✨ Features
 
-- **credentials**: An SSH credential profile can now generate its own keypair instead of taking a pasted one, in Ed25519, RSA 4096 or ECDSA and with an optional passphrase. The private key is created on the server and stored encrypted, and the public key is shown with a copy button and a `.pub` download so it can be installed on the host. ([#143](https://github.com/Skyfay/DBackup/issues/143))
 - **docker**: New **Docker Volumes** source (beta) that reads volume contents through the local Docker socket or from another host over SSH. Volumes are picked from a list of what the daemon can see, and any container holding one is stopped while it is read unless the source says otherwise.
+- **credentials**: An SSH credential profile can now generate its own keypair instead of taking a pasted one, in Ed25519, RSA 4096 or ECDSA and with an optional passphrase. The private key is created on the server and stored encrypted, and the public key is shown with a copy button and a `.pub` download so it can be installed on the host. ([#143](https://github.com/Skyfay/DBackup/issues/143))
 - **MongoDB**: Sources can now reach **MongoDB Atlas** and other clusters that publish an SRV record. A hostname under `mongodb.net` is recognised on its own, and any other cluster can ask for the same by writing its host as `mongodb+srv://your.host`.
 - **MongoDB**: The **Host** field now takes a comma-separated seed list, so a replica set or a pair of `mongos` routers can be reached without a connection URI.
 
@@ -48,8 +48,8 @@ All notable changes to DBackup are documented here.
 
 ### 🐳 Docker
 
-- **Image**: `skyfay/dbackup:vNEXT`
-- **Also tagged as**: `latest`, `vNEXT`
+- **Image**: `skyfay/dbackup:v3.2.0`
+- **Also tagged as**: `latest`, `v3`
 - **CI Image**: `skyfay/dbackup:ci`
 - **Platforms**: linux/amd64, linux/arm64
 

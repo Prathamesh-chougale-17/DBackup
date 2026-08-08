@@ -23,7 +23,7 @@ export const FEATURES = [
   {
     title: "File & Folder Backup",
     description:
-      "Back up an application's config and data directories alongside its database, in one job with one schedule, one retention policy and one key. Folder tree picker, reusable exclude presets, incremental chains, Docker volumes read through the daemon, and VSS shadow copies on SMB.",
+      "An application's config and data directories in the same job as its database, with a folder tree picker, reusable exclude presets, incremental chains, Docker volumes, and VSS shadow copies on SMB.",
   },
   {
     title: "Storage & Destinations",
