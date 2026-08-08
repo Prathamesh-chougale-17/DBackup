@@ -78,6 +78,16 @@ const ADAPTER_RULES: Rule[] = [
             + "in eighteen files.",
     },
     {
+        name: "AutoRemove on a container we wait for",
+        pattern: /AutoRemove/,
+        reason:
+            "A container started with AutoRemove is deleted by the daemon the moment it exits, so a "
+            + "`wait` that arrives afterwards gets 'no such container'. On a local socket that gap is "
+            + "microseconds and it almost always wins; over SSH without socket forwarding every API "
+            + "call is its own process on the target and the wait loses every time - reproduced at 0 of "
+            + "3 with 400 ms per request. Create, start, wait, then remove it yourself.",
+    },
+    {
         name: "Dockerode type outside the engine",
         pattern: /\bDockerode\b/,
         allowed: {

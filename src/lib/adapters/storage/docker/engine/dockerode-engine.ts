@@ -7,7 +7,7 @@
  */
 
 import Docker from "dockerode";
-import { Writable, type Duplex } from "node:stream";
+import type { Duplex } from "node:stream";
 import http from "node:http";
 
 import type { ContainerInfo, DockerEngine, VolumeInfo } from "./types";
@@ -129,17 +129,32 @@ export function createDockerodeEngine(options: DockerodeEngineOptions): DockerEn
             // The one operation needing a process: the archive endpoints write into a volume
             // but cannot delete from one. The globs cover dotfiles, which a bare `*` misses -
             // and a half-emptied data directory is worse than one left alone.
-            const [output] = await docker.run(
-                helperImage,
-                ["sh", "-c", `rm -rf ${MOUNT_ROOT}/..?* ${MOUNT_ROOT}/.[!.]* ${MOUNT_ROOT}/* 2>/dev/null; exit 0`],
-                // Discarded rather than sent anywhere. dockerode insists on a stream, the
-                // helper says nothing worth keeping, and process.stdout here would be
-                // console output by another name.
-                new Writable({ write(_chunk, _enc, cb) { cb(); } }),
-                { HostConfig: { Binds: [`${name}:${MOUNT_ROOT}`], AutoRemove: true } },
-            );
-            if (output?.StatusCode !== 0) {
-                throw new Error(`Could not empty volume '${name}': helper exited with ${output?.StatusCode}`);
+            //
+            // Built from the primitives rather than `docker.run`, and deliberately without
+            // `AutoRemove`. dockerode's run does create, attach, start, then wait - and with
+            // AutoRemove the daemon deletes the container the moment `rm -rf` exits, so a
+            // `wait` that arrives afterwards gets "no such container". On a local socket that
+            // gap is microseconds and it almost always wins; over SSH without socket
+            // forwarding every one of those calls is its own process on the target, and the
+            // wait loses every time. Reproduced at 0 of 3 with 400 ms per request.
+            // The image is already known to be present: the restore checks it before it stops
+            // anything, which is the only path that reaches here.
+            const container = await docker.createContainer({
+                Image: helperImage,
+                Cmd: ["sh", "-c", `rm -rf ${MOUNT_ROOT}/..?* ${MOUNT_ROOT}/.[!.]* ${MOUNT_ROOT}/* 2>/dev/null; exit 0`],
+                HostConfig: { Binds: [`${name}:${MOUNT_ROOT}`] },
+            });
+
+            try {
+                await container.start();
+                const result = await container.wait();
+                if (result?.StatusCode !== 0) {
+                    throw new Error(`Could not empty volume '${name}': helper exited with ${result?.StatusCode}`);
+                }
+            } finally {
+                // Ours to remove now that the daemon does not. A failure here leaves an exited
+                // container behind, which costs nothing and must not mask the real outcome.
+                await container.remove({ force: true }).catch(() => { });
             }
         },
 

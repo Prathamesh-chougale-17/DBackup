@@ -58,7 +58,8 @@ export function openDockerRestoreSession(
         else log.info(message);
     };
 
-    const engine = () => (connection ??= connectDocker(config, (m) => say(m, "warning"))).engine;
+    // Info rather than a warning - see the note in snapshot.ts.
+    const engine = () => (connection ??= connectDocker(config, (m) => say(m))).engine;
 
     /**
      * The helper for one volume, prepared once.

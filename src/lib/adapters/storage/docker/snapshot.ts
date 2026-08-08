@@ -84,7 +84,10 @@ export async function createDockerSnapshot(
     options?: SnapshotOptions
 ): Promise<SnapshotHandle> {
     const say = sayVia(options?.onLog);
-    const connection = openConnection(config, (message) => say(message, "warning"));
+    // Info, not a warning: falling back to the Docker CLI is a working setup, not a problem,
+    // and warning on every run of one trains people to ignore warnings. If the CLI is missing
+    // on the target, that failure is loud on its own.
+    const connection = openConnection(config, (message) => say(message));
     const engine = connection.engine;
     const helperImage = typeof config.helperImage === "string" && config.helperImage.length > 0
         ? config.helperImage
@@ -185,7 +188,7 @@ export async function releaseDockerSnapshot(
 
     // No live session: an orphan, or a release attempted twice. Both are handled by reading
     // the state off the host rather than trusting anything in memory.
-    const connection = openConnection(config, (message) => say(message, "warning"));
+    const connection = openConnection(config, (message) => say(message));
     try {
         const orphans = await findOrphanedHelpers(connection.engine);
         const match = orphans.find((o) => o.containerId === handle.id);
