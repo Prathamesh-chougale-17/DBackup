@@ -12,6 +12,7 @@ Database adapters handle the dump and restore operations for different database 
 | MongoDB | `mongodb` | `mongodump`, `mongorestore` | ✅ | `.archive` |
 | SQLite | `sqlite` | None (file copy) | ✅ | `.db` |
 | MSSQL | `mssql` | None (TDS protocol) | ✅ (TDS tunnelled) | `.bak` |
+| Azure SQL Database | `azure-sql` | `sqlpackage` | ❌ (public PaaS endpoint) | `.bacpac` |
 | Redis | `redis` | `redis-cli` | ✅ | `.rdb` |
 | Firebird | `firebird` | `gbak`, `isql` | ✅ | `.fbk` |
 
@@ -28,6 +29,7 @@ getBackupFileExtension("redis");    // "rdb"
 getBackupFileExtension("mongodb");  // "archive"
 getBackupFileExtension("sqlite");   // "db"
 getBackupFileExtension("mssql");    // "bak"
+getBackupFileExtension("azure-sql"); // "bacpac"
 getBackupFileExtension("firebird"); // "fbk"
 ```
 
@@ -38,6 +40,7 @@ getBackupFileExtension("firebird"); // "fbk"
 | MySQL/MariaDB | `.sql` | Standard SQL dump format |
 | PostgreSQL | `.sql` | SQL dump (or `.dump` for custom format) |
 | MSSQL | `.bak` | Native SQL Server backup format |
+| Azure SQL Database | `.bacpac` | SqlPackage data-tier application export, a ZIP so it is never recompressed |
 | MongoDB | `.archive` | mongodump `--archive` format |
 | Redis | `.rdb` | Redis Database snapshot format |
 | SQLite | `.db` | Direct database file copy |
@@ -129,6 +132,7 @@ Each database adapter can optionally return size and table count information. Th
 | **PostgreSQL** | `pg_database_size(datname)` | `COUNT(*)` from `information_schema.tables` (excl. system schemas) |
 | **MongoDB** | Native `sizeOnDisk` from `listDatabases` command | `listCollections().length` per database |
 | **MSSQL** | `sys.master_files` (`SUM(size) * 8 * 1024`) | `COUNT(*)` from `INFORMATION_SCHEMA.TABLES` |
+| **Azure SQL Database** | `sys.database_files` (`SUM(size) * 8 * 1024`, data files only), one connection per database | `COUNT(*)` from `sys.tables`, same connection |
 | **SQLite** | Not supported | Not supported |
 | **Redis** | Not supported | Not supported |
 

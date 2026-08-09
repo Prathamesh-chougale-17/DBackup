@@ -1,7 +1,7 @@
 import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
-import { executeQueryWithMessages, getDatabases, supportsCompression, type SqlServerMessage } from "./connection";
+import { assertBackupSupported, executeQueryWithMessages, getDatabases, supportsCompression, type SqlServerMessage } from "./connection";
 import { getDialect } from "./dialects";
 import { isCompositeHost } from "@/lib/transport";
 import fs from "fs/promises";
@@ -48,6 +48,10 @@ export async function dump(
     };
 
     try {
+        // Before anything else, because a scheduled job never runs a connection
+        // test and the runner discards the one it does run.
+        await assertBackupSupported(config, host);
+
         // Determine databases to backup
         let databases: string[] = [];
         if (Array.isArray(config.database)) {

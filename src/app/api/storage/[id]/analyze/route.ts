@@ -110,7 +110,7 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
                         }
                         // For server-based adapters (not sqlite) with empty names,
                         // use the source type to signal the frontend that this is a DB restore
-                        const serverAdapters = ['mysql', 'mariadb', 'postgres', 'mongodb', 'mssql', 'redis', 'valkey'];
+                        const serverAdapters = ['mysql', 'mariadb', 'postgres', 'mongodb', 'mssql', 'azure-sql', 'redis', 'valkey', 'firebird'];
                         if (meta.sourceType && serverAdapters.includes(meta.sourceType.toLowerCase())) {
                             return NextResponse.json({ databases: [], sourceType: meta.sourceType });
                         }

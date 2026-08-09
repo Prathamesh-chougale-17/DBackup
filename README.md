@@ -61,7 +61,7 @@ That promise shapes the architecture: incremental backups store whole changed fi
 
 ### 🗄️ Database Backup
 
-- **9 Database Engines** - MySQL, MariaDB, PostgreSQL, MongoDB, SQLite, Redis, Valkey, Microsoft SQL Server, and Firebird (beta)
+- **10 Database Engines** - MySQL, MariaDB, PostgreSQL, MongoDB, SQLite, Redis, Valkey, Microsoft SQL Server, Azure SQL Database (beta), and Firebird (beta)
 - **Selective Database Backup** - Choose exactly which databases to back up per job instead of creating separate sources for each database
 - **Multi-Database Jobs** - Back up multiple databases from a single source in one job with a unified TAR archive format
 - **AES-256-GCM Encryption** - Encrypt backups with managed Encryption Profiles, key rotation, and downloadable Recovery Kits for offline decryption
@@ -185,6 +185,7 @@ Open [https://localhost:3000](https://localhost:3000) and create your admin acco
 | Valkey | 7.2+ | Direct, SSH | Guided |
 | SQLite | 3.x | Local, SSH | Yes |
 | Microsoft SQL Server | 2017, 2019, 2022, Azure SQL Edge | Direct, SSH | Yes |
+| Azure SQL Database (beta) | Single database, elastic pool | Direct | Yes (drops the target first) |
 | Firebird (beta) | 3.x, 4.x, 5.x | Direct, SSH | Yes (pre-configured aliases) |
 
 ## 📁 Directory Sources

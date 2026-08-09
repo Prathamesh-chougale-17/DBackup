@@ -26,6 +26,19 @@ const CLI_REQUIREMENTS: Record<string, string> = {
     firebird: 'gbak',
 };
 
+/**
+ * `azure-sql` is deliberately absent from this file, and its absence is not an oversight.
+ *
+ * There is no container that behaves like Azure SQL Database. The emulator Microsoft
+ * published is built on azure-sql-edge, which reports EngineEdition 9 rather than 5, has
+ * `sys.master_files` and accepts three-part names - so a suite passing against it would
+ * prove the opposite of what the adapter has to handle, and the adapter's own engine guard
+ * would reject it on connect.
+ *
+ * Coverage is the unit suite in tests/unit/adapters/database/azure-sql/ plus a manual
+ * acceptance run against a real Azure SQL Database before release.
+ */
+
 // Check which CLI tools are missing
 const missingCli = Object.entries(CLI_REQUIREMENTS)
     .filter(([, cli]) => !isCliAvailable(cli))

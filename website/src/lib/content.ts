@@ -81,6 +81,7 @@ export const DATABASES: AdapterItem[] = [
   { id: "redis", label: "Redis" },
   { id: "valkey", label: "Valkey" },
   { id: "mssql", label: "Microsoft SQL Server" },
+  { id: "azure-sql", label: "Azure SQL Database (Beta)" },
   { id: "firebird", label: "Firebird (Beta)" },
 ];
 

@@ -1,7 +1,7 @@
 import type { ExecutionHost } from "@/lib/transport";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
-import { executeQuery, executeParameterizedQuery, executeQueryWithMessages, type SqlServerMessage } from "./connection";
+import { assertBackupSupported, executeQuery, executeParameterizedQuery, executeQueryWithMessages, type SqlServerMessage } from "./connection";
 import { getDialect } from "./dialects";
 import { assertValidDatabaseName, toPhysicalFileName } from "./identifiers";
 import { isCompositeHost } from "@/lib/transport";
@@ -33,6 +33,10 @@ type MSSQLRestoreConfig = MSSQLConfig & {
  * Prepare restore by validating target databases
  */
 export async function prepareRestore(config: MSSQLRestoreConfig, databases: string[], host: ExecutionHost): Promise<void> {
+    // Preflight runs before an Execution row exists, so an engine that cannot
+    // RESTORE at all is rejected here without leaving a failed run behind.
+    await assertBackupSupported(config, host);
+
     // Check if target databases can be created/overwritten
     for (const dbName of databases) {
         // Accept every name SQL Server accepts as a delimited identifier.

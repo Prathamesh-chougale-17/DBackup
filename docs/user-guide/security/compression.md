@@ -105,7 +105,7 @@ counts as `gz`.
 | Audio | `aac` `ape` `flac` `m4a` `mka` `mp3` `oga` `ogg` `opus` `wma` |
 | Images | `avif` `gif` `heic` `heif` `jp2` `jpeg` `jpg` `jxl` `png` `webp` |
 | Archives | `7z` `br` `bz2` `cab` `gz` `lz4` `lzma` `rar` `tbz2` `tgz` `txz` `xz` `zip` `zst` |
-| ZIP containers | `apk` `docx` `epub` `ipa` `jar` `nupkg` `odp` `ods` `odt` `pptx` `vsix` `war` `whl` `xlsx` `xpi` |
+| ZIP containers | `apk` `bacpac` `docx` `epub` `ipa` `jar` `nupkg` `odp` `ods` `odt` `pptx` `vsix` `war` `whl` `xlsx` `xpi` |
 | Web fonts | `woff` `woff2` |
 | Encrypted | `age` `enc` `gpg` `pgp` |
 | Disk images | `dmg` |

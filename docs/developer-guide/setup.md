@@ -17,37 +17,46 @@ Complete guide to setting up DBackup for development.
   - `mysql` / `mysqldump` (MySQL/MariaDB)
   - `psql` / `pg_dump` (PostgreSQL)
   - `mongodump` / `mongorestore` (MongoDB)
-  - `gbak` / `isql` (Firebird) - see [`scripts/setup-dev-macos.sh`](https://github.com/Skyfay/DBackup/blob/main/scripts/setup-dev-macos.sh) for a scripted macOS install (no Homebrew formula exists)
+  - `gbak` / `isql` (Firebird)
+  - `sqlpackage` (Azure SQL Database)
+
+Use the setup script for your platform rather than installing these by hand. Several of them have non-obvious requirements that a plain `brew install` gets wrong.
 
 ### macOS Installation
 
 ```bash
-# Install Node.js via Homebrew
 brew install node
-
-# Install pnpm
 npm install -g pnpm
 
-# Install database CLI tools
-brew install mysql-client libpq mongodb-database-tools
-
-# Add to PATH (add to ~/.zshrc)
-export PATH="/opt/homebrew/opt/mysql-client/bin:$PATH"
-export PATH="/opt/homebrew/opt/libpq/bin:$PATH"
+# Installs every CLI tool the adapters need, and prints the PATH lines to add
+./scripts/setup-dev-macos.sh
 ```
+
+Then add this to `~/.zshrc`. The script prints it too, but it is easy to skip past:
+
+```bash
+export PATH="/opt/homebrew/opt/mysql-client/bin:/opt/homebrew/opt/postgresql@18/bin:/opt/homebrew/opt/postgresql@16/bin:/opt/homebrew/opt/postgresql@14/bin:/opt/homebrew/firebird-client/bin:$PATH"
+```
+
+SqlPackage needs no entry of its own. The script installs it into `$(brew --prefix)/bin`, which is already on `PATH`, and wraps it so it finds the .NET runtime without a `DOTNET_ROOT` variable.
+
+::: warning Do not install `libpq` for PostgreSQL
+`libpq` ships a `pg_dump` compiled without LZ4 and ZSTD support. If its directory comes first on `PATH`, PostgreSQL backups with native compression fail. Install the full `postgresql@XX` packages instead, which the script does.
+:::
+
+::: tip Restart the dev server after changing PATH
+A running `pnpm dev` inherited its environment at launch, and an editor-launched terminal often carries a different one than your login shell. If an adapter reports a missing CLI tool that works in your terminal, this is almost always why.
+:::
 
 ### Ubuntu/Debian Installation
 
 ```bash
-# Install Node.js
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt-get install -y nodejs
-
-# Install pnpm
 npm install -g pnpm
 
-# Install database CLI tools
-sudo apt-get install mysql-client postgresql-client mongodb-database-tools
+# Installs every CLI tool, including SqlPackage, and prints a summary of what resolved
+sudo ./scripts/setup-dev-debian.sh
 ```
 
 ## Clone and Install

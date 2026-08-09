@@ -1,3 +1,17 @@
+# SqlPackage, for the Azure SQL Database adapter.
+#
+# Built in its own stage so the .NET SDK never reaches the runtime image. The tool
+# is published as portable IL under tools/<tfm>/any, so this produces the correct
+# architecture automatically: buildx runs this stage once per target platform.
+# Verified on linux/arm64 as well as linux/amd64 - Microsoft's standalone zip is
+# x64-only, which is why the dotnet tool is used instead of the download.
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS sqlpackage-build
+RUN dotnet tool install --tool-path /tmp/sqlpkg microsoft.sqlpackage && \
+    PAYLOAD="$(find /tmp/sqlpkg/.store -type d -path '*/tools/net10.0/any' | head -1)" && \
+    test -n "$PAYLOAD" && \
+    mkdir -p /opt/sqlpackage && \
+    cp -a "$PAYLOAD"/. /opt/sqlpackage/
+
 # Base Image: Node.js 24 on Debian Slim (bookworm)
 FROM node:24-slim AS base
 
@@ -97,6 +111,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     echo "/opt/firebird/lib" > /etc/ld.so.conf.d/firebird.conf && \
     ldconfig && \
     rm -rf /tmp/firebird.tar.gz /tmp/firebird-extract
+
+# Step 6: SqlPackage runtime, for the Azure SQL Database adapter.
+#
+# Only the .NET runtime, never the SDK - the tool itself came from the stage above.
+# libicu is a hard dependency: without it .NET aborts at startup with a globalization
+# error that says nothing about the missing package.
+#
+# The wrapper exists because the adapter resolves the binary with host.which("sqlpackage"),
+# and the apphost shim from a --tool-path install is not on PATH here.
+RUN apt-get update && apt-get install -y --no-install-recommends libicu72 && \
+    rm -rf /var/lib/apt/lists/* && \
+    curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh && \
+    bash /tmp/dotnet-install.sh --channel 10.0 --runtime dotnet --install-dir /usr/share/dotnet --no-path && \
+    rm /tmp/dotnet-install.sh
+
+COPY --from=sqlpackage-build /opt/sqlpackage /opt/sqlpackage
+
+RUN printf '#!/bin/sh\nexec /usr/share/dotnet/dotnet /opt/sqlpackage/sqlpackage.dll "$@"\n' > /usr/local/bin/sqlpackage && \
+    chmod +x /usr/local/bin/sqlpackage && \
+    sqlpackage /version
 
 # Enable corepack for pnpm support and symlink PostgreSQL 18 binaries
 # On Debian with PGDG, pg binaries live under /usr/lib/postgresql/18/bin/

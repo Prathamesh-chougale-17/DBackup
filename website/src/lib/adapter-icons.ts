@@ -17,6 +17,7 @@ import slackIcon from "@iconify-icons/logos/slack-icon";
 import teamsIcon from "@iconify-icons/logos/microsoft-teams";
 import telegramIcon from "@iconify-icons/logos/telegram";
 import dockerIcon from "@iconify-icons/logos/docker-icon";
+import azureIcon from "@iconify-icons/logos/azure";
 
 // Simple Icons (monochrome - brand color applied via getAdapterColor)
 import mssqlIcon from "@iconify-icons/simple-icons/microsoftsqlserver";
@@ -63,6 +64,7 @@ const ADAPTER_ICON_MAP: Record<string, IconifyIcon> = {
   redis: redisIcon,
   valkey: valkeyIcon,
   mssql: mssqlIcon,
+  "azure-sql": azureIcon,
   firebird: firebirdIcon,
   // Storage
   "local-filesystem": harddiskIcon,

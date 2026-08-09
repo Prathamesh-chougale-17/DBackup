@@ -4,7 +4,7 @@ import { DEFAULT_S3_UPLOAD_TUNING, type AdapterDefinition } from "./shared";
 import { STORAGE_ROLES } from "@/lib/core/storage-roles";
 import {
     MySQLSchema, MariaDBSchema, PostgresSchema, MongoDBSchema,
-    SQLiteSchema, MSSQLSchema, RedisSchema, FirebirdSchema,
+    SQLiteSchema, MSSQLSchema, AzureSQLSchema, RedisSchema, FirebirdSchema,
 } from "./database";
 import {
     LocalStorageSchema, S3GenericSchema, S3AWSSchema, S3R2Schema, S3HetznerSchema,
@@ -29,6 +29,7 @@ export const ADAPTER_DEFINITIONS: AdapterDefinition[] = [
     { id: "mongodb", type: "database", name: "MongoDB", configSchema: MongoDBSchema },
     { id: "sqlite", type: "database", name: "SQLite", configSchema: SQLiteSchema },
     { id: "mssql", type: "database", name: "Microsoft SQL Server", configSchema: MSSQLSchema },
+    { id: "azure-sql", type: "database", name: "Azure SQL Database", beta: true, configSchema: AzureSQLSchema },
     { id: "redis", type: "database", name: "Redis", configSchema: RedisSchema },
     { id: "valkey", type: "database", name: "Valkey", configSchema: RedisSchema },
     { id: "firebird", type: "database", name: "Firebird", beta: true, configSchema: FirebirdSchema },

@@ -10,10 +10,13 @@ All notable changes to DBackup are documented here.
 ### ✨ Features
 
 - **retention**: Smart (GFS) policies can now keep an hourly tier next to daily, weekly, monthly and yearly. The field stays hidden behind **Add hourly tier** until it is needed, so existing policies keep their behaviour unchanged.
+- **azure-sql**: New **Azure SQL Database** source type in beta, backing up through a BACPAC export. Restoring onto an existing database drops it first, because a BACPAC import has no overwrite mode, and Azure SQL Managed Instance and Azure Synapse Analytics stay unsupported.
 
 ### 🐛 Bug Fixes
 
 - **retention**: A policy whose mode carries no settings, such as **Smart** with no tiers stored, now keeps every backup instead of deleting all of them. Only configurations written through the API could reach this state.
+- **mssql**: Azure SQL Database and Azure SQL Managed Instance are now refused up front with a message naming the product, instead of connecting successfully and then failing partway through a backup with a raw T-SQL error. Both are also named correctly in the connection test, where they previously showed as **SQL**.
+- **mssql**: The Database Explorer now lists databases on servers that do not expose **sys.master_files**, showing names and table counts without sizes rather than failing the whole page with **Connection Failed**.
 
 ### 🔄 Changed
 
@@ -28,6 +31,19 @@ All notable changes to DBackup are documented here.
 - **s3**: New **Parallel Upload Parts** setting on every S3 backup destination sets how many parts upload at once and how large each one may be, up to 32 parts of 64 MB. The form shows how much memory the chosen combination uses per upload.
 - **s3**: Part size now adapts to the backup being uploaded, never above the configured maximum. A part size too large for a given archive used to leave connections with nothing to upload, which cost a 1.39 GB backup to Cloudflare R2 a third of its throughput at 32 parts of 64 MB.
 - **s3**: The run log now records upload throughput and the part size actually used. Throughput was only ever shown in the live progress detail, which is gone once the run ends.
+
+### 📝 Documentation
+
+- **developer-guide**: The setup guide now points at the platform setup scripts instead of listing a shorter set of packages beside them. It also warns against installing `libpq` for PostgreSQL, whose `pg_dump` is built without LZ4 and ZSTD and breaks native compression.
+
+### 🧪 Tests
+
+- **tests**: The adapter transport lint guard no longer fails under load. It imports the entire adapter registry and was running against the default 5 second limit, which every new adapter moved a little closer to the edge.
+
+### 🔧 CI/CD
+
+- **docker**: The image now ships SqlPackage and the .NET runtime, which the Azure SQL Database source needs. This adds roughly 270 MB on both **linux/amd64** and **linux/arm64**.
+- **scripts**: The macOS and Debian development setup scripts now install SqlPackage, which the Azure SQL Database source needs. On macOS it lands in the Homebrew prefix and is wrapped so it needs neither a `PATH` entry nor a `DOTNET_ROOT` variable.
 
 ### 🐳 Docker
 

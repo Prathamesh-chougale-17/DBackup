@@ -5,6 +5,7 @@ import { PostgresAdapter } from "./database/postgres";
 import { MongoDBAdapter } from "./database/mongodb";
 import { SQLiteAdapter } from "./database/sqlite";
 import { MSSQLAdapter } from "./database/mssql";
+import { AzureSQLAdapter } from "./database/azure-sql";
 import { RedisAdapter } from "./database/redis";
 import { ValkeyAdapter } from "./database/valkey";
 import { FirebirdAdapter } from "./database/firebird";
@@ -46,6 +47,7 @@ export function registerAdapters() {
     registry.register(MongoDBAdapter);
     registry.register(SQLiteAdapter);
     registry.register(MSSQLAdapter);
+    registry.register(AzureSQLAdapter);
     registry.register(RedisAdapter);
     registry.register(ValkeyAdapter);
     registry.register(FirebirdAdapter);

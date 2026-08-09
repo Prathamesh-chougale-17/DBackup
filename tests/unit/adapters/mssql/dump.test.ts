@@ -3,13 +3,15 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { join } from "node:path";
 
-const { mockExecuteWithMessages, mockGetDatabases, mockSupportsCompression } = vi.hoisted(() => ({
+const { mockExecuteWithMessages, mockGetDatabases, mockSupportsCompression, mockAssertSupported } = vi.hoisted(() => ({
     mockExecuteWithMessages: vi.fn(),
     mockGetDatabases: vi.fn(),
     mockSupportsCompression: vi.fn(),
+    mockAssertSupported: vi.fn(),
 }));
 
 vi.mock("@/lib/adapters/database/mssql/connection", () => ({
+    assertBackupSupported: (...args: unknown[]) => mockAssertSupported(...args),
     executeQueryWithMessages: (...args: unknown[]) => mockExecuteWithMessages(...args),
     getDatabases: (...args: unknown[]) => mockGetDatabases(...args),
     supportsCompression: (...args: unknown[]) => mockSupportsCompression(...args),
@@ -61,12 +63,31 @@ beforeEach(async () => {
     mountDir = await mkdtemp(join(os.tmpdir(), "dbackup-mssql-mount-"));
     outDir = await mkdtemp(join(os.tmpdir(), "dbackup-mssql-out-"));
     mockSupportsCompression.mockResolvedValue(true);
+    mockAssertSupported.mockResolvedValue(undefined);
     mockExecuteWithMessages.mockResolvedValue({ result: {}, messages: [] });
 });
 
 afterEach(async () => {
     await rm(mountDir, { recursive: true, force: true });
     await rm(outDir, { recursive: true, force: true });
+});
+
+describe("MSSQL dump against an unsupported engine", () => {
+    it("refuses before sending a single statement", async () => {
+        // Azure SQL Database used to get all the way to BACKUP DATABASE and fail
+        // there with "not supported in this version of SQL Server", which names
+        // neither the product nor the way forward.
+        serverWritesBackup();
+        mockAssertSupported.mockRejectedValue(
+            new Error("Azure SQL Database is not supported by this adapter. It has no BACKUP DATABASE statement at all."),
+        );
+
+        const result = await dump(config() as never, join(outDir, "out.bak"), createFakeHost({ kind: "direct" }));
+
+        expect(result.success).toBe(false);
+        expect(result.error).toContain("Azure SQL Database is not supported");
+        expect(queries()).toHaveLength(0);
+    });
 });
 
 describe("MSSQL dump with a shared mount", () => {

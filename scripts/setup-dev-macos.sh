@@ -101,6 +101,58 @@ brew install rsync
 echo -e "${GREEN}Installing sshpass (for Rsync password authentication)...${NC}"
 brew install hudochenkov/sshpass/sshpass || echo -e "${YELLOW}sshpass install failed - password auth for rsync will not work. Use SSH keys instead.${NC}"
 
+echo -e "${GREEN}Installing SqlPackage (BACPAC export/import for the Azure SQL Database adapter)...${NC}"
+echo -e "${YELLOW}Microsoft's standalone macOS download is x64-only. The dotnet tool is portable IL${NC}"
+echo -e "${YELLOW}and runs natively on Apple Silicon, which is the route the container image takes too.${NC}"
+if ! command -v dotnet &> /dev/null; then
+    brew install dotnet
+fi
+if command -v dotnet &> /dev/null; then
+    SQLPKG_PREFIX="$(brew --prefix)"
+    SQLPKG_SHARE="$SQLPKG_PREFIX/share/sqlpackage"
+    SQLPKG_TMP="$(mktemp -d)"
+
+    # Installed into a temp path and then relocated, rather than left in
+    # ~/.dotnet/tools. That directory is on nobody's PATH by default, and a dev
+    # server started from an editor inherits its environment at launch, so the
+    # adapter reported "sqlpackage was not found" even after a correct install.
+    # $(brew --prefix)/bin is already on PATH for anyone with Homebrew.
+    if dotnet tool install --tool-path "$SQLPKG_TMP" microsoft.sqlpackage > /dev/null 2>&1; then
+        # The package ships several target frameworks side by side. Picking the first
+        # one `find` returns lands on net8.0, whose launcher then demands a .NET 8
+        # runtime that a Homebrew install of dotnet 10 does not have. Match the
+        # installed runtime instead, and fall back to the newest build on offer.
+        SQLPKG_MAJOR="$(dotnet --list-runtimes | awk '/Microsoft.NETCore.App/ {print $2}' | cut -d. -f1 | sort -n | tail -1)"
+        SQLPKG_PAYLOAD="$(find "$SQLPKG_TMP/.store" -type d -path "*/tools/net${SQLPKG_MAJOR}.0/any" | head -1)"
+        if [ -z "$SQLPKG_PAYLOAD" ]; then
+            SQLPKG_PAYLOAD="$(find "$SQLPKG_TMP/.store" -type d -path '*/tools/net*/any' | sort -V | tail -1)"
+        fi
+        if [ -n "$SQLPKG_PAYLOAD" ]; then
+            rm -rf "$SQLPKG_SHARE"
+            mkdir -p "$SQLPKG_SHARE"
+            cp -a "$SQLPKG_PAYLOAD"/. "$SQLPKG_SHARE/"
+
+            # A wrapper rather than the apphost shim. The shim probes the default
+            # /usr/local/share/dotnet for a runtime that Homebrew keeps under its own
+            # prefix, and fails with "Download the .NET runtime" - which reads as a
+            # missing install rather than a missing DOTNET_ROOT. Naming the runtime
+            # outright removes the variable from the picture entirely.
+            printf '#!/bin/sh\nexec "%s" "%s/sqlpackage.dll" "$@"\n' \
+                "$(command -v dotnet)" "$SQLPKG_SHARE" > "$SQLPKG_PREFIX/bin/sqlpackage"
+            chmod +x "$SQLPKG_PREFIX/bin/sqlpackage"
+
+            echo -e "${GREEN}SqlPackage installed to $SQLPKG_PREFIX/bin/sqlpackage ($("$SQLPKG_PREFIX/bin/sqlpackage" /version 2>/dev/null | tail -1))${NC}"
+        else
+            echo -e "${RED}Could not locate the SqlPackage payload - skipping.${NC}"
+        fi
+    else
+        echo -e "${RED}SqlPackage install failed - the Azure SQL Database adapter will not work locally.${NC}"
+    fi
+    rm -rf "$SQLPKG_TMP"
+else
+    echo -e "${RED}dotnet is unavailable - skipping SqlPackage. The Azure SQL Database adapter will not work locally.${NC}"
+fi
+
 echo -e "${GREEN}Installing generally useful tools (zip)...${NC}"
 brew install zip
 
@@ -112,6 +164,8 @@ echo -e "${YELLOW}The 'libpq' package installs a pg_dump WITHOUT LZ4/ZSTD suppor
 echo -e "${YELLOW}/opt/homebrew/opt/libpq/bin - if that comes first, native compression fails.${NC}"
 echo ""
 echo 'export PATH="/opt/homebrew/opt/mysql-client/bin:/opt/homebrew/opt/postgresql@18/bin:/opt/homebrew/opt/postgresql@16/bin:/opt/homebrew/opt/postgresql@14/bin:/opt/homebrew/firebird-client/bin:$PATH"'
+echo ""
+echo -e "${GREEN}SqlPackage needs no PATH entry - it was installed into $(brew --prefix)/bin, which is already there.${NC}"
 echo ""
 echo -e "${YELLOW}Add to ~/.zshrc permanently:${NC}"
 echo 'echo '\''export PATH="/opt/homebrew/opt/mysql-client/bin:/opt/homebrew/opt/postgresql@18/bin:/opt/homebrew/opt/postgresql@16/bin:/opt/homebrew/opt/postgresql@14/bin:/opt/homebrew/firebird-client/bin:$PATH"'\'' >> ~/.zshrc'
