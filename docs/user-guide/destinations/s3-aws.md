@@ -15,6 +15,8 @@ Amazon S3 requires a [Credential Profile](/user-guide/security/credential-profil
 | **Bucket** | S3 bucket name | - | ✅ |
 | **Primary Credential** | `ACCESS_KEY` credential profile (Access Key ID + Secret Access Key) | - | ✅ |
 | **Path Prefix** | Folder path within the bucket | - | ❌ |
+| **Parts at once** | Upload parts sent simultaneously ([details](/user-guide/destinations/#upload-performance-s3)) | `8` | ❌ |
+| **Max part size (MB)** | Upper bound on the size of each upload part | `8` | ❌ |
 | **Storage Class** | S3 storage class for uploaded objects | `STANDARD` | ❌ |
 
 ### Storage Classes
@@ -69,7 +71,7 @@ Instead of `AmazonS3FullAccess`, scope permissions to a single bucket:
 
 ## How It Works
 
-- Backups upload via the AWS SDK using multipart upload for large files
+- Backups upload via the AWS SDK as 8 parallel parts by default ([details](/user-guide/destinations/#upload-performance-s3))
 - All credentials are stored AES-256-GCM encrypted in the database
 - Storage class is set per-object at upload time
 - The Path Prefix creates a virtual folder structure within your bucket
@@ -102,7 +104,7 @@ The AWS Access Key Id you provided does not exist in our records
 
 ### Slow Uploads / Timeout
 
-**Solution:** Choose a region geographically close to your DBackup server. For large backups, ensure your server has sufficient upload bandwidth.
+**Solution:** Check the upload speed the run log reports at the end of the upload. If it is well below what the server's link can do, raise **Parts at once** under Configuration ([details](/user-guide/destinations/#upload-performance-s3)). A single connection to S3 often tops out around 5 to 10 MB/s no matter how much bandwidth is available. Also choose a region geographically close to your DBackup server.
 
 ## Next Steps
 

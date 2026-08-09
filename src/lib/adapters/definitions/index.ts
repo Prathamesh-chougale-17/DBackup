@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { ADAPTER_CREDENTIAL_REQUIREMENTS } from "@/lib/core/credential-requirements";
-import type { AdapterDefinition } from "./shared";
+import { DEFAULT_S3_UPLOAD_TUNING, type AdapterDefinition } from "./shared";
 import { STORAGE_ROLES } from "@/lib/core/storage-roles";
 import {
     MySQLSchema, MariaDBSchema, PostgresSchema, MongoDBSchema,
@@ -55,10 +55,14 @@ export const ADAPTER_DEFINITIONS: AdapterDefinition[] = [
         // restore to one file at a time.
         transferConcurrency: { default: 4, max: 8 },
     },
-    { id: "s3-aws", type: "storage", group: "Cloud Storage (S3)", name: "Amazon S3", configSchema: S3AWSSchema },
-    { id: "s3-generic", type: "storage", group: "Cloud Storage (S3)", name: "S3 Compatible (Generic)", configSchema: S3GenericSchema },
-    { id: "s3-r2", type: "storage", group: "Cloud Storage (S3)", name: "Cloudflare R2", configSchema: S3R2Schema },
-    { id: "s3-hetzner", type: "storage", group: "Cloud Storage (S3)", name: "Hetzner Object Storage", configSchema: S3HetznerSchema },
+    // The four S3 adapters share one upload path and one range. The AWS SDK's own defaults are
+    // 4 parts of 5 MB, which measured 27 MB/s against R2 on a 10 Gbit link while everything
+    // local in the same run moved at over 230 MB/s. See `s3-upload-tuning.ts` for the numbers
+    // and for why the two values have to be set together.
+    { id: "s3-aws", type: "storage", group: "Cloud Storage (S3)", name: "Amazon S3", configSchema: S3AWSSchema, multipartUpload: DEFAULT_S3_UPLOAD_TUNING },
+    { id: "s3-generic", type: "storage", group: "Cloud Storage (S3)", name: "S3 Compatible (Generic)", configSchema: S3GenericSchema, multipartUpload: DEFAULT_S3_UPLOAD_TUNING },
+    { id: "s3-r2", type: "storage", group: "Cloud Storage (S3)", name: "Cloudflare R2", configSchema: S3R2Schema, multipartUpload: DEFAULT_S3_UPLOAD_TUNING },
+    { id: "s3-hetzner", type: "storage", group: "Cloud Storage (S3)", name: "Hetzner Object Storage", configSchema: S3HetznerSchema, multipartUpload: DEFAULT_S3_UPLOAD_TUNING },
     { id: "google-drive", type: "storage", group: "Cloud Drives", name: "Google Drive", configSchema: GoogleDriveSchema },
     {
         id: "dropbox", type: "storage", group: "Cloud Drives", name: "Dropbox", configSchema: DropboxSchema,
@@ -138,6 +142,19 @@ for (const def of ADAPTER_DEFINITIONS) {
     if (def.type !== "storage") continue;
     def.configSchema = def.configSchema.extend({
         maxConcurrentFiles: z.coerce.number().int().min(1).optional(),
+    });
+}
+
+// Same reasoning one step narrower: only an adapter that declares multipart upload carries the
+// two fields, because on anything else they would be stored and never read. Bounded only by
+// what the S3 protocol itself refuses - a part below 5 MB - for the same reason as above, so
+// lowering a ceiling in a later version cannot make an existing connection unsaveable.
+// Clamping to the adapter's range happens in `resolveS3UploadTuning`.
+for (const def of ADAPTER_DEFINITIONS) {
+    if (!def.multipartUpload) continue;
+    def.configSchema = def.configSchema.extend({
+        uploadConcurrency: z.coerce.number().int().min(1).optional(),
+        uploadPartSizeMb: z.coerce.number().int().min(5).optional(),
     });
 }
 

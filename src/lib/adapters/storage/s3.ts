@@ -3,6 +3,7 @@ import { S3GenericSchema, S3AWSSchema, S3R2Schema, S3HetznerSchema } from "@/lib
 import { S3Client, ListObjectsV2Command, GetObjectCommand, DeleteObjectCommand, PutObjectCommand, HeadObjectCommand, HeadBucketCommand, StorageClass } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import { createReadStream, createWriteStream } from "fs";
+import { stat } from "fs/promises";
 import { pipeline } from "stream/promises";
 import { Transform, Readable } from "stream";
 import path from "path";
@@ -10,6 +11,8 @@ import { LogLevel, LogType } from "@/lib/core/logs";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { stripSlashes } from "@/lib/paths";
+import { formatBytes } from "@/lib/utils";
+import { resolveS3UploadTuning } from "@/lib/adapters/s3-upload-tuning";
 
 const log = logger.child({ adapter: "s3" });
 
@@ -21,6 +24,23 @@ interface S3InternalConfig {
     forcePathStyle?: boolean;
     pathPrefix?: string;
     storageClass?: string;
+}
+
+/**
+ * What the upload path needs on top of the connection details.
+ *
+ * A separate type rather than three optional fields on `S3InternalConfig`, so the compiler asks
+ * for `adapterId` at exactly the four call sites that upload and at none of the thirty that
+ * list, download or delete. Optional everywhere would let one adapter silently miss its wiring
+ * and fall back to the defaults, which is the one failure this change cannot notice by itself.
+ */
+interface S3UploadConfig extends S3InternalConfig {
+    /** Which of the four S3 adapters this is, so the tuning range is looked up correctly. */
+    adapterId: string;
+    /** Parts uploaded at the same time, as stored on the connection. */
+    uploadConcurrency?: number;
+    /** Megabytes per part, as stored on the connection. */
+    uploadPartSizeMb?: number;
 }
 
 class S3ClientFactory {
@@ -58,16 +78,44 @@ class S3ClientFactory {
 
 // --- Shared Implementation ---
 
-async function s3Upload(internalConfig: S3InternalConfig, localPath: string, remotePath: string, onProgress?: (percent: number) => void, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void, options?: UploadOptions): Promise<boolean> {
+async function s3Upload(internalConfig: S3UploadConfig, localPath: string, remotePath: string, onProgress?: (percent: number) => void, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void, options?: UploadOptions): Promise<boolean> {
     const client = S3ClientFactory.create(internalConfig);
     const targetKey = S3ClientFactory.getTargetKey(internalConfig, remotePath);
 
     if (onLog) onLog(`Starting S3 upload to bucket: ${internalConfig.bucket}, key: ${targetKey}`, 'info', 'storage');
 
+    // The size only picks the part size, so a stat that fails must not fail the upload. Without
+    // it the configured size is used as-is, which is correct for the small sidecars and the only
+    // case it could be wrong - an archive past 80 GB needing larger parts to stay under the
+    // 10.000-part limit - cannot arise from a file the runner has just finished writing.
+    let fileSize: number | undefined;
+    try {
+        fileSize = (await stat(localPath)).size;
+    } catch {
+        fileSize = undefined;
+    }
+
+    const { queueSize, partSize, adjustment } = resolveS3UploadTuning(
+        internalConfig.adapterId,
+        internalConfig,
+        fileSize
+    );
+
+    // A file that fits in one part is a plain PutObject however the connection is configured,
+    // so neither the parallelism nor a transfer rate says anything about it. The metadata
+    // sidecar is a kilobyte of JSON, and reporting it at "2.88 KB/s" reads like a fault.
+    const isMultipart = !!fileSize && fileSize > partSize;
+
     const fileStream = createReadStream(localPath);
+    const startedAt = Date.now();
     try {
         const parallelUploads3 = new Upload({
             client: client,
+            // Both are set explicitly. The SDK's own defaults are 4 parts of 5 MB, which leaves
+            // most of a fast link idle: measured against R2 over a 10 Gbit line, that is 27 MB/s
+            // while the same run reads and hashes the file locally at over 400 MB/s.
+            queueSize,
+            partSize,
             params: {
                 Bucket: internalConfig.bucket,
                 Key: targetKey,
@@ -77,6 +125,22 @@ async function s3Upload(internalConfig: S3InternalConfig, localPath: string, rem
             },
         });
 
+        // Only worth a line where it says something, and it reports what actually ran rather
+        // than what the connection stores - the two differ whenever the archive forced a
+        // different part size, which is exactly when someone reading the log needs to know.
+        if (onLog && isMultipart) {
+            const detail = adjustment === 'raised-for-part-limit'
+                ? ` (raised above the configured maximum to stay within S3's 10,000-part limit)`
+                : adjustment === 'lowered-to-fill-parallelism'
+                    ? ` (lowered from the configured maximum so every connection gets a part)`
+                    : '';
+            onLog(
+                `Multipart upload: ${queueSize} parallel parts of ${formatBytes(partSize)}${detail}`,
+                'info',
+                'storage'
+            );
+        }
+
         parallelUploads3.on("httpUploadProgress", (progress) => {
             if (onProgress && progress.loaded && progress.total) {
                 const percent = Math.round((progress.loaded / progress.total) * 100);
@@ -85,7 +149,12 @@ async function s3Upload(internalConfig: S3InternalConfig, localPath: string, rem
         });
 
         await parallelUploads3.done();
-        if (onLog) onLog(`S3 upload completed successfully`, 'info', 'storage');
+        // The throughput is the whole reason the two settings above exist, and it used to reach
+        // only the live progress detail - gone the moment the run ended. Anyone tuning the
+        // numbers had to rediscover it by subtracting log timestamps, at one-second resolution.
+        const elapsed = (Date.now() - startedAt) / 1000;
+        const rate = isMultipart && elapsed > 0 ? ` at ${formatBytes(fileSize! / elapsed)}/s` : '';
+        if (onLog) onLog(`S3 upload completed successfully${rate}`, 'info', 'storage');
         return true;
     } catch (error: unknown) {
         log.error("S3 upload failed", { bucket: internalConfig.bucket, targetKey }, wrapError(error));
@@ -405,12 +474,15 @@ export const S3GenericAdapter: StorageAdapter = {
     configSchema: S3GenericSchema,
     credentials: { primary: "ACCESS_KEY" },
     upload: (config, ...args) => s3Upload({
+        adapterId: "s3-generic",
         endpoint: config.endpoint,
         region: config.region,
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
         forcePathStyle: config.forcePathStyle,
-        pathPrefix: config.pathPrefix
+        pathPrefix: config.pathPrefix,
+        uploadConcurrency: config.uploadConcurrency,
+        uploadPartSizeMb: config.uploadPartSizeMb
     }, ...args),
     list: (config, ...args) => s3List({
         endpoint: config.endpoint,
@@ -492,11 +564,14 @@ export const S3AWSAdapter: StorageAdapter = {
     configSchema: S3AWSSchema,
     credentials: { primary: "ACCESS_KEY" },
     upload: (config, ...args) => s3Upload({
+        adapterId: "s3-aws",
         region: config.region,
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
         pathPrefix: config.pathPrefix,
-        storageClass: config.storageClass
+        storageClass: config.storageClass,
+        uploadConcurrency: config.uploadConcurrency,
+        uploadPartSizeMb: config.uploadPartSizeMb
     }, ...args),
     list: (config, ...args) => s3List({
         region: config.region,
@@ -566,11 +641,14 @@ export const S3R2Adapter: StorageAdapter = {
     configSchema: S3R2Schema,
     credentials: { primary: "ACCESS_KEY" },
     upload: (config, ...args) => s3Upload({
+        adapterId: "s3-r2",
         endpoint: r2Endpoint(config.accountId, config.jurisdiction),
         region: "auto",
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
-        pathPrefix: config.pathPrefix
+        pathPrefix: config.pathPrefix,
+        uploadConcurrency: config.uploadConcurrency,
+        uploadPartSizeMb: config.uploadPartSizeMb
     }, ...args),
     list: (config, ...args) => s3List({
         endpoint: r2Endpoint(config.accountId, config.jurisdiction),
@@ -643,11 +721,14 @@ export const S3HetznerAdapter: StorageAdapter = {
     configSchema: S3HetznerSchema,
     credentials: { primary: "ACCESS_KEY" },
     upload: (config, ...args) => s3Upload({
+        adapterId: "s3-hetzner",
         endpoint: `https://${config.region}.your-objectstorage.com`,
         region: config.region,
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
-        pathPrefix: config.pathPrefix
+        pathPrefix: config.pathPrefix,
+        uploadConcurrency: config.uploadConcurrency,
+        uploadPartSizeMb: config.uploadPartSizeMb
     }, ...args),
     list: (config, ...args) => s3List({
         endpoint: `https://${config.region}.your-objectstorage.com`,

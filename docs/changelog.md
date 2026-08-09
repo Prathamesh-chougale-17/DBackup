@@ -2,6 +2,24 @@
 
 All notable changes to DBackup are documented here.
 
+## vNEXT
+*Release: In Progress*
+
+### 🎨 Improvements
+
+- **s3**: Backups now upload to S3, Cloudflare R2, Hetzner Object Storage and S3-compatible providers in 8 parallel parts of 8 MB instead of the AWS SDK's 4 parts of 5 MB. A 1.29 GB archive to R2 moved at 27 MB/s before the change while the same run read and hashed it locally at over 400 MB/s.
+- **s3**: New **Parallel Upload Parts** setting on every S3 backup destination sets how many parts upload at once and how large each one may be, up to 32 parts of 64 MB. The form shows how much memory the chosen combination uses per upload.
+- **s3**: Part size now adapts to the backup being uploaded, never above the configured maximum. A part size too large for a given archive used to leave connections with nothing to upload, which cost a 1.39 GB backup to Cloudflare R2 a third of its throughput at 32 parts of 64 MB.
+- **s3**: The run log now records upload throughput and the part size actually used. Throughput was only ever shown in the live progress detail, which is gone once the run ends.
+
+### 🐳 Docker
+
+- **Image**: `skyfay/dbackup:vNEXT`
+- **Also tagged as**: `latest`, `vNEXT`
+- **CI Image**: `skyfay/dbackup:ci`
+- **Platforms**: linux/amd64, linux/arm64
+
+
 ## v3.2.0 - Docker Volumes Backup, SSH Key Generation, MongoDB Atlas Support, and Bug Fixes
 *Released: Aug 8, 2026*
 

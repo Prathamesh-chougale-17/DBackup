@@ -17,6 +17,8 @@ S3-Compatible Storage requires a [Credential Profile](/user-guide/security/crede
 | **Primary Credential** | `ACCESS_KEY` credential profile (Access Key ID + Secret Access Key) | - | ✅ |
 | **Force Path Style** | Use path-style URLs (`endpoint/bucket`) instead of virtual-hosted | `false` | ❌ |
 | **Path Prefix** | Folder path within the bucket | - | ❌ |
+| **Parts at once** | Upload parts sent simultaneously ([details](/user-guide/destinations/#upload-performance-s3)) | `8` | ❌ |
+| **Max part size (MB)** | Upper bound on the size of each upload part | `8` | ❌ |
 
 ::: tip Force Path Style
 Enable this for providers that don't support virtual-hosted-style URLs (e.g. MinIO, Ceph). When enabled, requests go to `endpoint/bucket/key` instead of `bucket.endpoint/key`.
@@ -90,7 +92,7 @@ services:
 ## How It Works
 
 - Uses the S3-compatible API via the AWS SDK
-- Multipart upload for large files
+- Backups upload as 8 parallel parts by default ([details](/user-guide/destinations/#upload-performance-s3))
 - All credentials are stored AES-256-GCM encrypted in the database
 
 ## Troubleshooting

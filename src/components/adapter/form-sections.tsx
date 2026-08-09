@@ -25,12 +25,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { transferConcurrencyRange } from "@/lib/adapters/transfer-concurrency";
+import { s3UploadTuningRange, s3UploadMemoryBudget, S3_MIN_PART_SIZE_MB } from "@/lib/adapters/s3-upload-tuning";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { STORAGE_ROLES, type StorageRole } from "@/lib/core/storage-roles";
 import { sshManagedKeys } from "@/lib/adapters/ssh-key-convention";
-import { cn } from "@/lib/utils";
+import { cn, formatBytes } from "@/lib/utils";
 import { AlertTriangle, Check, ChevronDown, FolderOpen, Loader2 } from "lucide-react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -238,6 +239,101 @@ function TransferConcurrencyField({
                 {range.max === range.default
                     ? `This provider rate-limits concurrent transfers, so ${range.max} is both the default and the maximum.`
                     : `Between 1 and ${range.max}, default ${range.default}. Higher is faster over a high-latency link, too high can exhaust a server's connection limit.`}
+            </p>
+        </div>
+    );
+}
+
+/**
+ * How one archive is split across parallel connections on the way to an object store.
+ *
+ * Separate from `TransferConcurrencyField` above, which counts whole files and only means
+ * something for a directory source. A backup destination receives one archive per run, so the
+ * parallelism has to happen inside that single upload instead.
+ *
+ * The two inputs sit together and show their product because they are meaningless apart: the
+ * peak memory of an upload is the parts in flight times their size, so the same step in
+ * parallelism costs eight times as much on 64 MB parts as on 8 MB ones.
+ *
+ * The part size is asked for as a maximum rather than a value, because the size that performs
+ * depends on how large the archive turns out to be and the archive differs every run. What the
+ * user can actually decide is how much memory to spend, which is what a ceiling expresses.
+ * `resolveS3UploadTuning` picks the largest size at or below it that still keeps every
+ * connection busy.
+ */
+function S3UploadTuningFields({
+    adapterId,
+    concurrency,
+    partSizeMb,
+    onConcurrencyChange,
+    onPartSizeChange,
+}: {
+    adapterId: string;
+    concurrency: number | undefined;
+    partSizeMb: number | undefined;
+    onConcurrencyChange: (value: number) => void;
+    onPartSizeChange: (value: number) => void;
+}) {
+    const range = s3UploadTuningRange(adapterId);
+    if (!range) return null;
+
+    // Clamped for display, not just on input: a ceiling lowered in a later version leaves
+    // stored values above it, and the runtime clamps them anyway. Showing the stored number
+    // would claim a parallelism the connection will never actually use.
+    const currentConcurrency = Math.min(range.concurrency.max, concurrency ?? range.concurrency.default);
+    const currentPartSize = Math.min(range.partSizeMb.max, Math.max(S3_MIN_PART_SIZE_MB, partSizeMb ?? range.partSizeMb.default));
+
+    return (
+        <div className="rounded-lg border p-4 space-y-3">
+            <div className="space-y-0.5">
+                <Label htmlFor="s3-upload-concurrency">Parallel Upload Parts</Label>
+                <p className="text-sm text-muted-foreground">
+                    A backup is uploaded as several parts at once. More parts use more of a fast
+                    link, at the cost of memory while the upload runs.
+                </p>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                    <Label htmlFor="s3-upload-concurrency" className="text-xs text-muted-foreground">
+                        Parts at once
+                    </Label>
+                    <Input
+                        id="s3-upload-concurrency"
+                        type="number"
+                        min={1}
+                        max={range.concurrency.max}
+                        value={currentConcurrency}
+                        onChange={(e) => {
+                            const parsed = parseInt(e.target.value, 10);
+                            if (!Number.isFinite(parsed)) return;
+                            onConcurrencyChange(Math.min(range.concurrency.max, Math.max(1, parsed)));
+                        }}
+                    />
+                </div>
+                <div className="space-y-1.5">
+                    <Label htmlFor="s3-upload-part-size" className="text-xs text-muted-foreground">
+                        Max part size (MB)
+                    </Label>
+                    <Input
+                        id="s3-upload-part-size"
+                        type="number"
+                        min={S3_MIN_PART_SIZE_MB}
+                        max={range.partSizeMb.max}
+                        value={currentPartSize}
+                        onChange={(e) => {
+                            const parsed = parseInt(e.target.value, 10);
+                            if (!Number.isFinite(parsed)) return;
+                            onPartSizeChange(Math.min(range.partSizeMb.max, Math.max(S3_MIN_PART_SIZE_MB, parsed)));
+                        }}
+                    />
+                </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+                Uses up to <strong>{formatBytes(s3UploadMemoryBudget(currentConcurrency, currentPartSize))}</strong> of
+                memory per upload. Smaller backups automatically use smaller parts, so that every
+                connection still gets one. Defaults are {range.concurrency.default} parts
+                of {range.partSizeMb.default} MB, up to {range.concurrency.max} parts
+                of {range.partSizeMb.max} MB.
             </p>
         </div>
     );
@@ -1125,6 +1221,19 @@ export function StorageFormContent({
                             adapterId={adapter.id}
                             value={watch("config.maxConcurrentFiles")}
                             onChange={(v) => setValue("config.maxConcurrentFiles", v, { shouldDirty: true })}
+                        />
+                    )}
+                    {/* The mirror image of the field above, and the reason each is limited to one
+                        role. Reading a directory means many files and one connection each, so
+                        what matters there is how many files run at once. Writing a backup means
+                        one archive, so the only parallelism left is inside that upload. */}
+                    {storageRole !== STORAGE_ROLES.SOURCE && (
+                        <S3UploadTuningFields
+                            adapterId={adapter.id}
+                            concurrency={watch("config.uploadConcurrency")}
+                            partSizeMb={watch("config.uploadPartSizeMb")}
+                            onConcurrencyChange={(v) => setValue("config.uploadConcurrency", v, { shouldDirty: true })}
+                            onPartSizeChange={(v) => setValue("config.uploadPartSizeMb", v, { shouldDirty: true })}
                         />
                     )}
                     {/* Only for a directory source: a snapshot of the place backups are
