@@ -270,6 +270,67 @@ describe('stepRetention', () => {
         await expect(stepRetention(ctx)).resolves.not.toThrow();
     });
 
+    it('warns by name when a file mtime disagrees with its recorded creation time', async () => {
+        // A destination whose modification times were reset has to be visible in the run
+        // log, otherwise the only symptom is backups quietly disappearing.
+        const { RetentionService } = await import('@/services/backup/retention-service');
+        const file = {
+            name: 'moved.sql',
+            path: '/backups/moved.sql',
+            size: 1024,
+            lastModified: new Date('2026-06-08T12:00:00Z'),
+        };
+        (RetentionService.calculateRetention as ReturnType<typeof vi.fn>).mockReturnValue({ keep: [file], delete: [], keptForChain: [] });
+
+        const dest = makeDestination({
+            adapter: {
+                upload: vi.fn(),
+                list: vi.fn().mockResolvedValue([
+                    file,
+                    { name: 'moved.sql.meta.json', path: '/backups/moved.sql.meta.json', size: 200, lastModified: new Date() },
+                ]),
+                delete: vi.fn(),
+                read: vi.fn().mockResolvedValue(JSON.stringify({ timestamp: '2026-06-01T12:00:00Z' })),
+            } as any,
+        });
+        const ctx = makeCtx({ destinations: [dest] });
+
+        await stepRetention(ctx);
+
+        const warnings = (ctx.log as ReturnType<typeof vi.fn>).mock.calls.filter(c => c[1] === 'warning');
+        expect(warnings.some(c => String(c[0]).includes('moved.sql'))).toBe(true);
+        expect(warnings.some(c => String(c[0]).includes('2026-06-01T12:00:00.000Z'))).toBe(true);
+    });
+
+    it('stays quiet when the recorded time and the mtime agree', async () => {
+        const { RetentionService } = await import('@/services/backup/retention-service');
+        const file = {
+            name: 'normal.sql',
+            path: '/backups/normal.sql',
+            size: 1024,
+            lastModified: new Date('2026-06-08T12:00:30Z'),
+        };
+        (RetentionService.calculateRetention as ReturnType<typeof vi.fn>).mockReturnValue({ keep: [file], delete: [], keptForChain: [] });
+
+        const dest = makeDestination({
+            adapter: {
+                upload: vi.fn(),
+                list: vi.fn().mockResolvedValue([
+                    file,
+                    { name: 'normal.sql.meta.json', path: '/backups/normal.sql.meta.json', size: 200, lastModified: new Date() },
+                ]),
+                delete: vi.fn(),
+                read: vi.fn().mockResolvedValue(JSON.stringify({ timestamp: '2026-06-08T12:00:00Z' })),
+            } as any,
+        });
+        const ctx = makeCtx({ destinations: [dest] });
+
+        await stepRetention(ctx);
+
+        const warnings = (ctx.log as ReturnType<typeof vi.fn>).mock.calls.filter(c => c[1] === 'warning');
+        expect(warnings).toHaveLength(0);
+    });
+
     it('triggers storage stats cache refresh when at least one file was deleted', async () => {
         const { RetentionService } = await import('@/services/backup/retention-service');
         const { refreshStorageStatsCache } = await import('@/services/dashboard-service');

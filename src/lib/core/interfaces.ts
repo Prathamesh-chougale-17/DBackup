@@ -353,6 +353,16 @@ export type FileInfo = {
     size: number;
     lastModified: Date;
     /**
+     * Creation time DBackup itself recorded in the backup's `.meta.json`, when one was
+     * readable.
+     *
+     * This is what retention buckets by, because it survives the things that reset a
+     * filesystem mtime: a copy without -p, a migration between servers, a restored backup
+     * directory. `lastModified` keeps meaning what it says, the mtime the destination
+     * reports, so the two can be compared when they disagree.
+     */
+    backupTimestamp?: Date;
+    /**
      * Set when this entry is a symbolic link, holding its raw target exactly as stored on the
      * source - relative stays relative, and nothing is resolved.
      *
@@ -680,6 +690,17 @@ export interface StorageAdapter extends BaseAdapter {
      * Reads the content of a file as a string
      */
     read?(config: AdapterConfig, remotePath: string): Promise<string | null>;
+
+    /**
+     * How many `read()` calls a caller may run against this destination at once.
+     *
+     * Defaults to serial (1) when unset, which is what every adapter did before this
+     * existed. Only declare more where `read()` opens no protocol state per call, so an
+     * HTTP request or a local file access. An adapter that dials a connection or spawns a
+     * process per read stays serial: there the server's connection limit is what breaks,
+     * not the bandwidth.
+     */
+    readConcurrency?: number;
 
     /**
      * Optional: streams a byte range [start, end] (both inclusive) of a remote file.

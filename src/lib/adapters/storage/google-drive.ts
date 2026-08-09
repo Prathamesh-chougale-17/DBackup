@@ -9,6 +9,7 @@ import { pipeline } from "stream/promises";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
+import { STATELESS_READ_CONCURRENCY } from "@/lib/adapters/storage/common/read-concurrency";
 
 const log = logger.child({ adapter: "google-drive" });
 
@@ -340,6 +341,8 @@ export const GoogleDriveAdapter: StorageAdapter = {
             return false;
         }
     },
+
+    readConcurrency: STATELESS_READ_CONCURRENCY,
 
     async read(config: GoogleDriveConfig, remotePath: string): Promise<string | null> {
         try {

@@ -1,7 +1,8 @@
 import { RunnerContext, DestinationContext } from "../types";
 import { RetentionService } from "@/services/backup/retention-service";
 import { FileInfo } from '@/lib/core/interfaces';
-import { isBackupFile, sidecarPathsFor } from '@/lib/core/backup-files';
+import { isBackupFile, sidecarPathsFor, effectiveBackupTime } from '@/lib/core/backup-files';
+import { loadBackupSidecars } from './retention-sidecars';
 import path from "path";
 import { logger } from "@/lib/logging/logger";
 import prisma from "@/lib/prisma";
@@ -90,31 +91,37 @@ async function applyRetentionForDestination(ctx: RunnerContext, dest: Destinatio
     const files: FileInfo[] = await dest.adapter.list(dest.config, remoteDir);
     const backupFiles = files.filter(f => isBackupFile(f.name));
 
-    // Read each backup's sidecar for its lock flag and chain membership. The chain id is
-    // what lets retention treat an incremental chain as one indivisible unit.
-    if (dest.adapter.read) {
-        for (const file of backupFiles) {
-            try {
-                const metaContent = await dest.adapter.read(dest.config, file.path + ".meta.json");
-                if (metaContent) {
-                    const meta = JSON.parse(metaContent);
-                    if (meta.locked) {
-                        file.locked = true;
-                    }
-                    if (meta.chain?.id) {
-                        file.chainId = meta.chain.id;
-                    }
-                }
-            } catch (_e) {
-                // Ignore read errors
-            }
-        }
+    // Each backup's sidecar carries its lock flag, its chain membership and the time
+    // DBackup recorded when it wrote the backup. The chain id is what lets retention treat
+    // an incremental chain as one indivisible unit, and the timestamp is what it buckets by.
+    const sidecars = await loadBackupSidecars(dest.adapter, dest.config, files, backupFiles);
+
+    if (backupFiles.length > 0) {
+        ctx.log(
+            `${destLabel} Retention: ${sidecars.withTimestamp} of ${backupFiles.length} backup(s) supplied their own creation time, the rest fall back to the file's modification time on the destination.`
+        );
+    }
+    // A destination whose modification times were reset, by a copy without -p or by a
+    // restore of the backup directory, would otherwise collapse into one bucket without
+    // anyone noticing until backups were already gone.
+    for (const { file, recorded, modified } of sidecars.drifted) {
+        ctx.log(
+            `${destLabel} Retention: ${file.name} was written ${recorded.toISOString()} but the destination reports ${modified.toISOString()}. Retention uses the recorded time.`,
+            'warning'
+        );
     }
 
-    // Log each file with its timestamp so adapter-level timestamp issues are immediately visible.
-    const sorted = [...backupFiles].sort((a, b) => b.lastModified.getTime() - a.lastModified.getTime());
+    // Log each file with the time it is actually judged by, so a bucketing surprise can be
+    // traced without guessing which of the two times was used.
+    const sorted = [...backupFiles].sort(
+        (a, b) => effectiveBackupTime(b).getTime() - effectiveBackupTime(a).getTime()
+    );
     for (const f of sorted) {
-        ctx.log(`${destLabel} Retention: Found file: ${f.name} (${f.lastModified.toISOString()})`);
+        const effective = effectiveBackupTime(f);
+        const mtimeNote = effective.getTime() === f.lastModified.getTime()
+            ? ''
+            : ` (mtime ${f.lastModified.toISOString()})`;
+        ctx.log(`${destLabel} Retention: Found file: ${f.name} (${effective.toISOString()})${mtimeNote}`);
     }
 
     const { keep, delete: filesToDelete, keptForChain } = RetentionService.calculateRetention(backupFiles, policy, timezone);

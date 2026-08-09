@@ -5,6 +5,8 @@ All notable changes to DBackup are documented here.
 ## vNEXT
 *Release: In Progress*
 
+> ⚠️ **Breaking:** Retention now decides how old a backup is from the creation time DBackup recorded in its `.meta.json`, not from the file's modification time on the destination. Where the two still agree, which is the normal case, the same backups are kept as before and nothing needs doing. Where they were pulled apart, by moving a destination or copying it without preserving timestamps, retention keeps a different set from the next run onwards. That is the intended fix, because a reset modification time collapses the whole history into a single bucket and costs almost all of it, but it does mean the first run after updating can delete backups the run before it kept. Open the retention step of that first run and look for lines naming a backup whose recorded time and modification time disagree. Lock anything you cannot lose before a destination is moved.
+
 ### ✨ Features
 
 - **retention**: Smart (GFS) policies can now keep an hourly tier next to daily, weekly, monthly and yearly. The field stays hidden behind **Add hourly tier** until it is needed, so existing policies keep their behaviour unchanged.
@@ -13,9 +15,15 @@ All notable changes to DBackup are documented here.
 
 - **retention**: A policy whose mode carries no settings, such as **Smart** with no tiers stored, now keeps every backup instead of deleting all of them. Only configurations written through the API could reach this state.
 
+### 🔄 Changed
+
+- **retention**: Backups are now sorted into their hourly, daily, weekly, monthly and yearly buckets by the creation time DBackup recorded when it wrote them. The file's modification time on the destination is only used for backups that have no recorded time.
+
 ### 🎨 Improvements
 
 - **retention**: Retention policies are now validated before they are saved. A negative, fractional or non numeric tier is rejected instead of stored.
+- **retention**: Reading backup metadata at the end of a job now runs up to 8 requests at once on S3, WebDAV, Dropbox, Google Drive, OneDrive and local destinations, and skips backups the listing already shows have no metadata. FTP, SMB, SFTP and rsync stay sequential because each read there costs a connection or a process.
+- **retention**: The run log now names any backup whose recorded creation time disagrees with the destination's modification time by more than an hour, and reports how many backups supplied their own time.
 - **s3**: Backups now upload to S3, Cloudflare R2, Hetzner Object Storage and S3-compatible providers in 8 parallel parts of 8 MB instead of the AWS SDK's 4 parts of 5 MB. A 1.29 GB archive to R2 moved at 27 MB/s before the change while the same run read and hashed it locally at over 400 MB/s.
 - **s3**: New **Parallel Upload Parts** setting on every S3 backup destination sets how many parts upload at once and how large each one may be, up to 32 parts of 64 MB. The form shows how much memory the chosen combination uses per upload.
 - **s3**: Part size now adapts to the backup being uploaded, never above the configured maximum. A part size too large for a given archive used to leave connections with nothing to upload, which cost a 1.39 GB backup to Cloudflare R2 a third of its throughput at 32 parts of 64 MB.

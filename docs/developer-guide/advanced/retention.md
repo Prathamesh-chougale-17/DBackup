@@ -50,6 +50,31 @@ Tiers run finest first over the file list sorted newest to oldest. Each tier kee
 
 Bucket keys are built with `formatInTimeZone` against the `system.timezone` setting, so a day boundary is local midnight. The hourly key is `yyyy-MM-dd-HH`, which collapses the repeated hour of a daylight saving change into one bucket once a year.
 
+### Which time a file is bucketed by
+
+`effectiveBackupTime()` in `src/lib/core/backup-files.ts` is the single rule, used by both the sort and the bucket key:
+
+```typescript
+file.backupTimestamp ?? file.lastModified
+```
+
+`lastModified` is whatever the adapter's `list()` reports, so an S3 `LastModified`, an SFTP `modifyTime`, a local `stats.mtime`. It is not a reliable statement about when the backup was taken. Copying a destination without preserving timestamps, moving it between servers or restoring the backup directory itself resets every mtime to now, at which point the whole history lands in one bucket and a single representative survives the next pass.
+
+`backupTimestamp` comes from `timestamp` in the backup's `.meta.json`, written at upload in `03-upload.ts`, and survives all of that. It is left unset when the sidecar is missing, unreadable or carries an unparsable date, so the mtime stays the fallback rather than the rule. The filename is never parsed, even though the naming template puts a date in it.
+
+`05-retention.ts` reports how many backups supplied their own time and warns by name for each one whose two times differ by more than `TIMESTAMP_DRIFT_WARNING_MS`.
+
+### Reading the sidecars
+
+`loadBackupSidecars()` in `src/lib/runner/steps/retention-sidecars.ts` annotates the listed files with `locked`, `chainId` and `backupTimestamp`. It runs once per destination at the end of every successful job, over every backup present, so its round trip count is the dominant cost of the whole step.
+
+Two things keep that bounded:
+
+- **Sidecars absent from the listing are never requested.** `list()` returns sidecars, they are only filtered out afterwards, so their presence can be answered from the listing for free. The optimisation disables itself when a listing contains no sidecars at all, otherwise an adapter that filters them would silently lose lock and chain detection.
+- **Reads run in batches of `adapter.readConcurrency`.** Unset means serial, which is what every adapter did before the field existed. Only adapters whose `read()` is a stateless HTTP request or a local file access declare `STATELESS_READ_CONCURRENCY`, currently S3, WebDAV, Dropbox, Google Drive, OneDrive and Local.
+
+FTP, SMB, SFTP and rsync deliberately declare nothing. FTP dials a control connection per `read()` and its own upload path runs at `limit: concurrency ?? 1` for exactly that reason, SMB spawns an `smbclient` process per call, and the two SSH-based adapters already gate themselves at four channels. On those the server's connection count is what breaks first, not the bandwidth.
+
 ### Tier limits and backwards compatibility
 
 `hourly` is optional on `SmartRetentionPolicy` because every policy written before the tier existed has no value for it. Two places turn that into a disabled tier:

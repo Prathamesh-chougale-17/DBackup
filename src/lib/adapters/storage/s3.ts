@@ -13,6 +13,7 @@ import { wrapError } from "@/lib/logging/errors";
 import { stripSlashes } from "@/lib/paths";
 import { formatBytes } from "@/lib/utils";
 import { resolveS3UploadTuning } from "@/lib/adapters/s3-upload-tuning";
+import { STATELESS_READ_CONCURRENCY } from "@/lib/adapters/storage/common/read-concurrency";
 
 const log = logger.child({ adapter: "s3" });
 
@@ -538,6 +539,7 @@ export const S3GenericAdapter: StorageAdapter = {
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
         forcePathStyle: config.forcePathStyle,
     }),
+    readConcurrency: STATELESS_READ_CONCURRENCY,
     read: (config, ...args) => s3Read({
         endpoint: config.endpoint,
         region: config.region,
@@ -613,6 +615,7 @@ export const S3AWSAdapter: StorageAdapter = {
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
     }),
+    readConcurrency: STATELESS_READ_CONCURRENCY,
     read: (config, ...args) => s3Read({
         region: config.region,
         bucket: config.bucket,
@@ -697,6 +700,7 @@ export const S3R2Adapter: StorageAdapter = {
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
     }),
+    readConcurrency: STATELESS_READ_CONCURRENCY,
     read: (config, ...args) => s3Read({
         endpoint: r2Endpoint(config.accountId, config.jurisdiction),
         region: "auto",
@@ -777,6 +781,7 @@ export const S3HetznerAdapter: StorageAdapter = {
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
     }),
+    readConcurrency: STATELESS_READ_CONCURRENCY,
     read: (config, ...args) => s3Read({
         endpoint: `https://${config.region}.your-objectstorage.com`,
         region: config.region,

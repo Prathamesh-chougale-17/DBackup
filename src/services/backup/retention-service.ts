@@ -1,4 +1,5 @@
 import { FileInfo } from '@/lib/core/interfaces';
+import { effectiveBackupTime } from '@/lib/core/backup-files';
 import { RetentionConfiguration } from '@/lib/core/retention';
 import { formatInTimeZone } from 'date-fns-tz';
 
@@ -41,8 +42,11 @@ export class RetentionService {
         const lockedFiles = files.filter(f => f.locked);
         const processingFiles = files.filter(f => !f.locked);
 
-        // Sort files by date (newest first)
-        const sortedFiles = [...processingFiles].sort((a, b) => b.lastModified.getTime() - a.lastModified.getTime());
+        // Sort files by date (newest first). Every tier below takes the first file it sees
+        // in a bucket, so this ordering is what makes "keep the newest of each bucket" true.
+        const sortedFiles = [...processingFiles].sort(
+            (a, b) => effectiveBackupTime(b).getTime() - effectiveBackupTime(a).getTime()
+        );
 
         const processedFiles: FileWithReasons[] = sortedFiles.map(f => ({ file: f, keep: false, reasons: [] }));
 
@@ -183,14 +187,14 @@ export class RetentionService {
         // Existing keeps from earlier tiers reserve their bucket in this tier.
         for (const entry of files) {
             if (!entry.keep) continue;
-            usedBuckets.add(getBucketKey(entry.file.lastModified));
+            usedBuckets.add(getBucketKey(effectiveBackupTime(entry.file)));
         }
 
         let keptInTier = 0;
         for (const entry of files) {
             if (entry.keep) continue;
 
-            const bucketKey = getBucketKey(entry.file.lastModified);
+            const bucketKey = getBucketKey(effectiveBackupTime(entry.file));
             if (usedBuckets.has(bucketKey)) continue;
 
             entry.keep = true;

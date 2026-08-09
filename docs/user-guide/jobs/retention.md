@@ -202,7 +202,7 @@ Retention runs as the **final step** of each backup job, applied **per destinati
 
 1. Backup upload completes for a destination
 2. List all backups for this job in that specific destination
-3. Read metadata (check lock status)
+3. Read each backup's metadata sidecar for its lock status, chain and creation time
 4. Apply that destination's retention policy
 5. Delete expired backups
 6. Repeat for each remaining destination
@@ -210,6 +210,14 @@ Retention runs as the **final step** of each backup job, applied **per destinati
 ::: tip Skipped on Failure
 Retention is skipped for any destination where the upload failed. This prevents deleting old backups when the new backup didn't arrive.
 :::
+
+### Which Time a Backup Is Judged By
+
+Backups are sorted into buckets by the creation time **DBackup recorded when it wrote the backup**, which is stored in the backup's `.meta.json` sidecar. The file's modification time on the destination is only used when there is no sidecar, for backups taken before this was recorded or for destinations DBackup cannot read files from.
+
+This matters because a modification time is easy to lose. Copying the backup directory without preserving timestamps, moving it to another server, or restoring it from a backup of its own stamps every file with the current time. Judged by that, the entire history collapses into a single bucket and the next retention pass deletes all but one backup from it.
+
+The run log names any backup whose two times disagree by more than an hour, so a destination in that state is visible before it costs anything.
 
 ## Compliance Considerations
 
@@ -285,6 +293,10 @@ With compression (70% reduction):
 2. Check if backups are locked
 3. View job logs for retention step
 4. Ensure backup ran successfully
+
+### Everything Was Deleted After Moving a Destination
+
+Check the retention step in the run log for warnings about backups whose recorded creation time disagrees with the destination's modification time. Backups written before DBackup recorded a creation time fall back to the modification time, and a move that did not preserve timestamps puts all of them in the same bucket. Lock the backups you cannot lose before moving a destination.
 
 ### Too Many Backups Deleted
 

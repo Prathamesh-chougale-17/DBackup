@@ -829,6 +829,114 @@ describe('RetentionService - hourly tier', () => {
     });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Time source
+//
+// Retention buckets by the time DBackup recorded when it wrote the backup, and only
+// falls back to the destination's modification time when there is none.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('RetentionService - time source', () => {
+    const withTimes = (entries: { name: string; mtime: string; recorded?: string }[]): FileInfo[] =>
+        entries.map((e) => ({
+            name: e.name,
+            path: `/job/${e.name}`,
+            size: 1024,
+            lastModified: new Date(e.mtime),
+            ...(e.recorded ? { backupTimestamp: new Date(e.recorded) } : {}),
+        }));
+
+    it('buckets by the recorded time, not by the modification time', () => {
+        // Both files carry today's mtime, but were written on different days. Daily=2 has
+        // to see two days, which is only true if it reads the recorded time.
+        const files = withTimes([
+            { name: 'a.sql', mtime: '2026-06-08T12:00:00Z', recorded: '2026-06-08T12:00:00Z' },
+            { name: 'b.sql', mtime: '2026-06-08T12:00:00Z', recorded: '2026-06-07T12:00:00Z' },
+        ]);
+
+        const result = RetentionService.calculateRetention(
+            files,
+            { mode: 'SMART', smart: { daily: 2, weekly: 0, monthly: 0, yearly: 0 } },
+            'UTC'
+        );
+
+        expect(result.keep).toHaveLength(2);
+        expect(result.delete).toHaveLength(0);
+    });
+
+    it('sorts by the recorded time, so the newest of a bucket is the one written last', () => {
+        // The mtimes claim b.sql is newer. The recorded times say otherwise, and the
+        // representative of the shared day has to be a.sql.
+        const files = withTimes([
+            { name: 'a.sql', mtime: '2026-06-08T08:00:00Z', recorded: '2026-06-08T18:00:00Z' },
+            { name: 'b.sql', mtime: '2026-06-08T20:00:00Z', recorded: '2026-06-08T09:00:00Z' },
+        ]);
+
+        const result = RetentionService.calculateRetention(
+            files,
+            { mode: 'SMART', smart: { daily: 1, weekly: 0, monthly: 0, yearly: 0 } },
+            'UTC'
+        );
+
+        expect(result.keep.map((f) => f.name)).toEqual(['a.sql']);
+        expect(result.delete.map((f) => f.name)).toEqual(['b.sql']);
+    });
+
+    it('falls back to the modification time for a backup without a recorded one', () => {
+        const files = withTimes([
+            { name: 'new.sql', mtime: '2026-06-08T12:00:00Z' },
+            { name: 'old.sql', mtime: '2026-06-01T12:00:00Z' },
+        ]);
+
+        const result = RetentionService.calculateRetention(
+            files,
+            { mode: 'SMART', smart: { daily: 1, weekly: 0, monthly: 0, yearly: 0 } },
+            'UTC'
+        );
+
+        expect(result.keep.map((f) => f.name)).toEqual(['new.sql']);
+        expect(result.delete.map((f) => f.name)).toEqual(['old.sql']);
+    });
+
+    it('sorts files with and without a recorded time into one order', () => {
+        const files = withTimes([
+            { name: 'mtime-only.sql', mtime: '2026-06-07T12:00:00Z' },
+            { name: 'recorded.sql', mtime: '2026-01-01T00:00:00Z', recorded: '2026-06-08T12:00:00Z' },
+            { name: 'older.sql', mtime: '2026-06-06T12:00:00Z' },
+        ]);
+
+        const result = RetentionService.calculateRetention(
+            files,
+            { mode: 'SIMPLE', simple: { keepCount: 2 } },
+            'UTC'
+        );
+
+        expect(result.keep.map((f) => f.name).sort()).toEqual(['mtime-only.sql', 'recorded.sql']);
+        expect(result.delete.map((f) => f.name)).toEqual(['older.sql']);
+    });
+
+    it('survives a destination whose modification times were all reset', () => {
+        // The regression this exists for. A copy without -p, a migration, or a restore of
+        // the backup directory stamps every file with the same mtime. Judged by mtime the
+        // whole history collapses into one bucket and a single representative survives.
+        const reset = '2026-06-08T12:00:00Z';
+        const files = withTimes([
+            { name: 'd0.sql', mtime: reset, recorded: '2026-06-08T02:00:00Z' },
+            { name: 'd1.sql', mtime: reset, recorded: '2026-06-07T02:00:00Z' },
+            { name: 'd2.sql', mtime: reset, recorded: '2026-06-06T02:00:00Z' },
+            { name: 'd3.sql', mtime: reset, recorded: '2026-06-05T02:00:00Z' },
+        ]);
+
+        const result = RetentionService.calculateRetention(
+            files,
+            { mode: 'SMART', smart: { daily: 3, weekly: 0, monthly: 0, yearly: 0 } },
+            'UTC'
+        );
+
+        expect(result.keep.map((f) => f.name).sort()).toEqual(['d0.sql', 'd1.sql', 'd2.sql']);
+        expect(result.delete.map((f) => f.name)).toEqual(['d3.sql']);
+    });
+});
+
 describe('RetentionService - unreadable policy', () => {
     const files = createMockFiles([
         new Date('2026-06-08T12:00:00Z'),
