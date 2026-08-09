@@ -22,7 +22,7 @@ import {
   deleteRetentionPolicy,
   parseRetentionPolicyConfig,
 } from "@/services/templates/retention-policy-service";
-import { NotFoundError, ServiceError } from "@/lib/logging/errors";
+import { NotFoundError, ServiceError, ValidationError } from "@/lib/logging/errors";
 import type { RetentionConfiguration } from "@/lib/core/retention";
 
 const makePolicy = (overrides: object = {}) => ({
@@ -111,6 +111,34 @@ describe("RetentionPolicyService", () => {
       await expect(
         createRetentionPolicy({ name: "Keep 7", config: simpleConfig })
       ).rejects.toBeInstanceOf(ServiceError);
+    });
+
+    it("stores an hourly tier", async () => {
+      prismaMock.retentionPolicy.findUnique.mockResolvedValue(null);
+      prismaMock.retentionPolicy.create.mockResolvedValue(makePolicy() as any);
+
+      await createRetentionPolicy({
+        name: "Hourly GFS",
+        config: { mode: "SMART", smart: { hourly: 24, daily: 7, weekly: 4, monthly: 12, yearly: 2 } },
+      });
+
+      const stored = JSON.parse(
+        prismaMock.retentionPolicy.create.mock.calls[0][0].data.config as string
+      );
+      expect(stored.smart.hourly).toBe(24);
+    });
+
+    it("rejects a config with a negative tier instead of storing it", async () => {
+      prismaMock.retentionPolicy.findUnique.mockResolvedValue(null);
+
+      await expect(
+        createRetentionPolicy({
+          name: "Broken",
+          config: { mode: "SMART", smart: { hourly: -5, daily: 7, weekly: 4, monthly: 12, yearly: 2 } },
+        })
+      ).rejects.toBeInstanceOf(ValidationError);
+
+      expect(prismaMock.retentionPolicy.create).not.toHaveBeenCalled();
     });
 
     it("clears previous default when isDefault is true", async () => {

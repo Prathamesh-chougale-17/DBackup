@@ -63,22 +63,12 @@ const COMBINABLE_DB_ADAPTERS = ["mysql", "mariadb", "postgres", "mongodb", "fire
 /** Which kind of source(s) this job backs up - purely client-side UI state, not persisted. */
 type SourceMode = "db" | "dirs" | "both";
 
-const retentionSchema = z.object({
-    mode: z.enum(["NONE", "SIMPLE", "SMART"]),
-    simple: z.object({
-        keepCount: z.coerce.number().min(1).default(10)
-    }).optional(),
-    smart: z.object({
-        daily: z.coerce.number().min(0).default(7),
-        weekly: z.coerce.number().min(0).default(4),
-        monthly: z.coerce.number().min(0).default(12),
-        yearly: z.coerce.number().min(0).default(2),
-    }).optional()
-});
-
 const destinationSchema = z.object({
     configId: z.string().min(1, "Destination is required"),
-    retention: retentionSchema,
+    // Legacy inline retention, round-tripped untouched. Destinations are configured through
+    // a RetentionPolicy template now, and this form has no editor for the inline JSON, so a
+    // typed z.object() here would only strip fields it does not know about on every save.
+    retention: z.record(z.string(), z.unknown()),
     retentionPolicyId: z.string().optional(),
 });
 
@@ -1959,75 +1949,3 @@ function DirectoryBrowseDialog({ open, onOpenChange, configId, adapterName, init
     );
 }
 
-// --- Retention Config Component (reusable per destination) ---
-
-function _RetentionConfig({ form, prefix }: { form: any; prefix: string }) {
-    const mode = form.watch(`${prefix}.mode`);
-
-    return (
-        <div className="space-y-3">
-            <FormField
-                control={form.control}
-                name={`${prefix}.mode`}
-                render={({ field }) => (
-                    <Tabs value={field.value} onValueChange={field.onChange} className="w-full">
-                        <TabsList className="grid w-full grid-cols-3 h-8">
-                            <TabsTrigger value="NONE" className="text-xs">Keep All</TabsTrigger>
-                            <TabsTrigger value="SIMPLE" className="text-xs">Simple</TabsTrigger>
-                            <TabsTrigger value="SMART" className="text-xs">Smart (GFS)</TabsTrigger>
-                        </TabsList>
-                    </Tabs>
-                )}
-            />
-
-            {mode === "NONE" && (
-                <p className="text-xs text-muted-foreground">All backups kept indefinitely.</p>
-            )}
-
-            {mode === "SIMPLE" && (
-                <FormField
-                    control={form.control}
-                    name={`${prefix}.simple.keepCount`}
-                    render={({ field }) => (
-                        <FormItem>
-                            <div className="flex items-center gap-2">
-                                <FormControl>
-                                    <Input type="number" min={1} {...field} value={field.value as number} onChange={e => field.onChange(parseInt(e.target.value))} className="w-20 h-8" />
-                                </FormControl>
-                                <span className="text-xs text-muted-foreground">newest backups</span>
-                            </div>
-                            <FormMessage />
-                        </FormItem>
-                    )}
-                />
-            )}
-
-            {mode === "SMART" && (
-                <div className="grid grid-cols-4 gap-2">
-                    {(["daily", "weekly", "monthly", "yearly"] as const).map(period => (
-                        <FormField
-                            key={period}
-                            control={form.control}
-                            name={`${prefix}.smart.${period}`}
-                            render={({ field }) => (
-                                <FormItem>
-                                    <FormLabel className="text-xs capitalize">{period}</FormLabel>
-                                    <FormControl>
-                                        <Input
-                                            type="number"
-                                            min={0}
-                                            {...field}
-                                            value={field.value as number}
-                                            onChange={e => field.onChange(parseInt(e.target.value))}
-                                            className="h-8"
-                                        />
-                                    </FormControl>
-                                </FormItem>
-                            )}
-                        />
-                    ))}
-                </div>
-            )}
-        </div>
-    );
-}

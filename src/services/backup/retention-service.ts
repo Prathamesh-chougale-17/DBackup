@@ -50,6 +50,11 @@ export class RetentionService {
             this.applySimplePolicy(processedFiles, policy.simple.keepCount);
         } else if (policy.mode === 'SMART' && policy.smart) {
             this.applySmartPolicy(processedFiles, policy.smart, timezone);
+        } else {
+            // The mode is neither NONE nor a mode with the settings it needs. Nothing marked
+            // a file as kept, so falling through would delete every unlocked backup on the
+            // destination. A policy we cannot read is a reason to keep, never to delete.
+            return { keep: files, delete: [], keptForChain: [] };
         }
 
         // Incremental chains can only be deleted whole. A later snapshot references bytes
@@ -109,13 +114,30 @@ export class RetentionService {
     }
 
     private static applySmartPolicy(files: FileWithReasons[], policy: NonNullable<RetentionConfiguration['smart']>, timezone: string) {
-        const { daily, weekly, monthly, yearly } = policy;
+        // A policy written before the hourly tier existed has no value for it. 0 disables
+        // the tier, which is what an absent value has to mean.
+        const { hourly = 0, daily, weekly, monthly, yearly } = policy;
 
-        // SMART/GFS is applied as non-overlapping tiers.
-        // Daily picks newest unique days first.
+        // SMART/GFS is applied as non-overlapping tiers, finest first.
+        // Hourly picks newest unique hours, then Daily picks newest unique days.
         // Weekly/Monthly/Yearly then pick additional representatives from older buckets.
+        //
+        // Every tier only counts what it adds itself, and buckets already covered by a
+        // finer tier are skipped. The tiers are therefore additive rather than overlapping:
+        // hourly 24 with daily 7 reaches back the roughly one day the 24 hourly slots span
+        // plus 7 further days, not 7 days in total. restic and borg evaluate the same
+        // numbers as a union instead, so the totals differ for an identical config.
+        //
         // All buckets are computed in the configured timezone so that "day" aligns with
-        // local midnight rather than UTC midnight.
+        // local midnight rather than UTC midnight. The cost is that the repeated hour of a
+        // daylight saving change collapses into one hourly bucket once a year.
+        this.applyTier(
+            files,
+            hourly,
+            (date) => formatInTimeZone(date, timezone, 'yyyy-MM-dd-HH'),
+            'Hourly'
+        );
+
         this.applyTier(
             files,
             daily,
@@ -151,7 +173,10 @@ export class RetentionService {
         getBucketKey: (date: Date) => string,
         reasonPrefix: string
     ) {
-        if (limit <= 0) return;
+        // `!limit` catches an undefined limit, which is what a tier added after a policy was
+        // written looks like. `undefined <= 0` is false in JavaScript, so the bare comparison
+        // would let the tier run with no upper bound and keep one file per bucket forever.
+        if (!limit || limit <= 0) return;
 
         const usedBuckets = new Set<string>();
 

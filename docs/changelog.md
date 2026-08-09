@@ -5,8 +5,17 @@ All notable changes to DBackup are documented here.
 ## vNEXT
 *Release: In Progress*
 
+### ✨ Features
+
+- **retention**: Smart (GFS) policies can now keep an hourly tier next to daily, weekly, monthly and yearly. The field stays hidden behind **Add hourly tier** until it is needed, so existing policies keep their behaviour unchanged.
+
+### 🐛 Bug Fixes
+
+- **retention**: A policy whose mode carries no settings, such as **Smart** with no tiers stored, now keeps every backup instead of deleting all of them. Only configurations written through the API could reach this state.
+
 ### 🎨 Improvements
 
+- **retention**: Retention policies are now validated before they are saved. A negative, fractional or non numeric tier is rejected instead of stored.
 - **s3**: Backups now upload to S3, Cloudflare R2, Hetzner Object Storage and S3-compatible providers in 8 parallel parts of 8 MB instead of the AWS SDK's 4 parts of 5 MB. A 1.29 GB archive to R2 moved at 27 MB/s before the change while the same run read and hashed it locally at over 400 MB/s.
 - **s3**: New **Parallel Upload Parts** setting on every S3 backup destination sets how many parts upload at once and how large each one may be, up to 32 parts of 64 MB. The form shows how much memory the chosen combination uses per upload.
 - **s3**: Part size now adapts to the backup being uploaded, never above the configured maximum. A part size too large for a given archive used to leave connections with nothing to upload, which cost a 1.39 GB backup to Cloudflare R2 a third of its throughput at 32 parts of 64 MB.
