@@ -10,7 +10,7 @@ All notable changes to DBackup are documented here.
 ### ✨ Features
 
 - **retention**: Smart (GFS) policies can now keep an hourly tier next to daily, weekly, monthly and yearly. The field stays hidden behind **Add hourly tier** until it is needed, so existing policies keep their behaviour unchanged.
-- **azure-sql**: New **Azure SQL Database** source type in beta, backing up through a BACPAC export. Restoring onto an existing database drops it first, because a BACPAC import has no overwrite mode, and Azure SQL Managed Instance and Azure Synapse Analytics stay unsupported.
+- **azure-sql**: New **Azure SQL Database** source type in beta, backing up through a BACPAC export.
 
 ### 🐛 Bug Fixes
 

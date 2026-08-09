@@ -19,6 +19,7 @@
   <img src="https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white" alt="Redis">
   <img src="https://img.shields.io/badge/Valkey-4B6BFB?logoColor=white" alt="Valkey">
   <img src="https://custom-icon-badges.demolab.com/badge/Microsoft%20SQL%20Server-CC2927?logo=mssqlserver-white&logoColor=white" alt="MSSQL">
+  <img src="https://img.shields.io/badge/Azure%20SQL-0078D4?logo=microsoftazure&logoColor=white" alt="Azure SQL Database">
   <img src="https://img.shields.io/badge/Firebird-F62817?logo=firebird&logoColor=white" alt="Firebird">
   <br>
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue.svg" alt="License">

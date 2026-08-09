@@ -71,8 +71,8 @@ Encrypted archives use opaque names on purpose. TAR headers are not encrypted, s
 paths there would publish the file listing next to the encrypted data and make the sealed
 index pointless.
 
-`<ext>` is `sql`, `dump` (PostgreSQL custom format), `archive` (MongoDB), `bak` (MSSQL) or
-`fbk` (Firebird).
+`<ext>` is `sql`, `dump` (PostgreSQL custom format), `archive` (MongoDB), `bak` (MSSQL),
+`bacpac` (Azure SQL Database) or `fbk` (Firebird).
 
 ## manifest.json
 
