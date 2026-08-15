@@ -14,6 +14,7 @@ All notable changes to DBackup are documented here.
 
 ### 🐛 Bug Fixes
 
+- **settings**: The System Timezone now accepts renamed zones such as **Asia/Kolkata** and **Europe/Kyiv**, which were refused with **Invalid IANA timezone** in browsers that offer the modern name. Around 140 zones were affected, and the picker now also keeps the stored zone selectable in browsers that only know its legacy name. ([#147](https://github.com/Skyfay/DBackup/issues/147))
 - **retention**: A policy whose mode carries no settings, such as **Smart** with no tiers stored, now keeps every backup instead of deleting all of them. Only configurations written through the API could reach this state.
 - **mssql**: Azure SQL Database and Azure SQL Managed Instance are now refused up front with a message naming the product, instead of connecting successfully and then failing partway through a backup with a raw T-SQL error. Both are also named correctly in the connection test, where they previously showed as **SQL**.
 - **mssql**: The Database Explorer now lists databases on servers that do not expose **sys.master_files**, showing names and table counts without sizes rather than failing the whole page with **Connection Failed**.

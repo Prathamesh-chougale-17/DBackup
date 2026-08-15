@@ -34,6 +34,28 @@ export function formatTwoFactorCode(value: string): string {
 }
 
 /**
+ * Checks whether a string names a timezone the runtime can actually resolve.
+ *
+ * Deliberately not a membership test against `Intl.supportedValuesOf('timeZone')`. That list
+ * holds ICU's canonical IDs, which kept the legacy tzdb names, so it carries `Asia/Calcutta`
+ * but not `Asia/Kolkata` and `Europe/Kiev` but not `Europe/Kyiv`. Browsers following the newer
+ * ECMA-402 rule offer the primary names in their picker, and a membership check rejects around
+ * 140 zones that every downstream consumer handles fine. Building a formatter is the honest test.
+ */
+export function isValidTimezone(tz: string): boolean {
+  // Rejects bare offsets such as "+05:30", which Intl accepts. A fixed offset carries no DST
+  // rules, so every schedule under it would silently shift by an hour twice a year.
+  if (!tz || !/^[A-Za-z]/.test(tz)) return false;
+
+  try {
+    Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Compares two version strings (SemVer-like).
  * Returns 1 if v1 > v2 (v1 is newer), -1 if v1 < v2 (v1 is older), 0 if equal.
  * Example: compareVersions('8.0.4', '5.7') -> 1

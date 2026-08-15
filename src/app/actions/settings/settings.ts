@@ -8,6 +8,7 @@ import { PERMISSIONS } from "@/lib/auth/permissions";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { scheduler } from "@/lib/server/scheduler";
+import { isValidTimezone } from "@/lib/utils";
 import { STUCK_TIMEOUT_SETTING } from "@/services/system/stuck-execution-service";
 
 const log = logger.child({ action: "settings" });
@@ -25,10 +26,7 @@ const settingsSchema = z.object({
     checkForUpdates: z.boolean().optional(),
     showQuickSetup: z.boolean().optional(),
     systemTimezone: z.string()
-        .refine((tz) => {
-            try { return Intl.supportedValuesOf('timeZone').includes(tz) || tz === 'UTC'; }
-            catch { return false; }
-        }, { message: "Invalid IANA timezone" })
+        .refine(isValidTimezone, { message: "Invalid IANA timezone" })
         .optional(),
     filenamePattern: z.string().min(1).optional(),
     instanceName: z.string().max(50).optional(),
