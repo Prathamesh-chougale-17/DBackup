@@ -19,3 +19,4 @@ services:
     volumes:
       - ./data:/data              # All persistent data (db, storage, certs)
       - ./backups:/backups        # Optional: used for local backups
+      # - ./tmp:/tmp              # Recommended: staging space for running backups, keeps them off the Docker disk

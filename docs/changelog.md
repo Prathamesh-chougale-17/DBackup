@@ -35,6 +35,7 @@ All notable changes to DBackup are documented here.
 
 ### 📝 Documentation
 
+- **installation**: The installation guide now recommends mounting `/tmp` so a running backup is staged outside the Docker disk, and the compose and run examples carry the volume. The file backup guide and the environment reference explain the same thing where disk space comes up. ([#145](https://github.com/Skyfay/DBackup/issues/145))
 - **developer-guide**: The setup guide now points at the platform setup scripts instead of listing a shorter set of packages beside them. It also warns against installing `libpq` for PostgreSQL, whose `pg_dump` is built without LZ4 and ZSTD and breaks native compression.
 
 ### 🧪 Tests
