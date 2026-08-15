@@ -19,7 +19,7 @@ hero:
 features:
   - icon: 🗄️
     title: Multi-Database Support
-    details: Supports MySQL, MariaDB, PostgreSQL, MongoDB, SQLite, Redis, Valkey, Microsoft SQL Server, and Firebird (beta).
+    details: Supports MySQL, MariaDB, PostgreSQL, MongoDB, SQLite, Redis, Valkey, Microsoft SQL Server, Azure SQL Database (beta), and Firebird (beta).
   - icon: 📁
     title: File & Folder Backups
     details: Back up an application's config and data directories alongside its database, in one job with one schedule and one retention policy. Folder tree picker, reusable exclude presets, Docker volumes read through the daemon, and VSS shadow copies on SMB sources.
@@ -135,6 +135,7 @@ Then open [https://localhost:3000](https://localhost:3000) and create your first
 | **Valkey** | 7.2+ | Direct, SSH | Guided |
 | **SQLite** | 3.x | Local, SSH | Yes |
 | **Microsoft SQL Server** | 2017, 2019, 2022, Azure SQL Edge | Direct, SSH | Yes |
+| **Azure SQL Database** (Beta) | Single database, elastic pool | Direct | Yes (drops the target first) |
 | **Firebird** (Beta) | 3.x, 4.x, 5.x | Direct, SSH | Yes (pre-configured aliases) |
 
 == 📁 Directory Sources

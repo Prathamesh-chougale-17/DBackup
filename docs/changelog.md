@@ -2,6 +2,64 @@
 
 All notable changes to DBackup are documented here.
 
+## vNEXT
+*Release: In Progress*
+
+> ⚠️ **Breaking:** Retention now decides how old a backup is from the creation time DBackup recorded in its `.meta.json`, not from the file's modification time on the destination. Where the two still agree, which is the normal case, the same backups are kept as before and nothing needs doing. Where they were pulled apart, by moving a destination or copying it without preserving timestamps, retention keeps a different set from the next run onwards. That is the intended fix, because a reset modification time collapses the whole history into a single bucket and costs almost all of it, but it does mean the first run after updating can delete backups the run before it kept. Open the retention step of that first run and look for lines naming a backup whose recorded time and modification time disagree. Lock anything you cannot lose before a destination is moved.
+
+### ✨ Features
+
+- **retention**: Smart (GFS) policies can now keep an hourly tier next to daily, weekly, monthly and yearly. The field stays hidden behind **Add hourly tier** until it is needed, so existing policies keep their behaviour unchanged.
+- **azure-sql**: New **Azure SQL Database** source type in beta, backing up through a BACPAC export.
+
+### 🐛 Bug Fixes
+
+- **settings**: The System Timezone now accepts renamed zones such as **Asia/Kolkata** and **Europe/Kyiv**, which were refused with **Invalid IANA timezone** in browsers that offer the modern name. Around 140 zones were affected, and the picker now also keeps the stored zone selectable in browsers that only know its legacy name. ([#147](https://github.com/Skyfay/DBackup/issues/147))
+- **retention**: A policy whose mode carries no settings, such as **Smart** with no tiers stored, now keeps every backup instead of deleting all of them. Only configurations written through the API could reach this state.
+- **mssql**: Azure SQL Database and Azure SQL Managed Instance are now refused up front with a message naming the product, instead of connecting successfully and then failing partway through a backup with a raw T-SQL error. Both are also named correctly in the connection test, where they previously showed as **SQL**.
+- **mssql**: The Database Explorer now lists databases on servers that do not expose **sys.master_files**, showing names and table counts without sizes rather than failing the whole page with **Connection Failed**.
+- **mssql**: Restoring a database under a different name now places its files in the instance's own default data and log directories, which is what makes such a restore work against a SQL Server running on Windows. A database holding more than one data file no longer has all of them moved onto the same file. ([#148](https://github.com/Skyfay/DBackup/issues/148))
+- **s3**: Listing a bucket now returns every object instead of stopping at the first 1000. Because the cut fell alphabetically and backup names carry timestamps, the newest backups were the ones missing from retention, integrity checks, the destination browser and the dashboard.
+- **s3**: Empty files now appear in listings on S3, Cloudflare R2, Hetzner Object Storage and S3-compatible providers. They were dropped along with folder markers, which left them out of directory backups and made them read as deleted everywhere a listing decides what still exists.
+
+### 🔄 Changed
+
+- **retention**: Backups are now sorted into their hourly, daily, weekly, monthly and yearly buckets by the creation time DBackup recorded when it wrote them. The file's modification time on the destination is only used for backups that have no recorded time.
+
+### 🎨 Improvements
+
+- **retention**: Retention policies are now validated before they are saved. A negative, fractional or non numeric tier is rejected instead of stored.
+- **retention**: Reading backup metadata at the end of a job now runs up to 8 requests at once on S3, WebDAV, Dropbox, Google Drive, OneDrive and local destinations, and skips backups the listing already shows have no metadata. FTP, SMB, SFTP and rsync stay sequential because each read there costs a connection or a process.
+- **retention**: The run log now names any backup whose recorded creation time disagrees with the destination's modification time by more than an hour, and reports how many backups supplied their own time.
+- **s3**: Backups now upload to S3, Cloudflare R2, Hetzner Object Storage and S3-compatible providers in 8 parallel parts of 8 MB instead of the AWS SDK's 4 parts of 5 MB. A 1.29 GB archive to R2 moved at 27 MB/s before the change while the same run read and hashed it locally at over 400 MB/s.
+- **s3**: New **Parallel Upload Parts** setting on every S3 backup destination sets how many parts upload at once and how large each one may be, up to 32 parts of 64 MB. The form shows how much memory the chosen combination uses per upload.
+- **s3**: Part size now adapts to the backup being uploaded, never above the configured maximum. A part size too large for a given archive used to leave connections with nothing to upload, which cost a 1.39 GB backup to Cloudflare R2 a third of its throughput at 32 parts of 64 MB.
+- **s3**: The run log now records upload throughput and the part size actually used. Throughput was only ever shown in the live progress detail, which is gone once the run ends.
+- **s3**: Backing up a directory from an S3 destination now reports progress while the listing runs and stops within one request when the job is cancelled. Both previously waited for the entire listing to finish.
+
+### 📝 Documentation
+
+- **installation**: The installation guide now recommends mounting `/tmp` so a running backup is staged outside the Docker disk, and the compose and run examples carry the volume. The file backup guide and the environment reference explain the same thing where disk space comes up. ([#145](https://github.com/Skyfay/DBackup/issues/145))
+- **developer-guide**: The setup guide now points at the platform setup scripts instead of listing a shorter set of packages beside them. It also warns against installing `libpq` for PostgreSQL, whose `pg_dump` is built without LZ4 and ZSTD and breaks native compression.
+- **mssql**: The guide now covers SQL Server on Windows, from the form the backup path has to take to setting up SSH mode against the Windows OpenSSH server. An SMB share is documented as the fallback where that server is unavailable. ([#148](https://github.com/Skyfay/DBackup/issues/148))
+
+### 🧪 Tests
+
+- **tests**: The adapter transport lint guard no longer fails under load. It imports the entire adapter registry and was running against the default 5 second limit, which every new adapter moved a little closer to the edge.
+
+### 🔧 CI/CD
+
+- **docker**: The image now ships SqlPackage and the .NET runtime, which the Azure SQL Database source needs. This adds roughly 270 MB on both **linux/amd64** and **linux/arm64**.
+- **scripts**: The macOS and Debian development setup scripts now install SqlPackage, which the Azure SQL Database source needs. On macOS it lands in the Homebrew prefix and is wrapped so it needs neither a `PATH` entry nor a `DOTNET_ROOT` variable.
+
+### 🐳 Docker
+
+- **Image**: `skyfay/dbackup:vNEXT`
+- **Also tagged as**: `latest`, `vNEXT`
+- **CI Image**: `skyfay/dbackup:ci`
+- **Platforms**: linux/amd64, linux/arm64
+
+
 ## v3.2.0 - Docker Volumes Backup, SSH Key Generation, MongoDB Atlas Support, and Bug Fixes
 *Released: Aug 8, 2026*
 

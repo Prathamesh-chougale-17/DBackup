@@ -14,6 +14,7 @@
  */
 
 import { INDEX_SIDECAR_SUFFIX } from "@/lib/archive/format";
+import type { FileInfo } from "@/lib/core/interfaces";
 
 /** Metadata sidecar written for every backup. */
 export const METADATA_SIDECAR_SUFFIX = ".meta.json";
@@ -39,6 +40,22 @@ export function isSidecarFile(name: string): boolean {
  */
 export function isBackupFile(name: string): boolean {
     return !isSidecarFile(name);
+}
+
+/**
+ * The time a backup should be judged by.
+ *
+ * `lastModified` is whatever the destination reports as the file's modification time, and
+ * that is not the same thing as when the backup was taken. A copy without `-p`, a move
+ * between servers, or restoring the backup directory itself resets every mtime to now, at
+ * which point retention sees one giant bucket and deletes almost everything in it.
+ *
+ * `backupTimestamp` comes from the backup's own sidecar, written by DBackup at upload, and
+ * survives all of that. It is missing for backups that predate it and for destinations
+ * whose adapter cannot read, so the mtime remains the fallback rather than the rule.
+ */
+export function effectiveBackupTime(file: FileInfo): Date {
+    return file.backupTimestamp ?? file.lastModified;
 }
 
 /**

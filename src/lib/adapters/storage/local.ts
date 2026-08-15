@@ -14,6 +14,7 @@ const execFileAsync = promisify(execFile);
 import { pipeline } from "stream/promises";
 import { logger } from "@/lib/logging/logger";
 import { wrapError, AdapterError } from "@/lib/logging/errors";
+import { STATELESS_READ_CONCURRENCY } from "@/lib/adapters/storage/common/read-concurrency";
 
 const log = logger.child({ adapter: "local-filesystem" });
 
@@ -259,6 +260,8 @@ export const LocalFileSystemAdapter: StorageAdapter = {
             return false;
         }
     },
+
+    readConcurrency: STATELESS_READ_CONCURRENCY,
 
     async read(config: { basePath: string }, remotePath: string): Promise<string | null> {
         try {

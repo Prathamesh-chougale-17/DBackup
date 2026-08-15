@@ -5,6 +5,7 @@ import {
   formatDuration,
   formatTwoFactorCode,
   compareVersions,
+  isValidTimezone,
 } from "@/lib/utils";
 
 describe("cn", () => {
@@ -116,5 +117,46 @@ describe("compareVersions", () => {
 
   it("returns 0 when version string contains no digit sequence", () => {
     expect(compareVersions("beta", "beta")).toBe(0);
+  });
+});
+
+describe("isValidTimezone", () => {
+  it("accepts UTC", () => {
+    expect(isValidTimezone("UTC")).toBe(true);
+  });
+
+  it("accepts ordinary IANA zones", () => {
+    expect(isValidTimezone("Europe/Zurich")).toBe(true);
+    expect(isValidTimezone("America/New_York")).toBe(true);
+    expect(isValidTimezone("America/Argentina/Buenos_Aires")).toBe(true);
+  });
+
+  // Node's Intl.supportedValuesOf('timeZone') only lists ICU's canonical IDs, which kept the
+  // legacy names. Browsers offering the primary name used to produce a value the server rejected.
+  it("accepts renamed zones the ICU canonical list omits", () => {
+    expect(isValidTimezone("Asia/Kolkata")).toBe(true);
+    expect(isValidTimezone("Europe/Kyiv")).toBe(true);
+    expect(isValidTimezone("Asia/Ho_Chi_Minh")).toBe(true);
+    expect(isValidTimezone("America/Nuuk")).toBe(true);
+    expect(isValidTimezone("Asia/Kathmandu")).toBe(true);
+  });
+
+  it("accepts the legacy name of a renamed zone", () => {
+    expect(isValidTimezone("Asia/Calcutta")).toBe(true);
+    expect(isValidTimezone("Europe/Kiev")).toBe(true);
+  });
+
+  it("rejects unknown zones", () => {
+    expect(isValidTimezone("Not/AZone")).toBe(false);
+    expect(isValidTimezone("Europe/Zurich ")).toBe(false);
+  });
+
+  it("rejects empty input", () => {
+    expect(isValidTimezone("")).toBe(false);
+  });
+
+  it("rejects bare UTC offsets, which carry no DST rules", () => {
+    expect(isValidTimezone("+05:30")).toBe(false);
+    expect(isValidTimezone("-08:00")).toBe(false);
   });
 });

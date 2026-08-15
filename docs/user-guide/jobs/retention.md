@@ -4,7 +4,7 @@ Automatically manage backup storage by defining how long to keep backups.
 
 ## Overview
 
-Retention policies prevent unlimited storage growth by automatically deleting old backups. DBackup supports two retention modes:
+Retention policies prevent unlimited storage growth by automatically deleting old backups. DBackup supports three retention modes:
 
 | Mode | Description | Best For |
 | :--- | :--- | :--- |
@@ -58,6 +58,7 @@ With `Keep Count: 5`:
 ## Smart Retention (GFS)
 
 Grandfather-Father-Son is an intelligent retention strategy that keeps:
+- The most recent backups (hourly, optional)
 - Recent backups (daily)
 - Some older backups (weekly)
 - Fewer old backups (monthly)
@@ -67,42 +68,66 @@ Grandfather-Father-Son is an intelligent retention strategy that keeps:
 
 | Setting | Description | Example |
 | :--- | :--- | :--- |
+| **Hourly** | Hourly backups to keep, off unless enabled | `24` |
 | **Daily** | Days to keep daily backups | `7` |
 | **Weekly** | Weeks to keep weekly backups | `4` |
 | **Monthly** | Months to keep monthly backups | `12` |
 | **Yearly** | Years to keep yearly backups | `3` |
 
+### Hourly Tier
+
+Most schedules do not need an hourly tier, so the field is hidden until you ask for it. In the policy form, click **Add hourly tier** below the tier inputs. It starts at `24` and can be removed again with **Remove hourly tier**, which sets it back to `0`.
+
+A policy that already has an hourly value opens with the field visible. Policies created before this tier existed keep exactly the same deletion behaviour, because a missing value counts as `0`.
+
+::: tip Sub-hourly schedules
+A job running every 15 minutes with **Hourly: 24** keeps one backup per hour and deletes the other three. That is the point of the tier, but it is a change in outcome if you are switching over from **Simple** retention.
+:::
+
 ### How It Works
 
-The algorithm evaluates each backup:
+Each tier keeps the newest backup of every time bucket it covers, working from the newest backup backwards. Buckets that a finer tier already covers are skipped, and a tier only counts what it adds itself.
 
-1. **Daily bucket**: Is this one of the last N days' backups?
-2. **Weekly bucket**: Is this the most recent backup from the last N weeks?
-3. **Monthly bucket**: Is this the most recent backup from the last N months?
-4. **Yearly bucket**: Is this the most recent backup from the last N years?
+1. **Hourly bucket**: the newest backup of each of the last N hours that have backups
+2. **Daily bucket**: the newest backup of each of the next N days
+3. **Weekly bucket**: the newest backup of each of the next N weeks
+4. **Monthly bucket**: the newest backup of each of the next N months
+5. **Yearly bucket**: the newest backup of each of the next N years
 
-A backup is kept if it qualifies for **any** bucket.
+::: warning The tiers add up, they do not overlap
+**Daily: 7** means seven days *on top of* what the hourly tier already covers, not seven days in total. With **Hourly: 24, Daily: 7** the policy reaches back roughly nine days and keeps about 31 backups.
+
+restic and borg read the same numbers as a union, where the daily window includes the hours the hourly tier covers. A config copied from one of those tools keeps more in DBackup than it does there.
+:::
+
+A tier counts buckets that **have** backups, not wall-clock time. If a run is skipped, **Hourly: 24** reaches further back than 24 hours rather than losing a slot.
+
+::: warning Daylight saving time
+Buckets are built in the timezone configured under Settings. When the clock goes back, the repeated hour maps to a single hourly bucket, so one backup loses its slot once a year. Day, week, month and year buckets are unaffected.
+:::
 
 ### Example Timeline
 
 Configuration: Daily=7, Weekly=4, Monthly=12, Yearly=2
 
 After 1 year of daily backups:
-- **Days 1-7**: All 7 daily backups kept
-- **Weeks 2-4**: 1 backup per week (3 more)
-- **Months 2-12**: 1 backup per month (11 more)
-- **Previous year**: 1 backup kept
+- **Daily**: the 7 newest days
+- **Weekly**: 4 further weeks, starting after the weeks the daily tier already covers
+- **Monthly**: 12 further months, starting after the months covered so far
+- **Yearly**: 2 further years
 
-**Total**: ~22 backups instead of 365!
+**Total**: 25 backups instead of 365, the sum of the four tiers.
+
+Adding **Hourly: 24** to the same policy keeps roughly 24 more, and the daily tier then starts after the hours it covers rather than at today.
 
 ### Visual Example
 
 ```
-Today         7 days ago    1 month ago    1 year ago
-  |             |              |              |
-  ▼             ▼              ▼              ▼
-[■][■][■][■][■][■][■]   [■]   [■]   [■]...  [■]
- └── Daily ──┘     └ Weekly ┘  └── Monthly ──┘
+Now      last 24h        7 days         weeks        months        years
+ |          |              |              |             |            |
+ ▼          ▼              ▼              ▼             ▼            ▼
+[■■■■■■■■■■■■][■][■][■][■][■][■][■]   [■]   [■]   [■]...       [■]  [■]
+ └── Hourly ──┘└───── Daily ─────┘   └ Weekly ┘  └ Monthly ┘   └ Yearly ┘
 ```
 
 ## Locked Backups
@@ -136,7 +161,7 @@ Monthly: 24
 Yearly: 5
 ```
 
-Keeps ~50 backups over 5 years.
+Keeps 51 backups over 5 years.
 
 ### Moderate (Balanced)
 
@@ -147,7 +172,7 @@ Monthly: 12
 Yearly: 2
 ```
 
-Keeps ~25 backups over 2 years.
+Keeps 25 backups over 2 years.
 
 ### Aggressive (Minimal)
 
@@ -158,7 +183,18 @@ Monthly: 6
 Yearly: 1
 ```
 
-Keeps ~12 backups over 1 year.
+Keeps 12 backups over 1 year.
+
+### Hourly Schedule
+
+```
+Hourly: 24
+Daily: 7
+Weekly: 4
+Monthly: 12
+```
+
+Keeps 47 backups and gives a full day at hourly resolution before the daily tier takes over.
 
 ## Retention Execution
 
@@ -166,7 +202,7 @@ Retention runs as the **final step** of each backup job, applied **per destinati
 
 1. Backup upload completes for a destination
 2. List all backups for this job in that specific destination
-3. Read metadata (check lock status)
+3. Read each backup's metadata sidecar for its lock status, chain and creation time
 4. Apply that destination's retention policy
 5. Delete expired backups
 6. Repeat for each remaining destination
@@ -174,6 +210,14 @@ Retention runs as the **final step** of each backup job, applied **per destinati
 ::: tip Skipped on Failure
 Retention is skipped for any destination where the upload failed. This prevents deleting old backups when the new backup didn't arrive.
 :::
+
+### Which Time a Backup Is Judged By
+
+Backups are sorted into buckets by the creation time **DBackup recorded when it wrote the backup**, which is stored in the backup's `.meta.json` sidecar. The file's modification time on the destination is only used when there is no sidecar, for backups taken before this was recorded or for destinations DBackup cannot read files from.
+
+This matters because a modification time is easy to lose. Copying the backup directory without preserving timestamps, moving it to another server, or restoring it from a backup of its own stamps every file with the current time. Judged by that, the entire history collapses into a single bucket and the next retention pass deletes all but one backup from it.
+
+The run log names any backup whose two times disagree by more than an hour, so a destination in that state is visible before it costs anything.
 
 ## Compliance Considerations
 
@@ -201,7 +245,7 @@ Retention is skipped for any destination where the upload failed. This prevents 
 
 | Schedule | Recommended Retention |
 | :--- | :--- |
-| Hourly | Daily: 24-48 |
+| Hourly | Hourly: 24-48, plus Daily: 7-14 |
 | Daily | Daily: 7-14 |
 | Weekly | Weekly: 4-8 |
 | Monthly | Monthly: 12-24 |
@@ -250,6 +294,10 @@ With compression (70% reduction):
 3. View job logs for retention step
 4. Ensure backup ran successfully
 
+### Everything Was Deleted After Moving a Destination
+
+Check the retention step in the run log for warnings about backups whose recorded creation time disagrees with the destination's modification time. Backups written before DBackup recorded a creation time fall back to the modification time, and a move that did not preserve timestamps puts all of them in the same bucket. Lock the backups you cannot lose before moving a destination.
+
 ### Too Many Backups Deleted
 
 1. Check retention settings
@@ -259,9 +307,9 @@ With compression (70% reduction):
 
 ### Wrong Backups Deleted
 
-The GFS algorithm keeps the **oldest** backup in each time bucket. This is intentional:
-- Weekly: Keeps backup from start of week
-- Monthly: Keeps backup from start of month
+The GFS algorithm keeps the **newest** backup in each time bucket. A week with seven backups keeps the one from the end of the week, not the start.
+
+If a destination holds more backups than the policy allows, check the retention step in the run log. Locked backups and incremental chains are both kept beyond the policy, and the log names them.
 
 ## API Reference
 
@@ -275,6 +323,7 @@ Retention configuration in job:
       "keepCount": 5
     },
     "smart": {
+      "hourly": 24,
       "daily": 7,
       "weekly": 4,
       "monthly": 12,
@@ -283,6 +332,8 @@ Retention configuration in job:
   }
 }
 ```
+
+`hourly` may be omitted. A missing value counts as `0` and disables the tier.
 
 ## Next Steps
 

@@ -19,6 +19,7 @@ export function getBackupFileExtension(adapterId: string): string {
         mariadb: "sql",
         postgres: "sql",
         mssql: "bak",
+        "azure-sql": "bacpac",  // SqlPackage data-tier application export
 
         // NoSQL and special formats
         mongodb: "archive",  // mongodump --archive format
@@ -45,6 +46,7 @@ export function getBackupFormatDescription(adapterId: string): string {
         mariadb: "MariaDB SQL Dump",
         postgres: "PostgreSQL SQL Dump",
         mssql: "SQL Server Native Backup",
+        "azure-sql": "Azure SQL Database BACPAC",
         mongodb: "MongoDB Archive",
         redis: "Redis RDB Snapshot",
         valkey: "Valkey RDB Snapshot",

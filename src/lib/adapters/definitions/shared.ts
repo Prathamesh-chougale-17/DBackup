@@ -31,6 +31,22 @@ export type AdapterDefinition = {
      */
     transferConcurrency?: { default: number; max: number };
     /**
+     * Storage only: this adapter splits a single upload across parallel parts, and how far the
+     * connection may push that.
+     *
+     * Distinct from `transferConcurrency`, which counts whole files and only applies to a
+     * directory source. A backup destination receives one archive per run, so the only place
+     * parallelism can happen is inside that one upload. An adapter that uploads as a single
+     * stream omits this and shows no field.
+     *
+     * Here rather than on the runtime adapter for the same reason as transferConcurrency: the
+     * connection form runs in the browser, and definitions are plain data.
+     */
+    multipartUpload?: {
+        concurrency: { default: number; max: number };
+        partSizeMb: { default: number; max: number };
+    };
+    /**
      * Storage only: which roles a config of this adapter may be given. Both, when omitted.
      *
      * The role is normally the user's choice, because most storage serves either end - a
@@ -58,6 +74,22 @@ export type AdapterDefinition = {
      */
     browseNoun?: string;
 }
+
+/**
+ * Applies to an adapter that declares multipart upload without stating its own range.
+ *
+ * Eight parts of 8 MB is a deliberate step up from the AWS SDK's own 4 by 5 MB rather than a
+ * jump to the ceiling. The two numbers multiply into memory, and the default has to stay
+ * reasonable inside a 512 MB container, which is where most self-hosted installations run.
+ *
+ * Lives here rather than next to the resolver in `s3-upload-tuning.ts` because that module
+ * reads `ADAPTER_DEFINITIONS`, and the definitions need this constant to declare themselves.
+ * Shared data has to sit below both to keep the import graph acyclic.
+ */
+export const DEFAULT_S3_UPLOAD_TUNING = {
+    concurrency: { default: 8, max: 32 },
+    partSizeMb: { default: 8, max: 64 },
+} as const;
 
 // Validation: Reject paths with null bytes or obvious shell injection patterns
 export const safePathRegex = /^[^\0]+$/;

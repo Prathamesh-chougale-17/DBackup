@@ -1,8 +1,12 @@
-import { StorageAdapter, FileInfo, DirectoryBrowseEntry, UploadOptions } from "@/lib/core/interfaces";
+import { StorageAdapter, FileInfo, DirectoryBrowseEntry, UploadOptions, ListTreeOptions, ListTreeResult } from "@/lib/core/interfaces";
 import { S3GenericSchema, S3AWSSchema, S3R2Schema, S3HetznerSchema } from "@/lib/adapters/definitions";
 import { S3Client, ListObjectsV2Command, GetObjectCommand, DeleteObjectCommand, PutObjectCommand, HeadObjectCommand, HeadBucketCommand, StorageClass } from "@aws-sdk/client-s3";
+// Type-only, deliberately. The unit suites replace the whole SDK module with a factory that
+// exports the command classes and nothing else, so a value import would break them.
+import type { _Object } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import { createReadStream, createWriteStream } from "fs";
+import { stat } from "fs/promises";
 import { pipeline } from "stream/promises";
 import { Transform, Readable } from "stream";
 import path from "path";
@@ -10,6 +14,9 @@ import { LogLevel, LogType } from "@/lib/core/logs";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { stripSlashes } from "@/lib/paths";
+import { formatBytes } from "@/lib/utils";
+import { resolveS3UploadTuning } from "@/lib/adapters/s3-upload-tuning";
+import { STATELESS_READ_CONCURRENCY } from "@/lib/adapters/storage/common/read-concurrency";
 
 const log = logger.child({ adapter: "s3" });
 
@@ -21,6 +28,23 @@ interface S3InternalConfig {
     forcePathStyle?: boolean;
     pathPrefix?: string;
     storageClass?: string;
+}
+
+/**
+ * What the upload path needs on top of the connection details.
+ *
+ * A separate type rather than three optional fields on `S3InternalConfig`, so the compiler asks
+ * for `adapterId` at exactly the four call sites that upload and at none of the thirty that
+ * list, download or delete. Optional everywhere would let one adapter silently miss its wiring
+ * and fall back to the defaults, which is the one failure this change cannot notice by itself.
+ */
+interface S3UploadConfig extends S3InternalConfig {
+    /** Which of the four S3 adapters this is, so the tuning range is looked up correctly. */
+    adapterId: string;
+    /** Parts uploaded at the same time, as stored on the connection. */
+    uploadConcurrency?: number;
+    /** Megabytes per part, as stored on the connection. */
+    uploadPartSizeMb?: number;
 }
 
 class S3ClientFactory {
@@ -58,16 +82,44 @@ class S3ClientFactory {
 
 // --- Shared Implementation ---
 
-async function s3Upload(internalConfig: S3InternalConfig, localPath: string, remotePath: string, onProgress?: (percent: number) => void, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void, options?: UploadOptions): Promise<boolean> {
+async function s3Upload(internalConfig: S3UploadConfig, localPath: string, remotePath: string, onProgress?: (percent: number) => void, onLog?: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void, options?: UploadOptions): Promise<boolean> {
     const client = S3ClientFactory.create(internalConfig);
     const targetKey = S3ClientFactory.getTargetKey(internalConfig, remotePath);
 
     if (onLog) onLog(`Starting S3 upload to bucket: ${internalConfig.bucket}, key: ${targetKey}`, 'info', 'storage');
 
+    // The size only picks the part size, so a stat that fails must not fail the upload. Without
+    // it the configured size is used as-is, which is correct for the small sidecars and the only
+    // case it could be wrong - an archive past 80 GB needing larger parts to stay under the
+    // 10.000-part limit - cannot arise from a file the runner has just finished writing.
+    let fileSize: number | undefined;
+    try {
+        fileSize = (await stat(localPath)).size;
+    } catch {
+        fileSize = undefined;
+    }
+
+    const { queueSize, partSize, adjustment } = resolveS3UploadTuning(
+        internalConfig.adapterId,
+        internalConfig,
+        fileSize
+    );
+
+    // A file that fits in one part is a plain PutObject however the connection is configured,
+    // so neither the parallelism nor a transfer rate says anything about it. The metadata
+    // sidecar is a kilobyte of JSON, and reporting it at "2.88 KB/s" reads like a fault.
+    const isMultipart = !!fileSize && fileSize > partSize;
+
     const fileStream = createReadStream(localPath);
+    const startedAt = Date.now();
     try {
         const parallelUploads3 = new Upload({
             client: client,
+            // Both are set explicitly. The SDK's own defaults are 4 parts of 5 MB, which leaves
+            // most of a fast link idle: measured against R2 over a 10 Gbit line, that is 27 MB/s
+            // while the same run reads and hashes the file locally at over 400 MB/s.
+            queueSize,
+            partSize,
             params: {
                 Bucket: internalConfig.bucket,
                 Key: targetKey,
@@ -77,6 +129,22 @@ async function s3Upload(internalConfig: S3InternalConfig, localPath: string, rem
             },
         });
 
+        // Only worth a line where it says something, and it reports what actually ran rather
+        // than what the connection stores - the two differ whenever the archive forced a
+        // different part size, which is exactly when someone reading the log needs to know.
+        if (onLog && isMultipart) {
+            const detail = adjustment === 'raised-for-part-limit'
+                ? ` (raised above the configured maximum to stay within S3's 10,000-part limit)`
+                : adjustment === 'lowered-to-fill-parallelism'
+                    ? ` (lowered from the configured maximum so every connection gets a part)`
+                    : '';
+            onLog(
+                `Multipart upload: ${queueSize} parallel parts of ${formatBytes(partSize)}${detail}`,
+                'info',
+                'storage'
+            );
+        }
+
         parallelUploads3.on("httpUploadProgress", (progress) => {
             if (onProgress && progress.loaded && progress.total) {
                 const percent = Math.round((progress.loaded / progress.total) * 100);
@@ -85,7 +153,12 @@ async function s3Upload(internalConfig: S3InternalConfig, localPath: string, rem
         });
 
         await parallelUploads3.done();
-        if (onLog) onLog(`S3 upload completed successfully`, 'info', 'storage');
+        // The throughput is the whole reason the two settings above exist, and it used to reach
+        // only the live progress detail - gone the moment the run ended. Anyone tuning the
+        // numbers had to rediscover it by subtracting log timestamps, at one-second resolution.
+        const elapsed = (Date.now() - startedAt) / 1000;
+        const rate = isMultipart && elapsed > 0 ? ` at ${formatBytes(fileSize! / elapsed)}/s` : '';
+        if (onLog) onLog(`S3 upload completed successfully${rate}`, 'info', 'storage');
         return true;
     } catch (error: unknown) {
         log.error("S3 upload failed", { bucket: internalConfig.bucket, targetKey }, wrapError(error));
@@ -97,35 +170,153 @@ async function s3Upload(internalConfig: S3InternalConfig, localPath: string, rem
     }
 }
 
+/** The prefix a listing scans, with the trailing slash S3 needs to treat it as a folder. */
+function listPrefixFor(internalConfig: S3InternalConfig, dir: string): string {
+    const prefix = S3ClientFactory.getTargetKey(internalConfig, dir);
+    return prefix && !prefix.endsWith('/') ? `${prefix}/` : prefix;
+}
+
+/**
+ * Yields every object under a prefix, one ListObjectsV2 page at a time.
+ *
+ * ListObjectsV2 answers with at most 1000 keys plus a continuation token, and taking only the
+ * first page is not a smaller listing - it is the lexicographically first 1000 keys. Backup
+ * filenames carry timestamps, so that page held the oldest backups and every recent one was
+ * invisible to retention, integrity checks, the destination browser and the dashboard alike,
+ * with no error and no log line to say so.
+ *
+ * The signal is checked before each request rather than after, so an already-cancelled walk
+ * costs nothing at all.
+ *
+ * No `MaxKeys`, because the 1000 default is what we want. No `Delimiter`, because `list()` is
+ * deliberately recursive - see the comment in `05-retention.ts` about incremental chains
+ * living in subfolders.
+ */
+async function* s3ListPages(
+    client: S3Client,
+    bucket: string,
+    listPrefix: string,
+    signal?: AbortSignal
+): AsyncGenerator<_Object[]> {
+    let continuationToken: string | undefined;
+
+    do {
+        signal?.throwIfAborted();
+
+        const response = await client.send(new ListObjectsV2Command({
+            Bucket: bucket,
+            Prefix: listPrefix,
+            ContinuationToken: continuationToken,
+        }));
+
+        yield response.Contents ?? [];
+
+        continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+    } while (continuationToken);
+}
+
+/**
+ * Turns one listed object into a `FileInfo`, or `null` for something that is not a file.
+ *
+ * Folder markers are recognised by their key ending in `/`, which is what actually makes them
+ * markers. The old test was `size > 0`, which caught them by accident and threw away every
+ * genuine empty file with them - so an empty file was missing from a directory backup, read as
+ * a deleted object during cache reconciliation, and read as a missing link in a backup chain.
+ *
+ * The check has to run on the raw key: `path.basename("backups/foo/")` is `"foo"`, so testing
+ * the name instead would let every marker through.
+ */
+function s3ObjectToFileInfo(internalConfig: S3InternalConfig, obj: _Object): FileInfo | null {
+    const key = obj.Key || "";
+    if (!key || key.endsWith('/')) return null;
+
+    const name = path.basename(key);
+    if (!name) return null;
+
+    return {
+        name,
+        // Relative to the adapter's path prefix, so it matches every other adapter's
+        // list() and can be fed straight back to download/delete (which re-apply the
+        // prefix) without the prefix leaking into stored paths.
+        path: S3ClientFactory.stripPrefix(internalConfig, key),
+        size: obj.Size || 0,
+        lastModified: obj.LastModified || new Date(),
+        storageClass: obj.StorageClass || undefined,
+    };
+}
+
 async function s3List(internalConfig: S3InternalConfig, dir: string = ""): Promise<FileInfo[]> {
     const client = S3ClientFactory.create(internalConfig);
-    const prefix = S3ClientFactory.getTargetKey(internalConfig, dir);
-
-    // Ensure prefix ends with / if it serves as a directory listing, unless empty
-    const listPrefix = prefix && !prefix.endsWith('/') ? `${prefix}/` : prefix;
+    const listPrefix = listPrefixFor(internalConfig, dir);
 
     try {
-        const command = new ListObjectsV2Command({
-            Bucket: internalConfig.bucket,
-            Prefix: listPrefix,
-        });
+        const files: FileInfo[] = [];
 
-        const response = await client.send(command);
+        for await (const page of s3ListPages(client, internalConfig.bucket, listPrefix)) {
+            for (const obj of page) {
+                const file = s3ObjectToFileInfo(internalConfig, obj);
+                if (file) files.push(file);
+            }
+        }
 
-        if (!response.Contents) return [];
-
-        return response.Contents.map(obj => ({
-            name: path.basename(obj.Key || ""),
-            // Relative to the adapter's path prefix, so it matches every other adapter's
-            // list() and can be fed straight back to download/delete (which re-apply the
-            // prefix) without the prefix leaking into stored paths.
-            path: S3ClientFactory.stripPrefix(internalConfig, obj.Key || ""),
-            size: obj.Size || 0,
-            lastModified: obj.LastModified || new Date(),
-            storageClass: obj.StorageClass || undefined,
-        })).filter(f => f.name && f.size > 0); // Filter folders or empty keys
+        return files;
     } catch (error) {
         log.error("S3 list failed", { bucket: internalConfig.bucket, prefix: listPrefix }, wrapError(error));
+        throw error;
+    } finally {
+        client.destroy();
+    }
+}
+
+/**
+ * Collection walk over a prefix, which is `list()` plus progress and cancellation.
+ *
+ * Same pagination helper as `list()`, on purpose. Two loops would drift, and retention and
+ * collection would end up disagreeing about what is in a destination - the reason `ftp.ts`
+ * keeps one walker behind both of its entry points.
+ *
+ * Without this, `listTreeForCollection()` falls back to `list()`, which reports progress only
+ * once it has finished and cannot be interrupted at all. That was harmless while a listing
+ * stopped at 1000 keys and is not once it paginates: a large bucket lists for minutes behind a
+ * frozen progress row and a cancel button that does nothing.
+ *
+ * `pruned` is always empty, and that is a decision rather than an omission. `excludePatterns`
+ * are advisory and the caller applies them again anyway, a flat scan has no directory it could
+ * decline to descend into, and rebuilding this as a `Delimiter` walk to gain one would cost S3
+ * more requests rather than fewer. `concurrency` is ignored for the same kind of reason:
+ * pagination is serial by construction, because the next token only exists once the previous
+ * response has arrived. `unsupportedSymlinks` stays unset - object storage has no links.
+ */
+async function s3ListTree(
+    internalConfig: S3InternalConfig,
+    dir: string = "",
+    options?: ListTreeOptions
+): Promise<ListTreeResult> {
+    const client = S3ClientFactory.create(internalConfig);
+    const listPrefix = listPrefixFor(internalConfig, dir);
+
+    try {
+        const files: FileInfo[] = [];
+
+        for await (const page of s3ListPages(client, internalConfig.bucket, listPrefix, options?.signal)) {
+            for (const obj of page) {
+                const file = s3ObjectToFileInfo(internalConfig, obj);
+                if (file) files.push(file);
+            }
+
+            // One report per page. No self-throttling: listTreeForCollection() already rate
+            // limits what reaches the execution's progress row.
+            options?.onProgress?.({
+                files: files.length,
+                directories: 0,
+                prunedDirectories: 0,
+                currentPath: "",
+            });
+        }
+
+        return { files, pruned: [] };
+    } catch (error) {
+        log.error("S3 tree listing failed", { bucket: internalConfig.bucket, prefix: listPrefix }, wrapError(error));
         throw error;
     } finally {
         client.destroy();
@@ -145,8 +336,7 @@ async function s3BrowseDirectories(
     subPath: string = ""
 ): Promise<DirectoryBrowseEntry[]> {
     const client = S3ClientFactory.create(internalConfig);
-    const base = S3ClientFactory.getTargetKey(internalConfig, subPath);
-    const listPrefix = base && !base.endsWith("/") ? `${base}/` : base;
+    const listPrefix = listPrefixFor(internalConfig, subPath);
 
     try {
         const entries: DirectoryBrowseEntry[] = [];
@@ -405,6 +595,17 @@ export const S3GenericAdapter: StorageAdapter = {
     configSchema: S3GenericSchema,
     credentials: { primary: "ACCESS_KEY" },
     upload: (config, ...args) => s3Upload({
+        adapterId: "s3-generic",
+        endpoint: config.endpoint,
+        region: config.region,
+        bucket: config.bucket,
+        credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        forcePathStyle: config.forcePathStyle,
+        pathPrefix: config.pathPrefix,
+        uploadConcurrency: config.uploadConcurrency,
+        uploadPartSizeMb: config.uploadPartSizeMb
+    }, ...args),
+    list: (config, ...args) => s3List({
         endpoint: config.endpoint,
         region: config.region,
         bucket: config.bucket,
@@ -412,7 +613,7 @@ export const S3GenericAdapter: StorageAdapter = {
         forcePathStyle: config.forcePathStyle,
         pathPrefix: config.pathPrefix
     }, ...args),
-    list: (config, ...args) => s3List({
+    listTree: (config, ...args) => s3ListTree({
         endpoint: config.endpoint,
         region: config.region,
         bucket: config.bucket,
@@ -466,6 +667,7 @@ export const S3GenericAdapter: StorageAdapter = {
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
         forcePathStyle: config.forcePathStyle,
     }),
+    readConcurrency: STATELESS_READ_CONCURRENCY,
     read: (config, ...args) => s3Read({
         endpoint: config.endpoint,
         region: config.region,
@@ -492,13 +694,22 @@ export const S3AWSAdapter: StorageAdapter = {
     configSchema: S3AWSSchema,
     credentials: { primary: "ACCESS_KEY" },
     upload: (config, ...args) => s3Upload({
+        adapterId: "s3-aws",
         region: config.region,
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
         pathPrefix: config.pathPrefix,
-        storageClass: config.storageClass
+        storageClass: config.storageClass,
+        uploadConcurrency: config.uploadConcurrency,
+        uploadPartSizeMb: config.uploadPartSizeMb
     }, ...args),
     list: (config, ...args) => s3List({
+        region: config.region,
+        bucket: config.bucket,
+        credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix
+    }, ...args),
+    listTree: (config, ...args) => s3ListTree({
         region: config.region,
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
@@ -538,6 +749,7 @@ export const S3AWSAdapter: StorageAdapter = {
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
     }),
+    readConcurrency: STATELESS_READ_CONCURRENCY,
     read: (config, ...args) => s3Read({
         region: config.region,
         bucket: config.bucket,
@@ -566,13 +778,23 @@ export const S3R2Adapter: StorageAdapter = {
     configSchema: S3R2Schema,
     credentials: { primary: "ACCESS_KEY" },
     upload: (config, ...args) => s3Upload({
+        adapterId: "s3-r2",
+        endpoint: r2Endpoint(config.accountId, config.jurisdiction),
+        region: "auto",
+        bucket: config.bucket,
+        credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix,
+        uploadConcurrency: config.uploadConcurrency,
+        uploadPartSizeMb: config.uploadPartSizeMb
+    }, ...args),
+    list: (config, ...args) => s3List({
         endpoint: r2Endpoint(config.accountId, config.jurisdiction),
         region: "auto",
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
         pathPrefix: config.pathPrefix
     }, ...args),
-    list: (config, ...args) => s3List({
+    listTree: (config, ...args) => s3ListTree({
         endpoint: r2Endpoint(config.accountId, config.jurisdiction),
         region: "auto",
         bucket: config.bucket,
@@ -619,6 +841,7 @@ export const S3R2Adapter: StorageAdapter = {
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
     }),
+    readConcurrency: STATELESS_READ_CONCURRENCY,
     read: (config, ...args) => s3Read({
         endpoint: r2Endpoint(config.accountId, config.jurisdiction),
         region: "auto",
@@ -643,13 +866,23 @@ export const S3HetznerAdapter: StorageAdapter = {
     configSchema: S3HetznerSchema,
     credentials: { primary: "ACCESS_KEY" },
     upload: (config, ...args) => s3Upload({
+        adapterId: "s3-hetzner",
+        endpoint: `https://${config.region}.your-objectstorage.com`,
+        region: config.region,
+        bucket: config.bucket,
+        credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+        pathPrefix: config.pathPrefix,
+        uploadConcurrency: config.uploadConcurrency,
+        uploadPartSizeMb: config.uploadPartSizeMb
+    }, ...args),
+    list: (config, ...args) => s3List({
         endpoint: `https://${config.region}.your-objectstorage.com`,
         region: config.region,
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
         pathPrefix: config.pathPrefix
     }, ...args),
-    list: (config, ...args) => s3List({
+    listTree: (config, ...args) => s3ListTree({
         endpoint: `https://${config.region}.your-objectstorage.com`,
         region: config.region,
         bucket: config.bucket,
@@ -696,6 +929,7 @@ export const S3HetznerAdapter: StorageAdapter = {
         bucket: config.bucket,
         credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
     }),
+    readConcurrency: STATELESS_READ_CONCURRENCY,
     read: (config, ...args) => s3Read({
         endpoint: `https://${config.region}.your-objectstorage.com`,
         region: config.region,

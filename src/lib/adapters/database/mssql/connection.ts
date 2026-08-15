@@ -8,8 +8,107 @@ import { MSSQLConfig } from "@/lib/adapters/definitions";
 const log = logger.child({ adapter: "mssql" });
 
 /**
- * Build connection configuration for mssql package
+ * `SERVERPROPERTY('EngineEdition')` values.
+ *
+ * This is the reliable signal, not the edition string. Azure SQL Database answers
+ * `SERVERPROPERTY('Edition')` with "SQL Azure", which the name parsing below used
+ * to reduce to the meaningless "SQL".
  */
+const ENGINE_EDITION = {
+    PERSONAL: 1,
+    STANDARD: 2,
+    ENTERPRISE: 3,
+    EXPRESS: 4,
+    AZURE_SQL_DATABASE: 5,
+    AZURE_SYNAPSE: 6,
+    AZURE_SQL_MANAGED_INSTANCE: 8,
+    AZURE_SQL_EDGE: 9,
+    AZURE_SYNAPSE_SERVERLESS: 11,
+} as const;
+
+/**
+ * Why this adapter structurally cannot back up an engine, or null when it can.
+ *
+ * The Azure PaaS editions accept a connection, report a version and list their
+ * databases, so nothing before the first BACKUP statement gives them away. What
+ * surfaces there is "Statement 'BACKUP DATABASE' is not supported in this version
+ * of SQL Server", which names neither the product refusing nor the way forward.
+ */
+function describeUnsupportedEngine(engineEdition: number): string | null {
+    switch (engineEdition) {
+        case ENGINE_EDITION.AZURE_SQL_DATABASE:
+            return "Azure SQL Database is not supported by this adapter. It has no BACKUP DATABASE statement at all, so a native .bak can never be produced from it.";
+        case ENGINE_EDITION.AZURE_SQL_MANAGED_INSTANCE:
+            return "Azure SQL Managed Instance is not supported. It accepts BACKUP DATABASE only as TO URL against Azure Blob Storage with COPY_ONLY, never TO DISK, and this adapter reads the .bak back off a filesystem.";
+        case ENGINE_EDITION.AZURE_SYNAPSE:
+        case ENGINE_EDITION.AZURE_SYNAPSE_SERVERLESS:
+            return "Azure Synapse Analytics is not supported. It has no BACKUP DATABASE statement.";
+        default:
+            return null;
+    }
+}
+
+/** Human-readable edition, keyed off EngineEdition before falling back to the name. */
+function describeEdition(engineEdition: number, editionRaw: string, fullVersion: string): string {
+    switch (engineEdition) {
+        case ENGINE_EDITION.AZURE_SQL_DATABASE: return "Azure SQL Database";
+        case ENGINE_EDITION.AZURE_SQL_MANAGED_INSTANCE: return "Azure SQL Managed Instance";
+        case ENGINE_EDITION.AZURE_SYNAPSE: return "Azure Synapse Analytics";
+        case ENGINE_EDITION.AZURE_SYNAPSE_SERVERLESS: return "Azure Synapse Analytics (serverless)";
+        case ENGINE_EDITION.AZURE_SQL_EDGE: return "Azure SQL Edge";
+    }
+
+    if (fullVersion.includes("Azure SQL Edge")) return "Azure SQL Edge";
+
+    const lower = editionRaw.toLowerCase();
+    if (lower.includes("express")) return "Express";
+    if (lower.includes("standard")) return "Standard";
+    if (lower.includes("enterprise")) return "Enterprise";
+    if (lower.includes("developer")) return "Developer";
+    if (lower.includes("web")) return "Web";
+
+    return editionRaw.split(" ")[0] || "Unknown";
+}
+
+/** Product name for the connection-test message. */
+function describeProduct(engineEdition: number, fullVersion: string): string {
+    switch (engineEdition) {
+        case ENGINE_EDITION.AZURE_SQL_DATABASE: return "Azure SQL Database";
+        case ENGINE_EDITION.AZURE_SQL_MANAGED_INSTANCE: return "Azure SQL Managed Instance";
+        case ENGINE_EDITION.AZURE_SYNAPSE:
+        case ENGINE_EDITION.AZURE_SYNAPSE_SERVERLESS: return "Azure Synapse Analytics";
+    }
+
+    if (fullVersion.includes("Azure SQL Edge")) return "Azure SQL Edge";
+    if (fullVersion.includes("2022")) return "SQL Server 2022";
+    if (fullVersion.includes("2019")) return "SQL Server 2019";
+    if (fullVersion.includes("2017")) return "SQL Server 2017";
+
+    return "SQL Server";
+}
+
+/**
+ * Refuse an engine this adapter cannot back up, before any work starts.
+ *
+ * test() reports the same thing, but a scheduled job never calls test(), and the
+ * runner swallows its result anyway. Without this the first sign of trouble is a
+ * failed run at 03:00 quoting a T-SQL error.
+ */
+export async function assertBackupSupported(config: MSSQLConfig, host: ExecutionHost): Promise<void> {
+    let engineEdition: number;
+    try {
+        const result = await executeQuery(config, host, "SELECT SERVERPROPERTY('EngineEdition') AS EngineEdition");
+        engineEdition = Number(result.recordset[0]?.EngineEdition) || 0;
+    } catch {
+        // A server that will not answer this cannot be classified, and refusing on
+        // that basis would break setups this adapter has always handled. Let the
+        // operation continue and fail on its own terms.
+        return;
+    }
+
+    const reason = describeUnsupportedEngine(engineEdition);
+    if (reason) throw new Error(reason);
+}
 
 /**
  * Test connection and retrieve version
@@ -33,30 +132,17 @@ export async function test(config: MSSQLConfig, host?: ExecutionHost): Promise<{
         const versionMatch = productVersion.match(/^(\d+\.\d+\.\d+)/);
         const version = versionMatch ? versionMatch[1] : productVersion;
 
-        // Determine edition string
-        let edition = "Unknown";
-        if (engineEdition === 9 || fullVersion.includes("Azure SQL Edge")) {
-            edition = "Azure SQL Edge";
-        } else if (editionRaw.toLowerCase().includes("express")) {
-            edition = "Express";
-        } else if (editionRaw.toLowerCase().includes("standard")) {
-            edition = "Standard";
-        } else if (editionRaw.toLowerCase().includes("enterprise")) {
-            edition = "Enterprise";
-        } else if (editionRaw.toLowerCase().includes("developer")) {
-            edition = "Developer";
-        } else if (editionRaw.toLowerCase().includes("web")) {
-            edition = "Web";
-        } else {
-            edition = editionRaw.split(" ")[0] || "Unknown"; // Take first word
-        }
+        const edition = describeEdition(engineEdition, editionRaw, fullVersion);
+        const friendlyName = describeProduct(engineEdition, fullVersion);
 
-        // Determine friendly name from full version string
-        let friendlyName = "SQL Server";
-        if (fullVersion.includes("2022")) friendlyName = "SQL Server 2022";
-        else if (fullVersion.includes("2019")) friendlyName = "SQL Server 2019";
-        else if (fullVersion.includes("2017")) friendlyName = "SQL Server 2017";
-        else if (fullVersion.includes("Azure SQL Edge")) friendlyName = "Azure SQL Edge";
+        // Reported as a failed test rather than a warning, because a source this
+        // adapter cannot back up is not a working source. The health check turning
+        // it offline is what tells the user to switch adapters. Version and edition
+        // still come back so the run log and version history stay accurate.
+        const unsupported = describeUnsupportedEngine(engineEdition);
+        if (unsupported) {
+            return { success: false, message: unsupported, version, edition };
+        }
 
         return {
             success: true,
@@ -111,27 +197,14 @@ import { DatabaseInfo } from "@/lib/core/interfaces";
 export async function getDatabasesWithStats(config: MSSQLConfig, host: ExecutionHost): Promise<DatabaseInfo[]> {
     try {
         return await withPool(config, host, async (pool) => {
-        // Get database names and sizes from master catalog views.
-        // Include all user databases regardless of state so offline/restoring DBs
-        // are still visible. state_desc is included for display purposes.
-        const sizeResult = await pool.request().query(`
-            SELECT
-                d.name,
-                d.state_desc,
-                SUM(CAST(mf.size AS BIGINT)) * 8 * 1024 AS size_bytes
-            FROM sys.databases d
-            LEFT JOIN sys.master_files mf ON d.database_id = mf.database_id
-            WHERE d.database_id > 4
-            GROUP BY d.name, d.state_desc
-            ORDER BY d.name
-        `);
+        const { rows, sizesAvailable } = await readDatabaseCatalog(pool);
 
         // Get table counts per database via cross-database sys.tables queries.
         // INFORMATION_SCHEMA.TABLES only returns tables for the current DB context,
         // so we query each database individually.
         const databases: DatabaseInfo[] = [];
 
-        for (const row of sizeResult.recordset) {
+        for (const row of rows) {
             let tableCount = 0;
             try {
                 const safeName = row.name.replace(/\]/g, "]]");
@@ -145,7 +218,10 @@ export async function getDatabasesWithStats(config: MSSQLConfig, host: Execution
 
             databases.push({
                 name: row.name,
-                sizeInBytes: row.size_bytes != null ? Number(row.size_bytes) : 0,
+                // Undefined rather than 0 when sizes could not be read at all. The
+                // explorer drops the whole column when no database reports one,
+                // which beats a table full of confident zeroes.
+                sizeInBytes: sizesAvailable ? (row.size_bytes != null ? Number(row.size_bytes) : 0) : undefined,
                 tableCount,
             });
         }
@@ -155,6 +231,49 @@ export async function getDatabasesWithStats(config: MSSQLConfig, host: Execution
     } catch (error: unknown) {
         log.error("Failed to get databases with stats", {}, wrapError(error));
         throw wrapError(error);
+    }
+}
+
+/**
+ * User databases with their allocated size, falling back to names alone.
+ *
+ * `sys.master_files` is server-scoped and does not exist on Azure SQL Database,
+ * where the join fails with "Invalid object name 'sys.master_files'". Letting that
+ * escape took out the entire Database Explorer with a "Connection Failed" card,
+ * even though the connection was fine and the names were perfectly readable. A
+ * list without sizes beats no list.
+ *
+ * All user databases are included regardless of state, so offline and restoring
+ * ones stay visible.
+ */
+async function readDatabaseCatalog(
+    pool: sql.ConnectionPool,
+): Promise<{ rows: { name: string; size_bytes?: unknown }[]; sizesAvailable: boolean }> {
+    try {
+        const result = await pool.request().query(`
+            SELECT
+                d.name,
+                d.state_desc,
+                SUM(CAST(mf.size AS BIGINT)) * 8 * 1024 AS size_bytes
+            FROM sys.databases d
+            LEFT JOIN sys.master_files mf ON d.database_id = mf.database_id
+            WHERE d.database_id > 4
+            GROUP BY d.name, d.state_desc
+            ORDER BY d.name
+        `);
+        return { rows: result.recordset, sizesAvailable: true };
+    } catch (error: unknown) {
+        log.warn("Database sizes unavailable, listing names only", {
+            reason: error instanceof Error ? error.message : String(error),
+        });
+
+        const result = await pool.request().query(`
+            SELECT name, state_desc
+            FROM sys.databases
+            WHERE database_id > 4
+            ORDER BY name
+        `);
+        return { rows: result.recordset, sizesAvailable: false };
     }
 }
 

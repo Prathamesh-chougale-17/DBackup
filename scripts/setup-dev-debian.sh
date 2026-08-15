@@ -150,6 +150,51 @@ info "Installing additional tools (SSH, rsync, smbclient)..."
 apt-get install -y -qq openssh-client sshpass rsync smbclient openssl zip > /dev/null
 
 # -------------------------------------------------------------------
+# SqlPackage - BACPAC export/import for the Azure SQL Database adapter
+#
+# Installed as a dotnet tool rather than from Microsoft's standalone zip, which
+# is published for linux-x64 only. The tool is portable IL and works on arm64,
+# which is the same route the container image takes.
+# -------------------------------------------------------------------
+info "Installing SqlPackage (Azure SQL Database adapter)..."
+if ! command -v dotnet &>/dev/null; then
+    apt-get install -y -qq libicu-dev &>/dev/null || apt-get install -y -qq libicu72 &>/dev/null || true
+    curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+    bash /tmp/dotnet-install.sh --channel 10.0 --install-dir /usr/share/dotnet --no-path
+    ln -sf /usr/share/dotnet/dotnet /usr/local/bin/dotnet
+    rm -f /tmp/dotnet-install.sh
+fi
+if command -v dotnet &>/dev/null; then
+    SQLPKG_TMP="$(mktemp -d)"
+    if dotnet tool install --tool-path "$SQLPKG_TMP" microsoft.sqlpackage &>/dev/null; then
+        # The package ships several target frameworks side by side, and the first one
+        # `find` returns is net8.0, whose launcher demands a .NET 8 runtime this script
+        # does not install. Match the runtime that is actually present.
+        SQLPKG_MAJOR="$(dotnet --list-runtimes | awk '/Microsoft.NETCore.App/ {print $2}' | cut -d. -f1 | sort -n | tail -1)"
+        SQLPKG_PAYLOAD="$(find "$SQLPKG_TMP/.store" -type d -path "*/tools/net${SQLPKG_MAJOR}.0/any" | head -1)"
+        [ -z "$SQLPKG_PAYLOAD" ] && SQLPKG_PAYLOAD="$(find "$SQLPKG_TMP/.store" -type d -path '*/tools/net*/any' | sort -V | tail -1)"
+
+        if [ -n "$SQLPKG_PAYLOAD" ]; then
+            rm -rf /usr/local/share/sqlpackage
+            mkdir -p /usr/local/share/sqlpackage
+            cp -a "$SQLPKG_PAYLOAD"/. /usr/local/share/sqlpackage/
+
+            # A wrapper naming the runtime outright, the same shape the Dockerfile and
+            # the macOS script use. The apphost shim would rely on the default runtime
+            # probe paths, which is one more thing to differ between machines.
+            printf '#!/bin/sh\nexec "%s" /usr/local/share/sqlpackage/sqlpackage.dll "$@"\n' \
+                "$(command -v dotnet)" > /usr/local/bin/sqlpackage
+            chmod +x /usr/local/bin/sqlpackage
+        else
+            echo -e "  ${RED}Could not locate the SqlPackage payload - skipping.${NC}"
+        fi
+    else
+        echo -e "  ${RED}SqlPackage install failed - the Azure SQL Database adapter will not work locally.${NC}"
+    fi
+    rm -rf "$SQLPKG_TMP"
+fi
+
+# -------------------------------------------------------------------
 # Summary
 # -------------------------------------------------------------------
 echo ""
@@ -157,7 +202,7 @@ info "========================================="
 info "  DBackup Dev Dependencies — Summary"
 info "========================================="
 echo ""
-for cmd in mysql mysqldump mongodump mongorestore mongosh sqlite3 redis-cli pg_dump psql rsync smbclient sshpass; do
+for cmd in mysql mysqldump mongodump mongorestore mongosh sqlite3 redis-cli pg_dump psql rsync smbclient sshpass sqlpackage; do
     if command -v "$cmd" &>/dev/null; then
         echo -e "  ${GREEN}✓${NC}  $cmd  ($(command -v "$cmd"))"
     else
@@ -173,4 +218,5 @@ for ver in "${PG_VERSIONS[@]}"; do
     fi
 done
 echo ""
-info "Done. MSSQL uses the Node.js mssql driver — no binary needed."
+info "Done. MSSQL uses the Node.js mssql driver - no binary needed."
+info "Azure SQL Database additionally needs sqlpackage, listed above."

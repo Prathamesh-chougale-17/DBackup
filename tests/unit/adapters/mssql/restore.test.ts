@@ -3,13 +3,15 @@ import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { join } from "node:path";
 
-const { mockExecuteQuery, mockExecuteWithMessages, mockExecuteParameterized } = vi.hoisted(() => ({
+const { mockExecuteQuery, mockExecuteWithMessages, mockExecuteParameterized, mockAssertSupported } = vi.hoisted(() => ({
     mockExecuteQuery: vi.fn(),
     mockExecuteWithMessages: vi.fn(),
     mockExecuteParameterized: vi.fn(),
+    mockAssertSupported: vi.fn(),
 }));
 
 vi.mock("@/lib/adapters/database/mssql/connection", () => ({
+    assertBackupSupported: (...args: unknown[]) => mockAssertSupported(...args),
     executeQuery: (...args: unknown[]) => mockExecuteQuery(...args),
     executeQueryWithMessages: (...args: unknown[]) => mockExecuteWithMessages(...args),
     executeParameterizedQuery: (...args: unknown[]) => mockExecuteParameterized(...args),
@@ -44,6 +46,7 @@ beforeEach(async () => {
     mountDir = await mkdtemp(join(os.tmpdir(), "dbackup-mssql-mount-"));
     srcDir = await mkdtemp(join(os.tmpdir(), "dbackup-mssql-src-"));
 
+    mockAssertSupported.mockResolvedValue(undefined);
     mockExecuteParameterized.mockResolvedValue({ recordset: [{ state_desc: "ONLINE" }] });
     mockExecuteQuery.mockResolvedValue({
         recordset: [
@@ -83,6 +86,16 @@ describe("MSSQL prepareRestore", () => {
 
         await expect(prepareRestore(config() as never, ["newdb"], createFakeHost({ kind: "direct" })))
             .resolves.toBeUndefined();
+    });
+
+    it("refuses an unsupported engine before inspecting any target", async () => {
+        // Preflight runs before an Execution row exists, so refusing here leaves
+        // no failed run behind for the user to interpret.
+        mockAssertSupported.mockRejectedValue(new Error("Azure SQL Managed Instance is not supported."));
+
+        await expect(prepareRestore(config() as never, ["testdb"], createFakeHost({ kind: "direct" })))
+            .rejects.toThrow("Azure SQL Managed Instance is not supported");
+        expect(mockExecuteParameterized).not.toHaveBeenCalled();
     });
 });
 

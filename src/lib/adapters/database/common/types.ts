@@ -19,8 +19,8 @@ export interface DatabaseEntry {
     filename: string;
     /** Size in bytes (uncompressed) */
     size: number;
-    /** Dump format: sql (MySQL), custom (PostgreSQL -Fc), archive (MongoDB), bak (MSSQL), fbk (Firebird gbak) */
-    format: "sql" | "custom" | "archive" | "bak" | "fbk";
+    /** Dump format: sql (MySQL), custom (PostgreSQL -Fc), archive (MongoDB), bak (MSSQL), fbk (Firebird gbak), bacpac (Azure SQL Database) */
+    format: "sql" | "custom" | "archive" | "bak" | "fbk" | "bacpac";
 }
 
 /**

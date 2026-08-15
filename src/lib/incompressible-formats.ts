@@ -33,8 +33,8 @@ export const INCOMPRESSIBLE_EXTENSIONS: ReadonlySet<string> = new Set([
     "7z", "br", "bz2", "cab", "gz", "lz4", "lzma", "rar", "tbz2", "tgz", "txz", "xz", "zip", "zst",
 
     // ZIP containers under another name. Office documents, Java and mobile packages, Python
-    // wheels, browser and editor extensions - all deflate inside.
-    "apk", "docx", "epub", "ipa", "jar", "nupkg", "odp", "ods", "odt", "pptx", "vsix", "war", "whl", "xlsx", "xpi",
+    // wheels, browser and editor extensions, Azure SQL data-tier exports - all deflate inside.
+    "apk", "bacpac", "docx", "epub", "ipa", "jar", "nupkg", "odp", "ods", "odt", "pptx", "vsix", "war", "whl", "xlsx", "xpi",
 
     // Web fonts. WOFF and WOFF2 are the compressed forms of TTF and OTF.
     "woff", "woff2",

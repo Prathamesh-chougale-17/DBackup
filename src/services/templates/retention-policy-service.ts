@@ -1,10 +1,28 @@
 import prisma from "@/lib/prisma";
 import { runBulk, type BulkResult } from "@/lib/core/bulk";
 import { logger } from "@/lib/logging/logger";
-import { NotFoundError, ServiceError } from "@/lib/logging/errors";
-import type { RetentionConfiguration } from "@/lib/core/retention";
+import { NotFoundError, ServiceError, ValidationError } from "@/lib/logging/errors";
+import { RetentionConfigurationSchema, type RetentionConfiguration } from "@/lib/core/retention";
 
 const log = logger.child({ service: "RetentionPolicyService" });
+
+/**
+ * Validates a configuration before it is stored.
+ *
+ * A retention policy is the input to file deletion, so a malformed one is not a cosmetic
+ * problem. Rejecting it here keeps a value written through the API from reaching the
+ * bucketing logic.
+ */
+function validateConfig(config: RetentionConfiguration): RetentionConfiguration {
+  try {
+    return RetentionConfigurationSchema.parse(config);
+  } catch (e) {
+    throw new ValidationError("Retention policy validation failed", {
+      field: "config",
+      cause: e instanceof Error ? e : undefined,
+    });
+  }
+}
 
 export async function getRetentionPolicies() {
   return prisma.retentionPolicy.findMany({ orderBy: { name: "asc" } });
@@ -28,6 +46,8 @@ export async function createRetentionPolicy(input: {
     throw new ServiceError("RetentionPolicyService", "createRetentionPolicy", `A retention policy named "${input.name}" already exists.`);
   }
 
+  const config = validateConfig(input.config);
+
   if (input.isDefault) {
     await prisma.retentionPolicy.updateMany({ where: { isDefault: true }, data: { isDefault: false } });
   }
@@ -36,7 +56,7 @@ export async function createRetentionPolicy(input: {
     data: {
       name: input.name,
       description: input.description,
-      config: JSON.stringify(input.config),
+      config: JSON.stringify(config),
       isDefault: input.isDefault ?? false,
     },
   });
@@ -54,6 +74,10 @@ export async function updateRetentionPolicy(
     isDefault?: boolean;
   }
 ) {
+  // Validated before anything is written, so a rejected config cannot leave the
+  // isDefault flag already cleared below.
+  const config = input.config !== undefined ? validateConfig(input.config) : undefined;
+
   const policy = await prisma.retentionPolicy.findUnique({ where: { id } });
   if (!policy) throw new NotFoundError("RetentionPolicy", id);
 
@@ -75,8 +99,8 @@ export async function updateRetentionPolicy(
     data: {
       ...(input.name !== undefined && { name: input.name }),
       ...(input.description !== undefined && { description: input.description }),
-      ...(input.config !== undefined && {
-        config: JSON.stringify(input.config),
+      ...(config !== undefined && {
+        config: JSON.stringify(config),
       }),
       ...(input.isDefault !== undefined && { isDefault: input.isDefault }),
     },

@@ -191,6 +191,17 @@ RESTORE DATABASE [dbname] FROM DISK = '/path/backup.bak'
 - Requires shared volume
 - Uses T-SQL commands
 
+### Azure SQL Database
+
+```bash
+sqlpackage /Action:Import /SourceFile:backup.bacpac /TargetConnectionString:"..."
+```
+
+- A BACPAC import always creates the database, so restoring onto an existing name **drops it first**
+- Azure keeps a dropped database recoverable through **Deleted databases** on the logical server
+- Most of the runtime is Azure creating the database, not moving data, so a small database takes about as long as a large one
+- See [Azure SQL Database source](/user-guide/sources/azure-sql) for the full caveats
+
 ### Firebird
 
 ```bash

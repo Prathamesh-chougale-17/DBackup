@@ -9,6 +9,7 @@ import { LogLevel, LogType } from "@/lib/core/logs";
 import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { stripTrailingSlashes } from "@/lib/paths";
+import { STATELESS_READ_CONCURRENCY } from "@/lib/adapters/storage/common/read-concurrency";
 
 const log = logger.child({ adapter: "dropbox" });
 
@@ -415,6 +416,8 @@ export const DropboxAdapter: StorageAdapter = {
             return false;
         }
     },
+
+    readConcurrency: STATELESS_READ_CONCURRENCY,
 
     async read(config: DropboxConfig, remotePath: string): Promise<string | null> {
         try {

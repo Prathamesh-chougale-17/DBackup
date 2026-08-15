@@ -200,7 +200,7 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
 
     const isSystemConfig = file?.sourceType === 'SYSTEM';
 
-    const SERVER_ADAPTERS = ['mysql', 'mariadb', 'postgres', 'mongodb', 'mssql', 'redis', 'valkey', 'firebird'];
+    const SERVER_ADAPTERS = ['mysql', 'mariadb', 'postgres', 'mongodb', 'mssql', 'azure-sql', 'redis', 'valkey', 'firebird'];
     const resolvedSourceType = backupSourceType || file?.sourceType || '';
     const isServerAdapter = SERVER_ADAPTERS.includes(resolvedSourceType.toLowerCase());
     // Firebird's target field holds a filesystem path, not a database name - and since

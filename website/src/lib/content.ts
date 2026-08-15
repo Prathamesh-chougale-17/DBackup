@@ -81,6 +81,7 @@ export const DATABASES: AdapterItem[] = [
   { id: "redis", label: "Redis" },
   { id: "valkey", label: "Valkey" },
   { id: "mssql", label: "Microsoft SQL Server" },
+  { id: "azure-sql", label: "Azure SQL Database (Beta)" },
   { id: "firebird", label: "Firebird (Beta)" },
 ];
 
@@ -138,7 +139,7 @@ export const FAQS = [
   {
     question: "Which databases are supported?",
     answer:
-      "MySQL, MariaDB, PostgreSQL, MongoDB, SQLite, Redis, Valkey, Microsoft SQL Server, and Firebird (beta), with more engines added regularly.",
+      "MySQL, MariaDB, PostgreSQL, MongoDB, SQLite, Redis, Valkey, Microsoft SQL Server, Azure SQL Database (beta), and Firebird (beta), with more engines added regularly.",
   },
   {
     question: "Can DBackup back up files and folders, not just databases?",

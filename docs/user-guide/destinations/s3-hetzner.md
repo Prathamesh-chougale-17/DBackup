@@ -15,6 +15,8 @@ Hetzner Object Storage requires a [Credential Profile](/user-guide/security/cred
 | **Bucket** | Bucket name | - | ✅ |
 | **Primary Credential** | `ACCESS_KEY` credential profile (Access Key + Secret Key) | - | ✅ |
 | **Path Prefix** | Folder path within the bucket | - | ✅ |
+| **Parts at once** | Upload parts sent simultaneously ([details](/user-guide/destinations/#upload-performance-s3)) | `8` | ❌ |
+| **Max part size (MB)** | Upper bound on the size of each upload part | `8` | ❌ |
 
 ### Regions
 
@@ -43,7 +45,7 @@ Unlike other S3 adapters, Hetzner Object Storage **requires** a Path Prefix. Set
 ## How It Works
 
 - DBackup connects to `https://<bucket>.<region>.your-objectstorage.com` automatically
-- Uses S3-compatible API - uploads via multipart for large files
+- Uses S3-compatible API, uploading a backup as 8 parallel parts by default ([details](/user-guide/destinations/#upload-performance-s3))
 - All credentials are stored AES-256-GCM encrypted in the database
 
 ## Troubleshooting

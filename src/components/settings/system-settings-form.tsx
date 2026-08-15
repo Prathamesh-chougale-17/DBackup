@@ -3,7 +3,7 @@
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useForm, useWatch } from "react-hook-form"
 import * as z from "zod"
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import {
     Form,
     FormControl,
@@ -71,7 +71,14 @@ interface SystemSettingsFormProps {
 
 export function SystemSettingsForm({ initialMaxConcurrentJobs, initialStuckTimeoutMinutes = 360, initialDisablePasskeyLogin, initialSessionDuration = 604800, initialAuditLogRetentionDays = 90, initialStorageSnapshotRetentionDays = 90, initialNotificationLogRetentionDays = 90, initialCheckForUpdates = true, initialShowQuickSetup = false, initialSystemTimezone = "UTC", initialFilenamePattern = "{name}_yyyy-MM-dd_HH-mm-ss", initialInstanceName = "", emailLoginDisabledByEnv = false }: SystemSettingsFormProps) {
     const [openTimezone, setOpenTimezone] = useState(false);
-    const timezones = Intl.supportedValuesOf('timeZone');
+    // Browsers disagree on which IANA name is canonical, so a zone stored from one browser can be
+    // absent from another's list. Prepend the stored value when it is missing, otherwise it would
+    // be unfindable and show no checkmark even though it is the active setting.
+    const timezones = useMemo(() => {
+        const supported = Intl.supportedValuesOf('timeZone');
+        const current = initialSystemTimezone || "UTC";
+        return supported.includes(current) ? supported : [current, ...supported];
+    }, [initialSystemTimezone]);
     const form = useForm<z.infer<typeof formSchema>>({
         resolver: zodResolver(formSchema) as any,
         defaultValues: {

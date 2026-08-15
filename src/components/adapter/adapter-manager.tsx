@@ -173,6 +173,7 @@ export function AdapterManager({ type, title, description, canManage = true, per
                 case 'postgres':
                 case 'mariadb':
                 case 'mssql':
+                case 'azure-sql':
                 case 'mongodb':
                     return <span className="text-muted-foreground">{config.user}@{config.host}:{config.port}</span>;
                 case 'redis':

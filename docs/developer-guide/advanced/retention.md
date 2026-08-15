@@ -17,8 +17,8 @@ DBackup supports three retention modes:
 The GFS algorithm keeps backups at decreasing frequencies as they age:
 
 ```
-Today ←──── Daily ────→ Weekly ────→ Monthly ────→ Yearly
-      ←─── 7 days ───→ 4 weeks ───→ 12 months ──→ ∞
+Now ←─ Hourly ─→ Daily ────→ Weekly ────→ Monthly ────→ Yearly
+    ←─ 24 hours ─→ 7 days ─→ 4 weeks ───→ 12 months ──→ ∞
 ```
 
 ### Example Configuration
@@ -27,26 +27,64 @@ Today ←──── Daily ────→ Weekly ────→ Monthly ─�
 {
   "mode": "SMART",
   "smart": {
-    "daily": 7,     // Keep last 7 daily backups
-    "weekly": 4,    // Keep last 4 weekly backups
-    "monthly": 6,   // Keep last 6 monthly backups
-    "yearly": 2     // Keep last 2 yearly backups
+    "hourly": 24,   // Keep last 24 hourly backups (optional)
+    "daily": 7,     // Keep 7 further daily backups
+    "weekly": 4,    // Keep 4 further weekly backups
+    "monthly": 6,   // Keep 6 further monthly backups
+    "yearly": 2     // Keep 2 further yearly backups
   }
 }
 ```
 
 ### How Selection Works
 
-1. **Daily**: Most recent backup from each of the last N days
-2. **Weekly**: Most recent backup from each of the last N weeks
-3. **Monthly**: Most recent backup from each of the last N months
-4. **Yearly**: Most recent backup from each of the last N years
+Tiers run finest first over the file list sorted newest to oldest. Each tier keeps the first file it sees in a bucket it has not covered yet, which is the newest backup of that bucket.
 
-A single backup can satisfy multiple buckets. For example, January 1st's backup could be:
-- Today's daily backup
-- This week's weekly backup
-- This month's monthly backup
-- This year's yearly backup
+1. **Hourly**: most recent backup from each of the last N hours
+2. **Daily**: most recent backup from each of the next N days
+3. **Weekly**: most recent backup from each of the next N weeks
+4. **Monthly**: most recent backup from each of the next N months
+5. **Yearly**: most recent backup from each of the next N years
+
+**The tiers are additive, not overlapping.** `applyTier` seeds its bucket set from everything earlier tiers already kept and counts only its own additions against its limit. `daily: 7` therefore means seven days beyond what the hourly tier covers, and the total kept is the sum of the tiers. restic and borg evaluate the same numbers as a union, so an identical config keeps fewer backups there.
+
+Bucket keys are built with `formatInTimeZone` against the `system.timezone` setting, so a day boundary is local midnight. The hourly key is `yyyy-MM-dd-HH`, which collapses the repeated hour of a daylight saving change into one bucket once a year.
+
+### Which time a file is bucketed by
+
+`effectiveBackupTime()` in `src/lib/core/backup-files.ts` is the single rule, used by both the sort and the bucket key:
+
+```typescript
+file.backupTimestamp ?? file.lastModified
+```
+
+`lastModified` is whatever the adapter's `list()` reports, so an S3 `LastModified`, an SFTP `modifyTime`, a local `stats.mtime`. It is not a reliable statement about when the backup was taken. Copying a destination without preserving timestamps, moving it between servers or restoring the backup directory itself resets every mtime to now, at which point the whole history lands in one bucket and a single representative survives the next pass.
+
+`backupTimestamp` comes from `timestamp` in the backup's `.meta.json`, written at upload in `03-upload.ts`, and survives all of that. It is left unset when the sidecar is missing, unreadable or carries an unparsable date, so the mtime stays the fallback rather than the rule. The filename is never parsed, even though the naming template puts a date in it.
+
+`05-retention.ts` reports how many backups supplied their own time and warns by name for each one whose two times differ by more than `TIMESTAMP_DRIFT_WARNING_MS`.
+
+### Reading the sidecars
+
+`loadBackupSidecars()` in `src/lib/runner/steps/retention-sidecars.ts` annotates the listed files with `locked`, `chainId` and `backupTimestamp`. It runs once per destination at the end of every successful job, over every backup present, so its round trip count is the dominant cost of the whole step.
+
+Two things keep that bounded:
+
+- **Sidecars absent from the listing are never requested.** `list()` returns sidecars, they are only filtered out afterwards, so their presence can be answered from the listing for free. The optimisation disables itself when a listing contains no sidecars at all, otherwise an adapter that filters them would silently lose lock and chain detection.
+- **Reads run in batches of `adapter.readConcurrency`.** Unset means serial, which is what every adapter did before the field existed. Only adapters whose `read()` is a stateless HTTP request or a local file access declare `STATELESS_READ_CONCURRENCY`, currently S3, WebDAV, Dropbox, Google Drive, OneDrive and Local.
+
+FTP, SMB, SFTP and rsync deliberately declare nothing. FTP dials a control connection per `read()` and its own upload path runs at `limit: concurrency ?? 1` for exactly that reason, SMB spawns an `smbclient` process per call, and the two SSH-based adapters already gate themselves at four channels. On those the server's connection count is what breaks first, not the bandwidth.
+
+### Tier limits and backwards compatibility
+
+`hourly` is optional on `SmartRetentionPolicy` because every policy written before the tier existed has no value for it. Two places turn that into a disabled tier:
+
+- `applySmartPolicy` destructures with `const { hourly = 0, ... }`
+- `applyTier` guards with `if (!limit || limit <= 0) return;`
+
+The guard cannot be written as `limit <= 0` alone. `undefined <= 0` evaluates to `false` in JavaScript, so the tier would run with `keptInTier >= undefined` never true, keep one backup per bucket for the whole history, and silently stop deleting anything.
+
+`calculateRetention` also returns the full keep list when a mode carries no usable settings. Without that branch nothing marks a file as kept and every unlocked backup on the destination ends up in the delete list.
 
 ## Data Model
 
@@ -71,6 +109,7 @@ export interface RetentionConfiguration {
     keepCount: number;
   };
   smart?: {
+    hourly?: number;   // optional, absent counts as 0
     daily: number;
     weekly: number;
     monthly: number;
@@ -78,6 +117,8 @@ export interface RetentionConfiguration {
   };
 }
 ```
+
+`RetentionConfigurationSchema` in the same file validates a config before `retention-policy-service.ts` stores it. Tier limits are coerced to non negative integers, so a value written through the API cannot reach the bucketing logic malformed.
 
 ## RetentionService Implementation
 

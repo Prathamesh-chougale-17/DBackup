@@ -82,6 +82,30 @@ export const MSSQLSchema = z.object({
     options: z.string().optional().describe("Additional backup options"),
 });
 
+/**
+ * Azure SQL Database.
+ *
+ * Deliberately narrower than MSSQLSchema, and every omission is load bearing:
+ *
+ * - No `...sshFields`. The service is a public PaaS endpoint, and the one case an
+ *   SSH tunnel would address, a private endpoint, is not solved by running
+ *   SqlPackage on a jump host that does not have it installed. Leaving
+ *   `connectionMode` out is also what keeps the form on its plain two-tab layout.
+ * - No `encrypt` or `trustServerCertificate`. Azure presents a real certificate on
+ *   every connection, so both are pinned in `pool.ts` rather than offered. Trusting
+ *   an unverified certificate against *.database.windows.net is always either a
+ *   mistake or an interception.
+ * - No `backupPath` or `fileTransferMode`. Nothing is ever written server side.
+ */
+export const AzureSQLSchema = z.object({
+    host: z.string().min(1, "Server name is required").describe("Logical server, e.g. myserver.database.windows.net"),
+    port: z.coerce.number().default(1433),
+    user: z.string().min(1, "User is required"),
+    password: z.string().optional(),
+    database: z.union([z.string(), z.array(z.string())]).default(""),
+    requestTimeout: z.coerce.number().default(300000).describe("Timeout in ms for catalog queries. The export itself is never timed out."),
+});
+
 export const FirebirdSchema = z.object({
     host: z.string().default("localhost"),
     port: z.coerce.number().default(3050),
@@ -120,10 +144,11 @@ export type PostgresConfig = z.infer<typeof PostgresSchema>;
 export type MongoDBConfig = z.infer<typeof MongoDBSchema>;
 export type SQLiteConfig = z.infer<typeof SQLiteSchema>;
 export type MSSQLConfig = z.infer<typeof MSSQLSchema>;
+export type AzureSQLConfig = z.infer<typeof AzureSQLSchema>;
 export type RedisConfig = z.infer<typeof RedisSchema>;
 export type FirebirdConfig = z.infer<typeof FirebirdSchema>;
 
-export type DatabaseConfig = MySQLConfig | MariaDBConfig | PostgresConfig | MongoDBConfig | SQLiteConfig | MSSQLConfig | RedisConfig | FirebirdConfig;
+export type DatabaseConfig = MySQLConfig | MariaDBConfig | PostgresConfig | MongoDBConfig | SQLiteConfig | MSSQLConfig | AzureSQLConfig | RedisConfig | FirebirdConfig;
 
 // Generic type alias for dialect base class (accepts any database config)
 export type AnyDatabaseConfig = DatabaseConfig;

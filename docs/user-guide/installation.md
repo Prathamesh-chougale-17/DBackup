@@ -34,6 +34,7 @@ services:
     volumes:
       - ./data:/data              # All persistent data (db, storage, certs)
       - ./backups:/backups        # Optional: used for local backups
+      # - ./tmp:/tmp              # Recommended: staging space for running backups, keeps them off the Docker disk
 ```
 
 ```bash [Docker Run]
@@ -46,6 +47,7 @@ docker run -d \
   -e BETTER_AUTH_URL="https://localhost:3000" \
   -v "$(pwd)/data:/data" \
   -v "$(pwd)/backups:/backups" \
+  -v "$(pwd)/tmp:/tmp" \
   skyfay/dbackup:latest
 ```
 
@@ -90,7 +92,7 @@ Access the application at [https://localhost:3000](https://localhost:3000) (acce
 | `DATABASE_URL` | ❌ | SQLite path. Default: `file:/data/db/dbackup.db` |
 | `SQLITE_WAL_MODE` | ❌ | Set to `false` to disable WAL mode. Default: `true` |
 | `TZ` | ❌ | Server timezone for logs. Default: `UTC` |
-| `TMPDIR` | ❌ | Temp directory for large backups. Default: `/tmp` |
+| `TMPDIR` | ❌ | Temp directory for large backups, see [Volume Mounts](#volume-mounts). Default: `/tmp` |
 | `LOG_LEVEL` | ❌ | Logging verbosity: `debug`, `info`, `warn`, `error`. Default: `info` |
 | `DISABLE_HTTPS` | ❌ | Set to `true` to use plain HTTP. Default: `false` (HTTPS). **Set this when running behind a reverse proxy** - see [Reverse Proxy Setup](#reverse-proxy-setup) |
 | `PUID` | ❌ | User ID the container runs as. Default: `1001` |
@@ -198,6 +200,13 @@ secrets:
 | :--- | :---: | :--- |
 | `/data` | ✅ | All persistent data (database, uploads, certificates) |
 | `/backups` | ❌ | Optional: used for local backups |
+| `/tmp` | ❌ | Recommended: staging space while a backup is being built |
+
+::: warning Give `/tmp` its own mount
+Every backup is written to a temporary directory first and only uploaded to the destination afterwards. For file backups that needs roughly twice the size of the source, since the tree is staged to disk and the archive is written next to it before either is cleaned up.
+
+Without a mount, all of that lands inside the container's writable layer on the Docker disk, which is usually far smaller than the data being backed up. Mount `/tmp` to a location with enough free space, or point `TMPDIR` at another mounted path.
+:::
 
 ::: info SQLite WAL mode
 DBackup runs its internal SQLite database in [WAL (Write-Ahead Logging)](https://www.sqlite.org/wal.html) mode by default for better read/write concurrency. This creates two extra files next to the database, `dbackup.db-wal` and `dbackup.db-shm`, inside `/data/db`. They are normal and required while the app is running - do not delete them manually. Back up or copy the whole `db` folder together (not just the `.db` file) to avoid losing uncommitted writes. Set `SQLITE_WAL_MODE=false` to disable WAL mode if your storage backend doesn't support it (e.g. some network shares/NFS mounts).

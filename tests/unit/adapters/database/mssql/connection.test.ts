@@ -19,6 +19,7 @@ import {
     test as testConnection,
     getDatabases,
     getDatabasesWithStats,
+    assertBackupSupported,
 } from "@/lib/adapters/database/mssql/connection";
 import { mssqlTransport } from "@/lib/adapters/database/mssql/transport";
 import type { HostKind } from "@/lib/transport/types";
@@ -125,6 +126,31 @@ describe.each<HostKind>(["direct", "ssh"])("MSSQL connection over a %s host", (k
         });
 
         it.each([
+            [5, "Azure SQL Database"],
+            [8, "Azure SQL Managed Instance"],
+        ])("refuses EngineEdition %i and names the product", async (engineEdition, product) => {
+            // Azure answers SERVERPROPERTY('Edition') with "SQL Azure", which the
+            // old name parsing reduced to the meaningless "SQL". EngineEdition is
+            // the only reliable signal, and it has to be read before the name.
+            mockQuery.mockResolvedValue({
+                recordset: [{
+                    Version: "Microsoft SQL Azure (RTM) - 12.0.2000.8",
+                    ProductVersion: "12.0.2000.8",
+                    Edition: "SQL Azure",
+                    EngineEdition: engineEdition,
+                }],
+            });
+
+            const result = await testConnection(baseConfig as never, mssqlHost(kind));
+
+            expect(result.success).toBe(false);
+            expect(result.message).toContain(product);
+            expect(result.edition).toBe(product);
+            // Still reported, so the run log and version history stay accurate.
+            expect(result.version).toBe("12.0.2000");
+        });
+
+        it.each([
             ["ECONNREFUSED 1.2.3.4:1433", "Connection refused"],
             ["Login failed for user 'sa'", "Login failed"],
             ["self signed certificate in chain", "Certificate error"],
@@ -172,6 +198,50 @@ describe.each<HostKind>(["direct", "ssh"])("MSSQL connection over a %s host", (k
 
             expect(await getDatabasesWithStats(baseConfig as never, mssqlHost(kind)))
                 .toEqual([{ name: "shop", sizeInBytes: 0, tableCount: 0 }]);
+        });
+
+        it("still lists databases when sys.master_files does not exist", async () => {
+            // Azure SQL Database has no server-scoped catalog view. Letting that
+            // escape took out the whole Database Explorer with a "Connection
+            // Failed" card, even though the names were perfectly readable.
+            mockQuery
+                .mockRejectedValueOnce(new Error("Invalid object name 'sys.master_files'."))
+                .mockResolvedValueOnce({ recordset: [{ name: "shop", state_desc: "ONLINE" }] })
+                .mockResolvedValueOnce({ recordset: [{ cnt: 3 }] });
+
+            const databases = await getDatabasesWithStats(baseConfig as never, mssqlHost(kind));
+
+            expect(databases).toHaveLength(1);
+            expect(databases[0].name).toBe("shop");
+            expect(databases[0].tableCount).toBe(3);
+            // Undefined, not 0. The explorer drops the column entirely rather
+            // than showing a table full of confident zeroes.
+            expect(databases[0].sizeInBytes).toBeUndefined();
+        });
+    });
+
+    describe("assertBackupSupported()", () => {
+        it("lets a real SQL Server through", async () => {
+            mockQuery.mockResolvedValue({ recordset: [{ EngineEdition: 3 }] });
+
+            await expect(assertBackupSupported(baseConfig as never, mssqlHost(kind)))
+                .resolves.toBeUndefined();
+        });
+
+        it("rejects Azure SQL Database and says why it can never work", async () => {
+            mockQuery.mockResolvedValue({ recordset: [{ EngineEdition: 5 }] });
+
+            await expect(assertBackupSupported(baseConfig as never, mssqlHost(kind)))
+                .rejects.toThrow(/no BACKUP DATABASE statement/);
+        });
+
+        it("stays out of the way when the edition cannot be determined", async () => {
+            // Refusing on an unanswerable probe would break setups this adapter
+            // has always handled. Let the operation fail on its own terms.
+            mockPool.connect.mockRejectedValue(new Error("timeout"));
+
+            await expect(assertBackupSupported(baseConfig as never, mssqlHost(kind)))
+                .resolves.toBeUndefined();
         });
     });
 });

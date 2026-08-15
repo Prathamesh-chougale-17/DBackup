@@ -76,6 +76,46 @@ Backups are organized by job name with sidecar metadata files:
 
 The `.meta.json` file stores compression, encryption metadata (IV, auth tag, profile ID), database version, and timestamp.
 
+## Upload Performance (S3)
+
+A backup is one large file, so the only way to use more of a fast link is to send several pieces of it at the same time. Every S3 destination (Amazon S3, Cloudflare R2, Hetzner Object Storage, S3-Compatible) splits an upload into parts and sends **8 parts of 8 MB** at once by default.
+
+Both values are adjustable per destination under **Configuration → Parallel Upload Parts**:
+
+| Field | Description | Default | Range |
+| :--- | :--- | :--- | :--- |
+| **Parts at once** | Parts uploaded simultaneously | `8` | 1 to 32 |
+| **Max part size (MB)** | Upper bound on the size of each part | `8` | 5 to 64 |
+
+### Parts at once is the speed setting
+
+Each part travels over its own connection, and a single connection to an object store is usually capped somewhere between 5 and 10 MB/s no matter how much bandwidth is available. Total throughput is therefore roughly `parts at once x per-connection speed`, so raising this is what makes an upload faster.
+
+Raise it when the upload speed in the run log is well below what the server's link can do. Lower it if the provider starts answering with `SlowDown` or `503`.
+
+::: tip Measured example
+Uploading a 1.39 GB backup to Cloudflare R2 over a 10 Gbit link, where each connection managed about 5.9 MB/s:
+
+| Parts at once | Throughput |
+| :--- | :--- |
+| 4 | 26 MB/s |
+| 32 | 187 MB/s |
+:::
+
+### Max part size is a memory setting
+
+Parts in flight are held in memory, so an upload uses roughly `(parts + 1) x part size` while it runs. The form shows the figure as you change the values. The default works out to about 72 MB, the maximum to about 2 GB.
+
+You are setting an upper bound, not a fixed size. **DBackup picks the largest part size at or below your value that still gives every connection something to upload.** The right size depends on how large a backup turns out to be, and that differs from run to run, so it is not something a static setting can track.
+
+Why it matters: with 32 parts at once, a 1.39 GB backup split into 64 MB parts is only 21 parts. Eleven connections would get nothing, and the upload would take as long as its single slowest part. The automatic adjustment prevents that, and the run log reports the size actually used.
+
+::: warning Concurrent jobs
+If **Max Concurrent Jobs** is above 1, several uploads can run at once and each one uses its own memory budget. Destinations within a single job upload one after another, so those do not add up.
+:::
+
+DBackup also raises the part size above your maximum in one case: when an archive is so large that your value would need more than S3's limit of 10,000 parts. The alternative there is an upload the service rejects.
+
 ## Retention Policies
 
 Destinations work with retention policies to automatically clean up old backups:

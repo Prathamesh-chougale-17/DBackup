@@ -25,6 +25,10 @@ the DBackup host. Two consequences follow, and both scale with the size of the s
 - **Every byte crosses the network twice** - source → DBackup → destination - because nothing runs
   on the source machine.
 
+::: warning Running in Docker
+That temporary space is the container's writable layer unless it is mounted. A job large enough can fill the Docker disk before the archive is finished. Mount `/tmp` to a volume with room to spare, or set `TMPDIR` to another mounted path, before backing up a large directory. See [Volume Mounts](/user-guide/installation#volume-mounts).
+:::
+
 Incremental mode softens the first run's cost on later runs (unchanged files are not fetched at
 all and are carried into the new archive by reference), but the first full run pays it in full,
 and so does every scheduled full backup after it.

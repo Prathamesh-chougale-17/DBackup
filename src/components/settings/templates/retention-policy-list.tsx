@@ -110,7 +110,16 @@ export function RetentionPolicyList() {
         return `Simple - keep ${parsed.simple?.keepCount ?? "?"} backups`;
       if (parsed.mode === "SMART") {
         const s = parsed.smart;
-        return `Smart GFS (${s?.daily ?? 0}/${s?.weekly ?? 0}/${s?.monthly ?? 0}/${s?.yearly ?? 0})`;
+        // Suffixed because a bare "24/7/4/12/2" cannot be told apart from "7/4/12/2"
+        // once an hourly tier can be present. Hourly only shows when it is in use.
+        const tiers = [
+          ...(s?.hourly ? [`${s.hourly}h`] : []),
+          `${s?.daily ?? 0}d`,
+          `${s?.weekly ?? 0}w`,
+          `${s?.monthly ?? 0}m`,
+          `${s?.yearly ?? 0}y`,
+        ];
+        return `Smart GFS (${tiers.join("/")})`;
       }
     } catch {
       // ignore

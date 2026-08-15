@@ -124,6 +124,7 @@ const ADAPTER_RULES: Rule[] = [
         pattern: /new\s+sql\.ConnectionPool/,
         allowed: {
             "database/mssql/pool.ts": "withPool() is the single wiring point that applies the SSH tunnel.",
+            "database/azure-sql/pool.ts": "Its own withPool(), forked rather than shared so a change to the MSSQL tunnelling cannot silently alter it, and so encryption stays pinned on.",
         },
         reason: "Bypassing withPool() skips the tunnel and silently connects to the wrong machine.",
     },
@@ -316,6 +317,13 @@ describe("transport lint guards", () => {
         expect(violations, formatViolationReport(violations, rule)).toEqual([]);
     });
 
+    // Timeout raised well above the default, because this is the one test here that
+    // imports the entire adapter registry - aws-sdk, googleapis, dropbox, ssh2, mssql
+    // and everything else behind it. On its own that takes under two seconds, but in
+    // the full suite it competes with 300-odd other files for CPU and occasionally
+    // crossed the 5 s default. The test asserts a structural property and has no
+    // business failing on machine load, and a limit that drifts closer to the edge
+    // with every adapter added is a trap for whoever adds the next one.
     it("wires a transport for every SSH-capable adapter", async () => {
         // Structural, not textual: an adapter that offers an SSH credential
         // slot but resolves to a direct host would accept SSH settings in the
@@ -344,7 +352,7 @@ describe("transport lint guards", () => {
             `These adapters accept an SSH credential but resolve no transport:\n  ${unwired.join("\n  ")}\n` +
                 "Add a `transport` resolver or a `connectionMode` field to the config schema.",
         ).toEqual([]);
-    });
+    }, 30_000);
 
     it("passes a host to every adapter call in the integration tests", () => {
         // `test` and `ping` keep an optional host on BaseAdapter, because

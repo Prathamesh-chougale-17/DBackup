@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { RetentionService } from '@/services/backup/retention-service';
 import { FileInfo } from '@/lib/core/interfaces';
 import { RetentionConfiguration } from '@/lib/core/retention';
-import { subDays, subWeeks, subMonths, subYears } from 'date-fns';
+import { subDays, subWeeks, subMonths, subYears, subHours } from 'date-fns';
 
 // Helper to generate mock files
 const createMockFiles = (dates: Date[]): FileInfo[] => {
@@ -648,6 +648,323 @@ describe('RetentionService', () => {
             expect(result.keep).toHaveLength(1);
             expect(result.delete).toHaveLength(0);
         });
+    });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hourly tier
+//
+// Fixed reference: Monday 2026-06-08 12:00 UTC. All buckets are evaluated in UTC
+// so an hour bucket is unambiguous.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('RetentionService - hourly tier', () => {
+    const REF = new Date('2026-06-08T12:00:00Z');
+
+    it('hourly=24: keeps the newest 24 unique hours out of 30 hourly backups', () => {
+        const files = createMockFiles(
+            Array.from({ length: 30 }, (_, i) => subHours(REF, i))
+        );
+        const policy: RetentionConfiguration = {
+            mode: 'SMART',
+            smart: { hourly: 24, daily: 0, weekly: 0, monthly: 0, yearly: 0 }
+        };
+
+        const result = RetentionService.calculateRetention(files, policy, 'UTC');
+
+        expect(result.keep).toHaveLength(24);
+        expect(result.delete).toHaveLength(6);
+
+        const keptTimes = result.keep.map(f => f.lastModified.getTime());
+        for (let i = 0; i < 24; i++) {
+            expect(keptTimes).toContain(subHours(REF, i).getTime());
+        }
+        // Hours 24 through 29 fall outside the tier.
+        const deletedTimes = result.delete.map(f => f.lastModified.getTime());
+        for (let i = 24; i < 30; i++) {
+            expect(deletedTimes).toContain(subHours(REF, i).getTime());
+        }
+    });
+
+    it('keeps only the newest backup of an hour that holds several', () => {
+        const files = createMockFiles([
+            new Date('2026-06-08T10:45:00Z'), // hour 10, newest
+            new Date('2026-06-08T10:20:00Z'), // hour 10
+            new Date('2026-06-08T10:05:00Z'), // hour 10
+            new Date('2026-06-08T09:30:00Z'), // hour 09
+        ]);
+        const policy: RetentionConfiguration = {
+            mode: 'SMART',
+            smart: { hourly: 2, daily: 0, weekly: 0, monthly: 0, yearly: 0 }
+        };
+
+        const result = RetentionService.calculateRetention(files, policy, 'UTC');
+
+        expect(result.keep.map(f => f.lastModified.toISOString()).sort()).toEqual([
+            '2026-06-08T09:30:00.000Z',
+            '2026-06-08T10:45:00.000Z',
+        ]);
+        expect(result.delete).toHaveLength(2);
+    });
+
+    it('daily adds days on top of what hourly covers rather than overlapping it', () => {
+        // hourly=3 takes the three newest hours, all on Jun 8. daily=2 then adds Jun 7
+        // and Jun 6, because Jun 8 is already covered. Jun 5 falls out.
+        const files = createMockFiles([
+            new Date('2026-06-08T12:00:00Z'),
+            new Date('2026-06-08T11:00:00Z'),
+            new Date('2026-06-08T10:00:00Z'),
+            new Date('2026-06-07T12:00:00Z'),
+            new Date('2026-06-06T12:00:00Z'),
+            new Date('2026-06-05T12:00:00Z'),
+        ]);
+        const policy: RetentionConfiguration = {
+            mode: 'SMART',
+            smart: { hourly: 3, daily: 2, weekly: 0, monthly: 0, yearly: 0 }
+        };
+
+        const result = RetentionService.calculateRetention(files, policy, 'UTC');
+
+        expect(result.keep).toHaveLength(5);
+        expect(result.delete.map(f => f.lastModified.toISOString())).toEqual([
+            '2026-06-05T12:00:00.000Z',
+        ]);
+    });
+
+    it('a policy stored before the tier existed deletes exactly as it did before', () => {
+        // The regression that matters. `undefined <= 0` is false in JavaScript, so a bare
+        // comparison would let the hourly tier run with no limit and keep one backup per
+        // hour forever, silently turning off deletion for every policy already in the wild.
+        const files = createMockFiles([
+            new Date('2026-06-08T12:00:00Z'),
+            new Date('2026-06-08T11:00:00Z'),
+            new Date('2026-06-07T12:00:00Z'),
+            new Date('2026-06-07T11:00:00Z'),
+            new Date('2026-06-06T12:00:00Z'),
+            new Date('2026-06-06T11:00:00Z'),
+        ]);
+        const policy: RetentionConfiguration = {
+            mode: 'SMART',
+            smart: { daily: 2, weekly: 0, monthly: 0, yearly: 0 }
+        };
+
+        const result = RetentionService.calculateRetention(files, policy, 'UTC');
+
+        expect(result.keep.map(f => f.lastModified.toISOString()).sort()).toEqual([
+            '2026-06-07T12:00:00.000Z',
+            '2026-06-08T12:00:00.000Z',
+        ]);
+        expect(result.delete).toHaveLength(4);
+    });
+
+    it('hourly=0 behaves identically to a policy without the field', () => {
+        const dates = [
+            new Date('2026-06-08T12:00:00Z'),
+            new Date('2026-06-08T11:00:00Z'),
+            new Date('2026-06-07T12:00:00Z'),
+            new Date('2026-06-06T12:00:00Z'),
+        ];
+
+        const withZero = RetentionService.calculateRetention(
+            createMockFiles(dates),
+            { mode: 'SMART', smart: { hourly: 0, daily: 2, weekly: 0, monthly: 0, yearly: 0 } },
+            'UTC'
+        );
+        const withoutField = RetentionService.calculateRetention(
+            createMockFiles(dates),
+            { mode: 'SMART', smart: { daily: 2, weekly: 0, monthly: 0, yearly: 0 } },
+            'UTC'
+        );
+
+        expect(withZero.keep.map(f => f.name).sort()).toEqual(withoutField.keep.map(f => f.name).sort());
+        expect(withZero.delete.map(f => f.name).sort()).toEqual(withoutField.delete.map(f => f.name).sort());
+    });
+
+    it('locked backups survive the hourly tier without consuming a slot', () => {
+        const files = createMockFiles([
+            new Date('2026-06-08T12:00:00Z'),
+            new Date('2026-06-08T11:00:00Z'),
+            new Date('2026-06-08T10:00:00Z'),
+            new Date('2026-06-08T09:00:00Z'),
+        ]);
+        files[3].locked = true; // the oldest, well past the tier
+
+        const policy: RetentionConfiguration = {
+            mode: 'SMART',
+            smart: { hourly: 2, daily: 0, weekly: 0, monthly: 0, yearly: 0 }
+        };
+
+        const result = RetentionService.calculateRetention(files, policy, 'UTC');
+
+        // 2 hourly slots plus the locked file, which is not counted against them.
+        expect(result.keep.map(f => f.lastModified.toISOString()).sort()).toEqual([
+            '2026-06-08T09:00:00.000Z',
+            '2026-06-08T11:00:00.000Z',
+            '2026-06-08T12:00:00.000Z',
+        ]);
+        expect(result.delete.map(f => f.lastModified.toISOString())).toEqual([
+            '2026-06-08T10:00:00.000Z',
+        ]);
+    });
+
+    it('holds a whole incremental chain back when an hourly slot keeps one of its snapshots', () => {
+        const files = createMockFiles([
+            new Date('2026-06-08T12:00:00Z'),
+            new Date('2026-06-08T11:00:00Z'),
+            new Date('2026-06-08T10:00:00Z'),
+        ]);
+        files[1].chainId = 'chain-a';
+        files[2].chainId = 'chain-a';
+
+        const policy: RetentionConfiguration = {
+            mode: 'SMART',
+            smart: { hourly: 2, daily: 0, weekly: 0, monthly: 0, yearly: 0 }
+        };
+
+        const result = RetentionService.calculateRetention(files, policy, 'UTC');
+
+        expect(result.delete).toHaveLength(0);
+        expect(result.keptForChain.map(f => f.lastModified.toISOString())).toEqual([
+            '2026-06-08T10:00:00.000Z',
+        ]);
+    });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Time source
+//
+// Retention buckets by the time DBackup recorded when it wrote the backup, and only
+// falls back to the destination's modification time when there is none.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('RetentionService - time source', () => {
+    const withTimes = (entries: { name: string; mtime: string; recorded?: string }[]): FileInfo[] =>
+        entries.map((e) => ({
+            name: e.name,
+            path: `/job/${e.name}`,
+            size: 1024,
+            lastModified: new Date(e.mtime),
+            ...(e.recorded ? { backupTimestamp: new Date(e.recorded) } : {}),
+        }));
+
+    it('buckets by the recorded time, not by the modification time', () => {
+        // Both files carry today's mtime, but were written on different days. Daily=2 has
+        // to see two days, which is only true if it reads the recorded time.
+        const files = withTimes([
+            { name: 'a.sql', mtime: '2026-06-08T12:00:00Z', recorded: '2026-06-08T12:00:00Z' },
+            { name: 'b.sql', mtime: '2026-06-08T12:00:00Z', recorded: '2026-06-07T12:00:00Z' },
+        ]);
+
+        const result = RetentionService.calculateRetention(
+            files,
+            { mode: 'SMART', smart: { daily: 2, weekly: 0, monthly: 0, yearly: 0 } },
+            'UTC'
+        );
+
+        expect(result.keep).toHaveLength(2);
+        expect(result.delete).toHaveLength(0);
+    });
+
+    it('sorts by the recorded time, so the newest of a bucket is the one written last', () => {
+        // The mtimes claim b.sql is newer. The recorded times say otherwise, and the
+        // representative of the shared day has to be a.sql.
+        const files = withTimes([
+            { name: 'a.sql', mtime: '2026-06-08T08:00:00Z', recorded: '2026-06-08T18:00:00Z' },
+            { name: 'b.sql', mtime: '2026-06-08T20:00:00Z', recorded: '2026-06-08T09:00:00Z' },
+        ]);
+
+        const result = RetentionService.calculateRetention(
+            files,
+            { mode: 'SMART', smart: { daily: 1, weekly: 0, monthly: 0, yearly: 0 } },
+            'UTC'
+        );
+
+        expect(result.keep.map((f) => f.name)).toEqual(['a.sql']);
+        expect(result.delete.map((f) => f.name)).toEqual(['b.sql']);
+    });
+
+    it('falls back to the modification time for a backup without a recorded one', () => {
+        const files = withTimes([
+            { name: 'new.sql', mtime: '2026-06-08T12:00:00Z' },
+            { name: 'old.sql', mtime: '2026-06-01T12:00:00Z' },
+        ]);
+
+        const result = RetentionService.calculateRetention(
+            files,
+            { mode: 'SMART', smart: { daily: 1, weekly: 0, monthly: 0, yearly: 0 } },
+            'UTC'
+        );
+
+        expect(result.keep.map((f) => f.name)).toEqual(['new.sql']);
+        expect(result.delete.map((f) => f.name)).toEqual(['old.sql']);
+    });
+
+    it('sorts files with and without a recorded time into one order', () => {
+        const files = withTimes([
+            { name: 'mtime-only.sql', mtime: '2026-06-07T12:00:00Z' },
+            { name: 'recorded.sql', mtime: '2026-01-01T00:00:00Z', recorded: '2026-06-08T12:00:00Z' },
+            { name: 'older.sql', mtime: '2026-06-06T12:00:00Z' },
+        ]);
+
+        const result = RetentionService.calculateRetention(
+            files,
+            { mode: 'SIMPLE', simple: { keepCount: 2 } },
+            'UTC'
+        );
+
+        expect(result.keep.map((f) => f.name).sort()).toEqual(['mtime-only.sql', 'recorded.sql']);
+        expect(result.delete.map((f) => f.name)).toEqual(['older.sql']);
+    });
+
+    it('survives a destination whose modification times were all reset', () => {
+        // The regression this exists for. A copy without -p, a migration, or a restore of
+        // the backup directory stamps every file with the same mtime. Judged by mtime the
+        // whole history collapses into one bucket and a single representative survives.
+        const reset = '2026-06-08T12:00:00Z';
+        const files = withTimes([
+            { name: 'd0.sql', mtime: reset, recorded: '2026-06-08T02:00:00Z' },
+            { name: 'd1.sql', mtime: reset, recorded: '2026-06-07T02:00:00Z' },
+            { name: 'd2.sql', mtime: reset, recorded: '2026-06-06T02:00:00Z' },
+            { name: 'd3.sql', mtime: reset, recorded: '2026-06-05T02:00:00Z' },
+        ]);
+
+        const result = RetentionService.calculateRetention(
+            files,
+            { mode: 'SMART', smart: { daily: 3, weekly: 0, monthly: 0, yearly: 0 } },
+            'UTC'
+        );
+
+        expect(result.keep.map((f) => f.name).sort()).toEqual(['d0.sql', 'd1.sql', 'd2.sql']);
+        expect(result.delete.map((f) => f.name)).toEqual(['d3.sql']);
+    });
+});
+
+describe('RetentionService - unreadable policy', () => {
+    const files = createMockFiles([
+        new Date('2026-06-08T12:00:00Z'),
+        new Date('2026-06-07T12:00:00Z'),
+        new Date('2026-06-06T12:00:00Z'),
+    ]);
+
+    // Nothing marks a file as kept when the mode carries no usable settings, and falling
+    // through to the delete list would wipe the destination. Keeping is the safe default.
+    it('keeps everything when SMART carries no smart settings', () => {
+        const result = RetentionService.calculateRetention(files, { mode: 'SMART' });
+
+        expect(result.keep).toHaveLength(3);
+        expect(result.delete).toHaveLength(0);
+    });
+
+    it('keeps everything when SIMPLE carries no simple settings', () => {
+        const result = RetentionService.calculateRetention(files, { mode: 'SIMPLE' });
+
+        expect(result.keep).toHaveLength(3);
+        expect(result.delete).toHaveLength(0);
+    });
+
+    it('keeps everything for a mode it does not recognise', () => {
+        const result = RetentionService.calculateRetention(files, { mode: 'KEEP_LAST' } as unknown as RetentionConfiguration);
+
+        expect(result.keep).toHaveLength(3);
+        expect(result.delete).toHaveLength(0);
     });
 });
 

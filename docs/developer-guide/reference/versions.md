@@ -12,6 +12,7 @@ This document lists the database engines and versions supported by DBackup.
 | **MongoDB** | 4.x, 5.x, 6.x, 7.x, 8.x | `mongodump` | Standard operations |
 | **SQLite** | 3.x | `sqlite3` | File-based |
 | **Microsoft SQL Server** | 2017, 2019, 2022 | `mssql` npm | T-SQL commands |
+| **Azure SQL Database** | Single database, elastic pool | `sqlpackage` | Beta, BACPAC export |
 | **Firebird** | 3.x, 4.x, 5.x | `gbak` | Beta, alias-based database list |
 
 ## Docker Container Tools
@@ -174,6 +175,39 @@ WITH COMPRESSION, INIT;
 - Shared volume between SQL Server and DBackup
 - `sa` credentials or appropriate backup permissions
 - Network access to SQL Server port (1433)
+
+## Azure SQL Database
+
+### Supported Versions
+
+Azure SQL Database is versionless. It reports `12.0.2000` regardless of the engine actually running, so the adapter ignores the version entirely rather than deriving behaviour from it.
+
+Identified by `SERVERPROPERTY('EngineEdition')`, which is the only reliable signal:
+
+| EngineEdition | Product | Handled by |
+| :--- | :--- | :--- |
+| 5 | Azure SQL Database | This adapter |
+| 8 | Azure SQL Managed Instance | Unsupported, rejected with a message |
+| 6, 11 | Azure Synapse Analytics | Unsupported, rejected with a message |
+| 9 | Azure SQL Edge | The MSSQL adapter |
+| 1-4 | SQL Server | The MSSQL adapter |
+
+::: info Beta
+The Azure SQL Database adapter is marked as Beta in the source type picker.
+:::
+
+### Implementation
+
+Uses `sqlpackage` for a BACPAC export and import. Azure SQL Database has no `BACKUP DATABASE` statement, no server-scoped catalog views such as `sys.master_files`, and rejects three-part names, so every per-database catalog read opens its own connection.
+
+The export mechanism sits behind a `BacpacExporter` interface in `exporter/types.ts`. The Azure Import/Export REST API would fit the same seam and needs no binary, which mattered while it was unclear whether SqlPackage runs on arm64. It does, so only the SqlPackage implementation exists.
+
+```bash
+sqlpackage /Action:Export /TargetFile:db.bacpac /SourceConnectionString:"..."
+sqlpackage /Action:Import /SourceFile:db.bacpac /TargetConnectionString:"..."
+```
+
+There is no SSH mode. The service is a public endpoint, and SqlPackage runs in the DBackup container rather than on any host in between, so a tunnel would solve nothing.
 
 ## Firebird
 
