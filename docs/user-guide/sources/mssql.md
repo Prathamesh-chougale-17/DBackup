@@ -192,6 +192,96 @@ If SQL Server is installed **directly on the host** (bare-metal/VM), you can use
 | **Private Key** | PEM-format private key (optionally with passphrase) |
 | **Agent** | Uses the system SSH agent (`SSH_AUTH_SOCK`) |
 
+## SQL Server on Windows
+
+**Backup Path (Server)** is handed to SQL Server exactly as written, so on a Windows server it has to be a Windows path. Both forms are accepted:
+
+| Form | Example |
+| :--- | :--- |
+| Local drive | `D:/SQLBackup` |
+| UNC share | `\\192.168.0.10\SQLBackup` |
+
+Write a drive path with **forward slashes**. Windows accepts either separator in `BACKUP DATABASE`, and forward slashes are also what SFTP expects, so one spelling works in every transfer mode.
+
+::: danger Change the default path first
+The default `/var/opt/mssql/backup` is a Linux path. Windows treats it as relative to the instance's own backup directory and the backup fails on the first run:
+
+```
+Cannot open backup device
+'D:\Program Files\Microsoft SQL Server\MSSQL15.MSSQLSERVER\MSSQL\Backup\/var/opt/mssql/backup/mydb.bak'
+Operating system error 3 (The system cannot find the path specified.)
+```
+
+In **local** file transfer mode nothing catches this before the run. The connection test checks the SQL Server connection, and the path is only used once a backup starts. In **SSH** mode the test does check the path, because it can reach it.
+:::
+
+### SSH mode
+
+The `.bak` file is written on the Windows side and has to travel back, and SSH mode is what that is for. It behaves exactly as on Linux: DBackup tunnels the SQL Server connection through SSH and the file comes back over the same connection. Nothing is shared, port 1433 does not have to be reachable, and **Backup Path (Server)** stays an ordinary local directory on the server.
+
+On the SQL Server host DBackup only ever uses SFTP and port forwarding, never a remote command, so the default `cmd.exe` shell does not matter.
+
+Windows Server 2019 and newer ship the OpenSSH server as an optional feature. Install and start it in PowerShell as Administrator:
+
+```powershell
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Start-Service sshd
+Set-Service -Name sshd -StartupType Automatic
+```
+
+Then set up the source as described under [Connection Modes](#connection-modes) and point **Backup Path (Server)** at the directory SQL Server writes into, for example `D:/SQLBackup`. **Test Connection** writes a probe file over SFTP and asks SQL Server whether it sees it, so a wrong path is reported before the first backup.
+
+::: warning Administrator accounts keep their public keys elsewhere
+When the SSH account belongs to the local **Administrators** group, OpenSSH on Windows reads `C:\ProgramData\ssh\administrators_authorized_keys` and ignores that user's own `authorized_keys`. See [key management in the OpenSSH documentation](https://learn.microsoft.com/windows-server/administration/openssh/openssh_keymanagement).
+
+A normal account avoids the whole question and is enough. It needs read, write and delete access to the backup directory and no SQL Server privileges at all.
+:::
+
+### Local mode over an SMB share
+
+Use this where the OpenSSH server is not an option, on Windows Server 2016 and older or where policy rules it out. It also fits when the `.bak` belongs on a NAS rather than on the server's own disk.
+
+```
+DBackup (Docker on Synology/Linux)          Windows Server
+        │                                   └── SQL Server
+        │  BACKUP DATABASE (TCP 1433)  ───────────►  │
+        │                                            │ writes
+        │                                            ▼
+        └── reads /mnt/sql-backup  ◄────  \\synology-nas\sql-backup
+                        (the same share, seen from both sides)
+```
+
+1. Create the share on the NAS or file server, for example `sql-backup`.
+2. Mount it into the DBackup container, for example at `/mnt/sql-backup`.
+3. Set **File Transfer Mode** to `local`.
+4. Set **Backup Path (Server)** to the UNC path the SQL Server uses, for example `\\synology-nas\sql-backup`.
+5. Set **Local Backup Path** to the mount point inside the DBackup container, for example `/mnt/sql-backup`.
+
+The two paths point at the same directory from two sides, exactly as in the Docker volume setup above. DBackup never speaks SMB itself, it reads the mount.
+
+::: warning The SQL Server service account needs access to the share
+`BACKUP DATABASE` runs as the **SQL Server service account**, not as the login DBackup connects with. The default service accounts (`NT Service\MSSQLSERVER`, `Network Service`, `Local System`) have no identity on the network, so writing to a UNC path fails with operating system error 5 even when the share is open to every account you tested it with.
+
+Two ways out:
+
+- Run the SQL Server service under a **domain account** and give that account write access to the share.
+- Grant the share and NTFS permissions to the **computer account** (`DOMAIN\SERVERNAME$`), which is the identity a default service account presents on the network.
+
+A local Windows account on the SQL Server is not enough, the file server has no way to authenticate it.
+:::
+
+::: tip Verify the path from the server before configuring the source
+Run this in SSMS on the SQL Server, as the same instance DBackup connects to. If it fails here, no DBackup setting will fix it.
+
+```sql
+BACKUP DATABASE [master] TO DISK = N'\\synology-nas\sql-backup\permission-test.bak' WITH INIT
+```
+:::
+
+### Restoring to a Windows server
+
+Restore uses the same route the backup used and needs no extra setting. When the target database name differs from the one in the backup, DBackup relocates the data and log files into the instance's own default directories, which it reads from the server. On a server too old to report them, SQL Server 2008 R2 and earlier, the files stay in the directory the backup records.
+
 ## Setting Up a Backup User
 
 Create a dedicated login with backup permissions:

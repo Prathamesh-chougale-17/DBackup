@@ -4,6 +4,7 @@ import { LogLevel, LogType } from "@/lib/core/logs";
 import { assertBackupSupported, executeQuery, executeParameterizedQuery, executeQueryWithMessages, type SqlServerMessage } from "./connection";
 import { getDialect } from "./dialects";
 import { assertValidDatabaseName, toPhysicalFileName } from "./identifiers";
+import { buildMoveTargets, getInstanceDefaultPaths, joinServerPath, serverDirname, type MoveTarget } from "./server-paths";
 import { isCompositeHost } from "@/lib/transport";
 import fs from "fs/promises";
 import { createReadStream, createWriteStream } from "fs";
@@ -144,7 +145,7 @@ export async function restore(
             const extractedFiles = await extractTarArchive(sourcePath, stagingDir, log, selectedDbNames);
 
             for (const extracted of extractedFiles) {
-                const serverPath = path.posix.join(serverBackupPath, path.basename(extracted));
+                const serverPath = joinServerPath(serverBackupPath, path.basename(extracted));
                 bakFiles.push({
                     serverPath,
                     localPath: extracted,
@@ -155,7 +156,7 @@ export async function restore(
         } else {
             // Single .bak file
             const fileName = path.basename(sourcePath);
-            const serverBakPath = path.posix.join(serverBackupPath, fileName);
+            const serverBakPath = joinServerPath(serverBackupPath, fileName);
             const localBakPath = path.join(stagingDir, fileName);
 
             // Stage the file locally first (copy to staging dir)
@@ -208,27 +209,25 @@ export async function restore(
 
                 log(`Restoring database: ${targetDb.original} -> ${targetDb.target}`);
 
-                // Build MOVE clauses for file relocation
-                const moveOptions: { logicalName: string; physicalPath: string }[] = [];
+                // Only a rename needs MOVE. Restoring under the original name
+                // leaves the files where the backup already says they belong.
+                let moveOptions: MoveTarget[] | undefined;
+                if (targetDb.original !== targetDb.target) {
+                    // The target name becomes a filename here, so path separators have
+                    // to go - same substitution SQL Server applies to its own files.
+                    const fileBaseName = toPhysicalFileName(targetDb.target);
+                    const defaults = await getInstanceDefaultPaths(config, host);
+                    moveOptions = buildMoveTargets(logicalFiles, fileBaseName, defaults);
 
-                // The target name becomes a filename here, so path separators have
-                // to go - same substitution SQL Server applies to its own files.
-                const fileBaseName = toPhysicalFileName(targetDb.target);
-
-                for (const file of logicalFiles) {
-                    const ext = file.type === "D" ? ".mdf" : ".ldf";
-                    const newPhysicalPath = `/var/opt/mssql/data/${fileBaseName}${ext}`;
-                    moveOptions.push({
-                        logicalName: file.logicalName,
-                        physicalPath: newPhysicalPath,
-                    });
+                    const directory = moveOptions.length > 0 ? serverDirname(moveOptions[0].physicalPath) : null;
+                    if (directory) log(`Placing database files in: ${directory}`);
                 }
 
                 const restoreQuery = dialect.getRestoreQuery(targetDb.target, bakFile.serverPath, {
                     replace: true,
                     recovery: true,
                     stats: 10,
-                    moveFiles: targetDb.original !== targetDb.target ? moveOptions : undefined,
+                    moveFiles: moveOptions,
                 });
 
                 log(`Executing restore`, "info", "command", restoreQuery);

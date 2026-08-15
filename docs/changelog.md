@@ -18,6 +18,7 @@ All notable changes to DBackup are documented here.
 - **retention**: A policy whose mode carries no settings, such as **Smart** with no tiers stored, now keeps every backup instead of deleting all of them. Only configurations written through the API could reach this state.
 - **mssql**: Azure SQL Database and Azure SQL Managed Instance are now refused up front with a message naming the product, instead of connecting successfully and then failing partway through a backup with a raw T-SQL error. Both are also named correctly in the connection test, where they previously showed as **SQL**.
 - **mssql**: The Database Explorer now lists databases on servers that do not expose **sys.master_files**, showing names and table counts without sizes rather than failing the whole page with **Connection Failed**.
+- **mssql**: Restoring a database under a different name now places its files in the instance's own default data and log directories, which is what makes such a restore work against a SQL Server running on Windows. A database holding more than one data file no longer has all of them moved onto the same file. ([#148](https://github.com/Skyfay/DBackup/issues/148))
 - **s3**: Listing a bucket now returns every object instead of stopping at the first 1000. Because the cut fell alphabetically and backup names carry timestamps, the newest backups were the ones missing from retention, integrity checks, the destination browser and the dashboard.
 - **s3**: Empty files now appear in listings on S3, Cloudflare R2, Hetzner Object Storage and S3-compatible providers. They were dropped along with folder markers, which left them out of directory backups and made them read as deleted everywhere a listing decides what still exists.
 
@@ -40,6 +41,7 @@ All notable changes to DBackup are documented here.
 
 - **installation**: The installation guide now recommends mounting `/tmp` so a running backup is staged outside the Docker disk, and the compose and run examples carry the volume. The file backup guide and the environment reference explain the same thing where disk space comes up. ([#145](https://github.com/Skyfay/DBackup/issues/145))
 - **developer-guide**: The setup guide now points at the platform setup scripts instead of listing a shorter set of packages beside them. It also warns against installing `libpq` for PostgreSQL, whose `pg_dump` is built without LZ4 and ZSTD and breaks native compression.
+- **mssql**: The guide now covers SQL Server on Windows, from the form the backup path has to take to setting up SSH mode against the Windows OpenSSH server. An SMB share is documented as the fallback where that server is unavailable. ([#148](https://github.com/Skyfay/DBackup/issues/148))
 
 ### 🧪 Tests
 

@@ -3,6 +3,7 @@ import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { assertBackupSupported, executeQueryWithMessages, getDatabases, supportsCompression, type SqlServerMessage } from "./connection";
 import { getDialect } from "./dialects";
+import { joinServerPath } from "./server-paths";
 import { isCompositeHost } from "@/lib/transport";
 import fs from "fs/promises";
 import { createReadStream, createWriteStream } from "fs";
@@ -115,7 +116,7 @@ export async function dump(
             for (const dbName of databases) {
                 const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
                 const bakFileName = `${dbName}_${timestamp}.bak`;
-                const serverBakPath = path.posix.join(serverBackupPath, bakFileName);
+                const serverBakPath = joinServerPath(serverBackupPath, bakFileName);
                 const localBakPath = useSSH
                     ? path.join("/tmp", bakFileName)  // SSH mode: always use /tmp locally
                     : path.join(localBackupPath, bakFileName);
