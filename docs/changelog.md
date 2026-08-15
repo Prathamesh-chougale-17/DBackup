@@ -18,6 +18,8 @@ All notable changes to DBackup are documented here.
 - **retention**: A policy whose mode carries no settings, such as **Smart** with no tiers stored, now keeps every backup instead of deleting all of them. Only configurations written through the API could reach this state.
 - **mssql**: Azure SQL Database and Azure SQL Managed Instance are now refused up front with a message naming the product, instead of connecting successfully and then failing partway through a backup with a raw T-SQL error. Both are also named correctly in the connection test, where they previously showed as **SQL**.
 - **mssql**: The Database Explorer now lists databases on servers that do not expose **sys.master_files**, showing names and table counts without sizes rather than failing the whole page with **Connection Failed**.
+- **s3**: Listing a bucket now returns every object instead of stopping at the first 1000. Because the cut fell alphabetically and backup names carry timestamps, the newest backups were the ones missing from retention, integrity checks, the destination browser and the dashboard.
+- **s3**: Empty files now appear in listings on S3, Cloudflare R2, Hetzner Object Storage and S3-compatible providers. They were dropped along with folder markers, which left them out of directory backups and made them read as deleted everywhere a listing decides what still exists.
 
 ### 🔄 Changed
 
@@ -32,6 +34,7 @@ All notable changes to DBackup are documented here.
 - **s3**: New **Parallel Upload Parts** setting on every S3 backup destination sets how many parts upload at once and how large each one may be, up to 32 parts of 64 MB. The form shows how much memory the chosen combination uses per upload.
 - **s3**: Part size now adapts to the backup being uploaded, never above the configured maximum. A part size too large for a given archive used to leave connections with nothing to upload, which cost a 1.39 GB backup to Cloudflare R2 a third of its throughput at 32 parts of 64 MB.
 - **s3**: The run log now records upload throughput and the part size actually used. Throughput was only ever shown in the live progress detail, which is gone once the run ends.
+- **s3**: Backing up a directory from an S3 destination now reports progress while the listing runs and stops within one request when the job is cancelled. Both previously waited for the entire listing to finish.
 
 ### 📝 Documentation
 

@@ -220,18 +220,67 @@ describe("S3 Adapters - shared logic via S3GenericAdapter", () => {
             await expect(S3GenericAdapter.list(genericConfig, "Job")).rejects.toThrow("Access Denied");
         });
 
-        it("filters out zero-size entries (virtual folder markers)", async () => {
+        // A folder marker is a key ending in "/". Recognising them by size instead threw away
+        // every genuine empty file with them, which left an empty file out of a directory
+        // backup and made it read as deleted everywhere the listing decides what exists.
+        it("drops folder markers but keeps a genuinely empty file", async () => {
             mockSend.mockResolvedValue({
                 Contents: [
                     { Key: "Job/", Size: 0, LastModified: new Date() },
+                    { Key: "Job/empty.txt", Size: 0, LastModified: new Date() },
                     { Key: "Job/backup.sql", Size: 512, LastModified: new Date() },
                 ],
             });
 
             const result = await S3GenericAdapter.list(genericConfig, "Job");
 
+            expect(result.map((f) => f.name)).toEqual(["empty.txt", "backup.sql"]);
+            expect(result[0].size).toBe(0);
+        });
+
+        // A marker's basename is the folder name ("backups/foo/" -> "foo"), so the trailing
+        // slash has to be tested on the raw key, before basename and before the prefix strip.
+        it("drops a nested folder marker whose basename looks like a file", async () => {
+            mockSend.mockResolvedValue({
+                Contents: [{ Key: "Job/nested/", Size: 0, LastModified: new Date() }],
+            });
+
+            expect(await S3GenericAdapter.list(genericConfig, "Job")).toEqual([]);
+        });
+
+        // S3 answers with at most 1000 keys per page, in lexicographic order. Reading only the
+        // first page returned the alphabetically first keys, which for timestamped backup
+        // names are the oldest - so every recent backup was invisible, silently.
+        it("follows the continuation token until the listing is complete", async () => {
+            mockSend
+                .mockResolvedValueOnce({
+                    Contents: [{ Key: "Job/a.sql", Size: 10, LastModified: new Date() }],
+                    IsTruncated: true,
+                    NextContinuationToken: "page-2",
+                })
+                .mockResolvedValueOnce({
+                    Contents: [{ Key: "Job/b.sql", Size: 20, LastModified: new Date() }],
+                    IsTruncated: false,
+                });
+
+            const result = await S3GenericAdapter.list(genericConfig, "Job");
+
+            expect(result.map((f) => f.name)).toEqual(["a.sql", "b.sql"]);
+            expect(mockSend).toHaveBeenCalledTimes(2);
+            expect(mockSend.mock.calls[0][0].ContinuationToken).toBeUndefined();
+            expect(mockSend.mock.calls[1][0].ContinuationToken).toBe("page-2");
+        });
+
+        it("stops after a truncated page that hands back no token", async () => {
+            mockSend.mockResolvedValue({
+                Contents: [{ Key: "Job/a.sql", Size: 10, LastModified: new Date() }],
+                IsTruncated: true,
+            });
+
+            const result = await S3GenericAdapter.list(genericConfig, "Job");
+
             expect(result).toHaveLength(1);
-            expect(result[0].name).toBe("backup.sql");
+            expect(mockSend).toHaveBeenCalledTimes(1);
         });
     });
 
@@ -529,6 +578,117 @@ describe("S3 download progress tracker transform body", () => {
     });
 });
 
+// --- listTree(): the same listing, reported and interruptible while it runs ---
+//
+// Without it, listTreeForCollection() falls back to list(), which says nothing until it has
+// finished and cannot be cancelled at all. Harmless while a listing stopped at 1000 keys, and
+// not once it paginates: a large bucket lists for minutes behind a frozen progress row.
+describe("S3 listTree()", () => {
+    // mockReset on top of clearAllMocks, because clearing only drops recorded calls: a
+    // `mockResolvedValueOnce` a test never consumed stays queued and answers the next one.
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mockSend.mockReset();
+    });
+
+    const twoPages = () => {
+        mockSend
+            .mockResolvedValueOnce({
+                Contents: [
+                    { Key: "Job/a.sql", Size: 10, LastModified: new Date() },
+                    { Key: "Job/b.sql", Size: 20, LastModified: new Date() },
+                ],
+                IsTruncated: true,
+                NextContinuationToken: "page-2",
+            })
+            .mockResolvedValueOnce({
+                Contents: [{ Key: "Job/c.sql", Size: 30, LastModified: new Date() }],
+                IsTruncated: false,
+            });
+    };
+
+    it("returns every page and reports no pruned directories", async () => {
+        twoPages();
+
+        const result = await S3GenericAdapter.listTree!(genericConfig, "Job");
+
+        expect(result.files.map((f) => f.name)).toEqual(["a.sql", "b.sql", "c.sql"]);
+        expect(result.pruned).toEqual([]);
+        expect(result.unsupportedSymlinks).toBeUndefined();
+    });
+
+    it("reports progress once per page with a growing file count", async () => {
+        twoPages();
+        const seen: number[] = [];
+
+        await S3GenericAdapter.listTree!(genericConfig, "Job", {
+            onProgress: ({ files }) => seen.push(files),
+        });
+
+        expect(seen).toEqual([2, 3]);
+    });
+
+    it("reports a flat scan as having no directories", async () => {
+        mockSend.mockResolvedValue({
+            Contents: [{ Key: "Job/a.sql", Size: 10, LastModified: new Date() }],
+        });
+        const seen: Array<{ directories: number; prunedDirectories: number; currentPath: string }> = [];
+
+        await S3GenericAdapter.listTree!(genericConfig, "Job", {
+            onProgress: ({ directories, prunedDirectories, currentPath }) =>
+                seen.push({ directories, prunedDirectories, currentPath }),
+        });
+
+        expect(seen).toEqual([{ directories: 0, prunedDirectories: 0, currentPath: "" }]);
+    });
+
+    it("stops when the signal is already aborted, without listing anything", async () => {
+        const controller = new AbortController();
+        controller.abort();
+
+        await expect(
+            S3GenericAdapter.listTree!(genericConfig, "Job", { signal: controller.signal })
+        ).rejects.toThrow();
+        expect(mockSend).not.toHaveBeenCalled();
+    });
+
+    it("stops between pages when the signal fires mid-listing", async () => {
+        const controller = new AbortController();
+        mockSend
+            .mockImplementationOnce(async () => {
+                controller.abort();
+                return {
+                    Contents: [{ Key: "Job/a.sql", Size: 10, LastModified: new Date() }],
+                    IsTruncated: true,
+                    NextContinuationToken: "page-2",
+                };
+            })
+            .mockResolvedValueOnce({ Contents: [], IsTruncated: false });
+
+        await expect(
+            S3GenericAdapter.listTree!(genericConfig, "Job", { signal: controller.signal })
+        ).rejects.toThrow();
+        // The second page is never requested.
+        expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+
+    it("is exposed by every S3 adapter variant", () => {
+        for (const { adapter } of adapters) {
+            expect(typeof adapter.listTree).toBe("function");
+        }
+    });
+
+    it("returns prefix-relative paths, same as list()", async () => {
+        mockSend.mockResolvedValue({
+            Contents: [{ Key: "test/Images/a.jpg", Size: 10, LastModified: new Date() }],
+        });
+
+        const result = await S3GenericAdapter.listTree!({ ...genericConfig, pathPrefix: "test" }, "");
+
+        expect(result.files[0].path).toBe("Images/a.jpg");
+    });
+});
+
 // --- pathPrefix: the adapter root, honoured symmetrically across every operation ---
 //
 // The regression this pins: list() used to return full bucket keys (prefix included) while
@@ -555,6 +715,26 @@ describe("S3 pathPrefix is the adapter root", () => {
         expect(result.map((f) => f.path)).toEqual(["Images/a.jpg", "Java/b.jar"]);
         // The listing itself is still scoped to the prefix.
         expect(mockSend.mock.calls[0][0].Prefix).toBe("test/");
+    });
+
+    // The prefix strip runs per object, so it has to survive pagination. A second page whose
+    // keys still carried the prefix would produce exactly the "test/test/..." drift above.
+    it("strips the prefix on every page of a paginated listing", async () => {
+        mockSend
+            .mockResolvedValueOnce({
+                Contents: [{ Key: "test/Images/a.jpg", Size: 10, LastModified: new Date() }],
+                IsTruncated: true,
+                NextContinuationToken: "page-2",
+            })
+            .mockResolvedValueOnce({
+                Contents: [{ Key: "test/Java/b.jar", Size: 20, LastModified: new Date() }],
+                IsTruncated: false,
+            });
+
+        const result = await S3GenericAdapter.list(prefixed, "");
+
+        expect(result.map((f) => f.path)).toEqual(["Images/a.jpg", "Java/b.jar"]);
+        expect(mockSend.mock.calls[1][0].Prefix).toBe("test/");
     });
 
     it("download() re-applies the prefix to a prefix-relative path", async () => {
