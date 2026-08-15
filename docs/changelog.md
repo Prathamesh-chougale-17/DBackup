@@ -2,8 +2,8 @@
 
 All notable changes to DBackup are documented here.
 
-## vNEXT
-*Release: In Progress*
+## v3.3.0 - Azure SQL Database Support, S3 Upload Rework and General Improvements
+*Released: Aug 15, 2026*
 
 > ⚠️ **Breaking:** Retention now decides how old a backup is from the creation time DBackup recorded in its `.meta.json`, not from the file's modification time on the destination. Where the two still agree, which is the normal case, the same backups are kept as before and nothing needs doing. Where they were pulled apart, by moving a destination or copying it without preserving timestamps, retention keeps a different set from the next run onwards. That is the intended fix, because a reset modification time collapses the whole history into a single bucket and costs almost all of it, but it does mean the first run after updating can delete backups the run before it kept. Open the retention step of that first run and look for lines naming a backup whose recorded time and modification time disagree. Lock anything you cannot lose before a destination is moved.
 
@@ -54,8 +54,8 @@ All notable changes to DBackup are documented here.
 
 ### 🐳 Docker
 
-- **Image**: `skyfay/dbackup:vNEXT`
-- **Also tagged as**: `latest`, `vNEXT`
+- **Image**: `skyfay/dbackup:v3.3.0`
+- **Also tagged as**: `latest`, `v3`
 - **CI Image**: `skyfay/dbackup:ci`
 - **Platforms**: linux/amd64, linux/arm64
 
