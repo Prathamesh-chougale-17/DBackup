@@ -2,6 +2,13 @@
 
 All notable changes to DBackup are documented here.
 
+## vNEXT
+*Release: In Progress*
+
+### ✨ Features
+
+- **MongoDB**: Backup jobs can now create and restore one native full instance archive containing all databases, users and custom roles.
+
 ## v3.3.0 - Azure SQL Database Support, S3 Upload Rework and General Improvements
 *Released: Aug 15, 2026*
 

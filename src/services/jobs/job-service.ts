@@ -2,11 +2,12 @@ import prisma from "@/lib/prisma";
 import { STORAGE_ROLES } from "@/lib/core/storage-roles";
 import { scheduler } from "@/lib/server/scheduler";
 import { logger } from "@/lib/logging/logger";
-import { wrapError } from "@/lib/logging/errors";
+import { NotFoundError, ValidationError, wrapError } from "@/lib/logging/errors";
 import { registry } from "@/lib/core/registry";
 import { registerAdapters } from "@/lib/adapters";
 import { runBulk, type BulkResult } from "@/lib/core/bulk";
 import type { DatabaseAdapter } from "@/lib/core/interfaces";
+import type { MongoDBBackupScope } from "@/lib/core/mongodb-backup-scope";
 
 registerAdapters();
 
@@ -39,6 +40,7 @@ export interface CreateJobInput {
     schedule: string;
     sourceId?: string;
     databases?: string[];
+    backupScope?: MongoDBBackupScope;
     destinations: DestinationInput[];
     sources?: SourceInput[];
     notificationIds?: string[];
@@ -61,6 +63,7 @@ export interface UpdateJobInput {
     schedule?: string;
     sourceId?: string;
     databases?: string[];
+    backupScope?: MongoDBBackupScope;
     destinations?: DestinationInput[];
     sources?: SourceInput[];
     notificationIds?: string[];
@@ -233,8 +236,48 @@ export class JobService {
         }
     }
 
+    private async validateBackupScope(
+        jobId: string | null,
+        sourceId: string | undefined,
+        sources: SourceInput[] | undefined,
+        backupScope: CreateJobInput["backupScope"],
+    ) {
+        let effectiveSourceId = sourceId;
+        let effectiveSourceCount = sources?.length;
+        let effectiveBackupScope = backupScope;
+
+        if (jobId && (effectiveSourceId === undefined || effectiveSourceCount === undefined || effectiveBackupScope === undefined)) {
+            const current = await prisma.job.findUnique({
+                where: { id: jobId },
+                select: { sourceId: true, backupScope: true, sources: { select: { id: true } } },
+            });
+            if (!current) throw new NotFoundError("Job", jobId);
+            if (effectiveSourceId === undefined) effectiveSourceId = current.sourceId ?? undefined;
+            if (effectiveSourceCount === undefined) effectiveSourceCount = current.sources.length;
+            if (effectiveBackupScope === undefined) {
+                effectiveBackupScope = current.backupScope === "FULL_INSTANCE" ? "FULL_INSTANCE" : "SELECTED_DATABASES";
+            }
+        }
+
+        if (effectiveBackupScope !== "FULL_INSTANCE") return;
+        if ((effectiveSourceCount ?? 0) > 0) {
+            throw new ValidationError("MongoDB Full Instance backup cannot be combined with directory sources.", {
+                field: "backupScope",
+            });
+        }
+
+        const source = effectiveSourceId
+            ? await prisma.adapterConfig.findUnique({ where: { id: effectiveSourceId }, select: { adapterId: true } })
+            : null;
+        if (source?.adapterId !== "mongodb") {
+            throw new ValidationError("Full Instance backup scope is only available for MongoDB sources.", {
+                field: "backupScope",
+            });
+        }
+    }
+
     async createJob(input: CreateJobInput) {
-        const { name, schedule, sourceId, databases, destinations, sources, notificationIds, notificationTemplateIds, enabled, encryptionProfileId, compression, pgCompression, notificationEvents, skipVerification, backupMode, fullEveryDays, verifyByHash } = input;
+        const { name, schedule, sourceId, databases, backupScope, destinations, sources, notificationIds, notificationTemplateIds, enabled, encryptionProfileId, compression, pgCompression, notificationEvents, skipVerification, backupMode, fullEveryDays, verifyByHash } = input;
 
         // Check name uniqueness
         const existingByName = await prisma.job.findFirst({ where: { name } });
@@ -243,6 +286,7 @@ export class JobService {
         }
 
         await this.validateJobSources(null, sourceId || null, sources);
+        await this.validateBackupScope(null, sourceId, sources, backupScope);
         await this.validateJobDestinations(destinations);
 
         const newJob = await prisma.job.create({
@@ -251,6 +295,7 @@ export class JobService {
                 schedule,
                 sourceId: sourceId || null,
                 databases: JSON.stringify(databases || []),
+                backupScope: backupScope ?? "SELECTED_DATABASES",
                 enabled: enabled !== undefined ? enabled : true,
                 encryptionProfileId: encryptionProfileId || null,
                 namingTemplateId: input.namingTemplateId ?? null,
@@ -305,7 +350,7 @@ export class JobService {
     }
 
     async updateJob(id: string, input: UpdateJobInput) {
-        const { name, schedule, sourceId, databases, destinations, sources, notificationIds, notificationTemplateIds, enabled, encryptionProfileId, compression, pgCompression, notificationEvents, namingTemplateId, skipVerification, backupMode, fullEveryDays, verifyByHash } = input;
+        const { name, schedule, sourceId, databases, backupScope, destinations, sources, notificationIds, notificationTemplateIds, enabled, encryptionProfileId, compression, pgCompression, notificationEvents, namingTemplateId, skipVerification, backupMode, fullEveryDays, verifyByHash } = input;
 
         // Check name uniqueness (excluding current job)
         if (name) {
@@ -318,6 +363,9 @@ export class JobService {
         if (sourceId !== undefined || sources !== undefined) {
             await this.validateJobSources(id, sourceId !== undefined ? (sourceId || null) : undefined, sources);
             await this.validateJobDestinations(destinations);
+        }
+        if (sourceId !== undefined || sources !== undefined || backupScope !== undefined) {
+            await this.validateBackupScope(id, sourceId, sources, backupScope);
         }
 
         const updatedJob = await prisma.$transaction(async (tx) => {
@@ -409,6 +457,7 @@ export class JobService {
                     enabled,
                     sourceId: sourceId !== undefined ? (sourceId || null) : undefined,
                     databases: databases !== undefined ? JSON.stringify(databases) : undefined,
+                    backupScope: backupScope !== undefined ? backupScope : undefined,
                     compression,
                     pgCompression,
                     notificationEvents,
@@ -532,6 +581,7 @@ export class JobService {
                 schedule: original.schedule,
                 sourceId: original.sourceId,
                 databases: original.databases,
+                backupScope: original.backupScope,
                 enabled: false,
                 encryptionProfileId: original.encryptionProfileId ?? null,
                 compression: original.compression,

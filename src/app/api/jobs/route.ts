@@ -7,6 +7,7 @@ import { logger } from "@/lib/logging/logger";
 import { wrapError } from "@/lib/logging/errors";
 import { Cron } from "croner";
 import prisma from "@/lib/prisma";
+import { MongoDBBackupScopeSchema } from "@/lib/core/mongodb-backup-scope";
 
 const log = logger.child({ route: "jobs" });
 
@@ -59,7 +60,11 @@ export async function POST(req: NextRequest) {
         checkPermissionWithContext(ctx, PERMISSIONS.JOBS.WRITE);
 
         const body = await req.json();
-        const { name, schedule, sourceId, databases, destinations, sources, notificationIds, notificationTemplateIds, enabled, encryptionProfileId, compression, pgCompression, notificationEvents, namingTemplateId, schedulePresetId, skipVerification, backupMode, fullEveryDays, verifyByHash } = body;
+        const { name, schedule, sourceId, databases, backupScope, destinations, sources, notificationIds, notificationTemplateIds, enabled, encryptionProfileId, compression, pgCompression, notificationEvents, namingTemplateId, schedulePresetId, skipVerification, backupMode, fullEveryDays, verifyByHash } = body;
+        const parsedBackupScope = MongoDBBackupScopeSchema.safeParse(backupScope ?? "SELECTED_DATABASES");
+        if (!parsedBackupScope.success) {
+            return NextResponse.json({ error: "Invalid MongoDB backup scope" }, { status: 400 });
+        }
 
         if (!name || !schedule || !destinations || !Array.isArray(destinations) || destinations.length === 0) {
             return NextResponse.json({ error: "Missing required fields (name, schedule, destinations)" }, { status: 400 });
@@ -70,6 +75,7 @@ export async function POST(req: NextRequest) {
             schedule,
             sourceId: sourceId || undefined,
             databases: Array.isArray(databases) ? databases : [],
+            backupScope: parsedBackupScope.data,
             destinations: destinations.map((d: { configId: string; priority?: number; retention?: any; retentionPolicyId?: string | null }, i: number) => ({
                 configId: d.configId,
                 priority: d.priority ?? i,

@@ -176,6 +176,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
         let compressionMeta: CompressionType | undefined = undefined;
         let expectedChecksum: string | undefined = undefined;
         let seekableArchive = false;
+        let backupScope: BackupMetadata['backupScope'] = undefined;
 
         try {
             const metaRemotePath = file + ".meta.json";
@@ -186,6 +187,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
             if (metaDownSuccess) {
                 const metaContent = await fs.promises.readFile(tempMetaPath, 'utf-8');
                 const metadata = JSON.parse(metaContent);
+                backupScope = metadata.backupScope === "FULL_INSTANCE" ? "FULL_INSTANCE" : undefined;
 
                 if (metadata.archive?.formatVersion === 2) {
                     // Seekable archive - restored by byte range below, never by full
@@ -482,6 +484,9 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
         const dbConf = await resolveAdapterConfig(sourceConfig) as any;
         // Inject adapterId as type for Dialect selection
         dbConf.type = sourceConfig.adapterId;
+        if (sourceConfig.adapterId === "mongodb" && backupScope === "FULL_INSTANCE") {
+            dbConf.backupScope = "FULL_INSTANCE";
+        }
 
         // CRITICAL: Detect target server version for version-matched binary selection
         if (sourceAdapter.test) {

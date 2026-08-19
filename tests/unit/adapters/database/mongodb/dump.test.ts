@@ -100,6 +100,27 @@ describe.each<HostKind>(["direct", "ssh"])("MongoDB dump over a %s host", (kind)
         expect(mockGetDatabases).toHaveBeenCalledWith(expect.anything(), host);
     });
 
+    it("uses one native archive dump for a full instance", async () => {
+        const host = dumpHost(kind);
+
+        const result = await dump({
+            ...baseConfig,
+            database: ["shop", "analytics"],
+            backupScope: "FULL_INSTANCE",
+        } as never, "/tmp/out.archive", host);
+
+        expect(result.success).toBe(true);
+        expect(host.calls.spawn).toHaveLength(1);
+        expect(host.calls.spawn[0]).toEqual(expect.arrayContaining([
+            "mongodump",
+            "--gzip",
+            "--archive=/tmp/out.archive",
+        ]));
+        expect(host.calls.spawn[0]).not.toContain("--db");
+        expect(mockGetDatabases).not.toHaveBeenCalled();
+        expect(mockCreateMultiDbTar).not.toHaveBeenCalled();
+    });
+
     it("packs several databases into a TAR", async () => {
         mockCreateMultiDbTar.mockResolvedValue({ databases: [{ name: "a" }, { name: "b" }] });
         const host = dumpHost(kind);

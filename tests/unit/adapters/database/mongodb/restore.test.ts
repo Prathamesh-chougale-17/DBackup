@@ -105,6 +105,22 @@ describe.each<HostKind>(["direct", "ssh"])("MongoDB restore over a %s host", (ki
             expect(host.calls.spawn[0]).not.toContain("--archive");
         });
 
+        it("restores a full instance without namespace filters", async () => {
+            const host = restoreHost(kind);
+
+            const result = await restore({
+                ...baseConfig,
+                backupScope: "FULL_INSTANCE",
+            } as never, "/tmp/full-instance.archive", host);
+
+            expect(result.success).toBe(true);
+            const argv = host.calls.spawn[0];
+            expect(argv).toContain("--drop");
+            expect(argv).not.toContain("--nsInclude");
+            expect(argv).not.toContain("--nsFrom");
+            expect(argv).not.toContain("--nsTo");
+        });
+
         it("fails when mongorestore exits non-zero", async () => {
             const result = await restore(baseConfig as never, "/tmp/in.archive", restoreHost(kind, { code: 1 }));
 

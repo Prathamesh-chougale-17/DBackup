@@ -30,6 +30,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
+import { MONGODB_BACKUP_SCOPE_VALUES } from "@/lib/core/mongodb-backup-scope";
 import {
   Command,
   CommandEmpty,
@@ -172,6 +173,7 @@ const jobSchema = z.object({
     schedule: z.string().min(1, "Cron schedule is required"),
     sourceId: z.string().optional().default(""),
     databases: z.array(z.string()).default([]),
+    backupScope: z.enum(MONGODB_BACKUP_SCOPE_VALUES).default("SELECTED_DATABASES"),
     directorySources: z.array(directorySourceSchema).default([]),
     destinations: z.array(destinationSchema).min(1, "At least one destination is required"),
     encryptionProfileId: z.string().optional(),
@@ -193,6 +195,13 @@ const jobSchema = z.object({
             code: z.ZodIssueCode.custom,
             path: ["sourceId"],
             message: "Select a database source or add at least one directory source",
+        });
+    }
+    if (data.backupScope === "FULL_INSTANCE" && data.directorySources.length > 0) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["backupScope"],
+            message: "Full Instance cannot be combined with directory sources",
         });
     }
     // Same adapter + same path twice is a foot-gun (not a hard conflict like destinations'
@@ -228,6 +237,7 @@ export interface JobFormProps {
         enabled: boolean;
         sourceId: string | null;
         databases?: string;
+        backupScope?: string;
         encryptionProfileId?: string;
         compression: string;
         pgCompression?: string;
@@ -382,6 +392,7 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
             schedule: initialData?.schedule || "0 0 * * *",
             sourceId: initialData?.sourceId || "",
             databases: parseInitialDatabases(),
+            backupScope: initialData?.backupScope === "FULL_INSTANCE" ? "FULL_INSTANCE" : "SELECTED_DATABASES",
             directorySources: defaultDirectorySources,
             destinations: defaultDestinations,
             encryptionProfileId: initialData?.encryptionProfileId || "no-encryption",
@@ -450,6 +461,7 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
             }
             form.setValue("sourceId", "", { shouldDirty: true, shouldValidate: true });
             form.setValue("databases", [], { shouldDirty: true });
+            form.setValue("backupScope", "SELECTED_DATABASES", { shouldDirty: true });
             setAvailableDatabases([]);
             setIsDbListOpen(false);
         } else if (dirsEnabled) {
@@ -540,7 +552,11 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
     // Determine whether to show database picker based on selected source adapter
     const selectedSourceId = form.watch("sourceId");
     const selectedSource = sources.find(s => s.id === selectedSourceId);
-    const showDatabasePicker = selectedSource && !["sqlite", "redis", "valkey"].includes(selectedSource.adapterId);
+    const backupScope = form.watch("backupScope");
+    const isMongoSource = selectedSource?.adapterId === "mongodb";
+    const showDatabasePicker = selectedSource
+        && !["sqlite", "redis", "valkey"].includes(selectedSource.adapterId)
+        && (!isMongoSource || backupScope === "SELECTED_DATABASES");
     // In "both" mode only combinable DB adapters (dumpOne()/restoreOne() support) are offered, so the
     // combination is valid by construction - JobService.validateJobSources remains the server-side backstop.
     const sourcePickerOptions = sourceMode === "both"
@@ -921,6 +937,7 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
                                                                             // Reset databases when source changes
                                                                             if (prevSourceId !== s.id) {
                                                                                 form.setValue("databases", []);
+                                                                                form.setValue("backupScope", "SELECTED_DATABASES");
                                                                                 setAvailableDatabases([]);
                                                                             }
                                                                         }}
@@ -935,6 +952,33 @@ export function JobForm({ sources, destinations, directorySourceOptions, notific
                                                     </Command>
                                                 </PopoverContent>
                                             </Popover>
+
+                                            {isMongoSource && (
+                                                <FormField control={form.control} name="backupScope" render={({ field: scopeField }) => (
+                                                    <FormItem className="w-full space-y-2">
+                                                        <FormLabel>Backup Scope</FormLabel>
+                                                        <Select value={scopeField.value} onValueChange={scopeField.onChange}>
+                                                            <FormControl>
+                                                                <SelectTrigger className="w-full sm:w-72">
+                                                                    <SelectValue />
+                                                                </SelectTrigger>
+                                                            </FormControl>
+                                                            <SelectContent>
+                                                                <SelectItem value="SELECTED_DATABASES">Selected Databases</SelectItem>
+                                                                <SelectItem value="FULL_INSTANCE" disabled={dirsEnabled}>Full Instance</SelectItem>
+                                                            </SelectContent>
+                                                        </Select>
+                                                        <FormDescription>
+                                                            {scopeField.value === "FULL_INSTANCE"
+                                                                ? "Backs up all databases, MongoDB users and custom roles in one native archive."
+                                                                : dirsEnabled
+                                                                    ? "Selected Databases is required when directory sources are included."
+                                                                : "Backs up only the databases selected below using the existing per-database format."}
+                                                        </FormDescription>
+                                                        <FormMessage />
+                                                    </FormItem>
+                                                )} />
+                                            )}
 
                                             {/* Database Picker (hidden for SQLite/Redis/Valkey) - same left-adapter/right-load-and-select layout as a Directory Source row */}
                                             {showDatabasePicker ? (

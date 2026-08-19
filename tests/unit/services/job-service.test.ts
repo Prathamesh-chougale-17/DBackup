@@ -58,6 +58,7 @@ describe('JobService', () => {
                     schedule: input.schedule,
                     sourceId: input.sourceId,
                     databases: "[]",
+                    backupScope: "SELECTED_DATABASES",
                     enabled: input.enabled,
                     encryptionProfileId: null,
                     namingTemplateId: null,

@@ -21,6 +21,9 @@ export async function stepExecuteDump(ctx: RunnerContext) {
     if (!ctx.sourceAdapter && (!ctx.sources || ctx.sources.length === 0)) {
         throw new Error("Job has no source configured");
     }
+    if (ctx.job.backupScope === "FULL_INSTANCE" && ctx.sources && ctx.sources.length > 0) {
+        throw new Error("MongoDB Full Instance backup cannot be combined with directory sources.");
+    }
 
     // Combined path (DB + directory sources, or directory-only) - only ever taken when a job
     // actually has JobSource rows. Every DB-only job (ctx.sources.length === 0, the 99% case)
@@ -54,6 +57,9 @@ export async function stepExecuteDump(ctx: RunnerContext) {
     const sourceConfig = await resolveAdapterConfig(job.source!) as any;
     // Inject adapterId as type for Dialect selection (e.g. 'mariadb')
     sourceConfig.type = job.source!.adapterId;
+    if (job.source!.adapterId === "mongodb") {
+        sourceConfig.backupScope = job.backupScope ?? "SELECTED_DATABASES";
+    }
 
     // One transport for the whole dump step: listing databases, probing the
     // server version and dumping used to open a separate SSH connection each.
@@ -73,7 +79,7 @@ export async function stepExecuteDump(ctx: RunnerContext) {
         })();
 
         // 3. Generate filename with timezone and custom pattern
-        const dbNameRaw = jobDatabases.length === 0
+        const dbNameRaw = sourceConfig.backupScope === "FULL_INSTANCE" || jobDatabases.length === 0
             ? 'all'
             : jobDatabases.map(db => db.replace(/[^a-z0-9]/gi, '_')).join('_');
 

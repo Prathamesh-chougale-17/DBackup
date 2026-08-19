@@ -12,13 +12,53 @@ import {
 import { TarFileEntry, TarManifest } from "../common/types";
 import { MongoDBConfig } from "@/lib/adapters/definitions";
 import { getDatabases } from "./connection";
+import type { MongoDBBackupScope } from "@/lib/core/mongodb-backup-scope";
+import { AdapterError } from "@/lib/logging/errors";
 
 /**
  * Extended MongoDB config for dump operations with runtime fields
  */
 type MongoDBDumpConfig = MongoDBConfig & {
     detectedVersion?: string;
+    backupScope?: MongoDBBackupScope;
 };
+
+async function dumpFullInstance(
+    outputPath: string,
+    config: MongoDBDumpConfig,
+    host: ExecutionHost,
+    log: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void
+): Promise<void> {
+    const mongodump = await host.which(...MONGODUMP);
+
+    await host.captureOutput(outputPath, {}, async (hostPath) => {
+        const args = [
+            ...buildConnectionArgs(config),
+            `--archive=${hostPath}`,
+            "--gzip",
+        ];
+
+        if (config.options) args.push(...parseOptionString(config.options));
+
+        log("Dumping full MongoDB instance", "info", "command", `${mongodump} ${maskSecrets(args, config.password)}`);
+
+        const proc = await host.spawn([mongodump, ...args]);
+        proc.stdout.on("data", () => { /* mongodump writes progress to stderr */ });
+        proc.stderr.on("data", (data: Buffer) => {
+            const msg = data.toString().trim();
+            if (msg) log(`[mongodump] ${msg}`, "info");
+        });
+
+        const { code, signal } = await proc.exit();
+        if (code !== 0) {
+            throw new AdapterError(
+                "mongodb",
+                "full instance dump",
+                `mongodump exited with code ${code ?? "null"}${signal ? ` (signal: ${signal})` : ""}`,
+            );
+        }
+    });
+}
 
 /**
  * Dump a single MongoDB database with mongodump --archive --gzip.
@@ -112,6 +152,24 @@ export async function dump(
     let tempDir: string | null = null;
 
     try {
+        if (config.backupScope === "FULL_INSTANCE") {
+            await dumpFullInstance(destinationPath, config, _host, log);
+
+            const stats = await fs.stat(destinationPath);
+            if (stats.size === 0) {
+                throw new AdapterError("mongodb", "full instance dump", "Dump file is empty. Check logs/permissions.");
+            }
+
+            return {
+                success: true,
+                path: destinationPath,
+                size: stats.size,
+                logs,
+                startedAt,
+                completedAt: new Date(),
+            };
+        }
+
         // Prepare DB list
         let dbs: string[] = [];
         if (Array.isArray(config.database)) {

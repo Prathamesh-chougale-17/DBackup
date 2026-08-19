@@ -162,6 +162,9 @@ export async function stepUpload(ctx: RunnerContext) {
             count: typeof ctx.metadata?.count === 'number' ? ctx.metadata.count : 0,
             names: Array.isArray(ctx.metadata?.names) ? ctx.metadata.names : undefined
         },
+        ...(job.source?.adapterId === "mongodb"
+            ? { backupScope: job.backupScope ?? "SELECTED_DATABASES" }
+            : {}),
         engineVersion: ctx.metadata?.engineVersion,
         engineEdition: ctx.metadata?.engineEdition,
         timestamp: new Date().toISOString(),

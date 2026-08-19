@@ -3,6 +3,7 @@ import { headers } from "next/headers";
 import { jobService } from "@/services/jobs/job-service";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
+import { MongoDBBackupScopeSchema } from "@/lib/core/mongodb-backup-scope";
 
 export async function DELETE(
     req: NextRequest,
@@ -38,7 +39,13 @@ export async function PUT(
     const params = await props.params;
     try {
         const body = await req.json();
-        const { name, schedule, sourceId, databases, destinations, sources, notificationIds, notificationTemplateIds, enabled, encryptionProfileId, compression, pgCompression, notificationEvents, namingTemplateId, schedulePresetId, skipVerification, backupMode, fullEveryDays, verifyByHash } = body;
+        const { name, schedule, sourceId, databases, backupScope, destinations, sources, notificationIds, notificationTemplateIds, enabled, encryptionProfileId, compression, pgCompression, notificationEvents, namingTemplateId, schedulePresetId, skipVerification, backupMode, fullEveryDays, verifyByHash } = body;
+        const parsedBackupScope = backupScope === undefined
+            ? undefined
+            : MongoDBBackupScopeSchema.safeParse(backupScope);
+        if (parsedBackupScope && !parsedBackupScope.success) {
+            return NextResponse.json({ error: "Invalid MongoDB backup scope" }, { status: 400 });
+        }
 
         const updatedJob = await jobService.updateJob(params.id, {
             name,
@@ -46,6 +53,7 @@ export async function PUT(
             enabled,
             sourceId,
             databases: Array.isArray(databases) ? databases : undefined,
+            backupScope: parsedBackupScope?.data,
             destinations: destinations ? destinations.map((d: { configId: string; priority?: number; retention?: any; retentionPolicyId?: string | null }, i: number) => ({
                 configId: d.configId,
                 priority: d.priority ?? i,

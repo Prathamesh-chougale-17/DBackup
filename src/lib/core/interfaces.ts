@@ -2,6 +2,7 @@ import { z } from "zod";
 import { LogLevel, LogType } from "./logs";
 import type { AdapterCredentialRequirements } from "./credentials";
 import type { ExecutionHost, TransportResolver } from "@/lib/transport/types";
+import type { MongoDBBackupScope } from "./mongodb-backup-scope";
 
 /**
  * Base configuration type for adapters.
@@ -27,6 +28,8 @@ export interface BackupMetadata {
     engineVersion?: string;
     engineEdition?: string; // e.g., "Express", "Standard", "Enterprise", "Azure SQL Edge"
     databases: string[] | { count: number; names?: string[] };
+    /** MongoDB dump scope. Absent on older backups and means SELECTED_DATABASES. */
+    backupScope?: MongoDBBackupScope;
     timestamp: string;
     originalFileName: string;
     sourceId: string;

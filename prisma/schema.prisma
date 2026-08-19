@@ -129,6 +129,7 @@ model Job {
   enabled             Boolean            @default(true)
   sourceId            String?
   databases           String             @default("[]") // JSON array of database names to back up (e.g. ["db1","db2"])
+  backupScope         String             @default("SELECTED_DATABASES") // MongoDB: SELECTED_DATABASES | FULL_INSTANCE
   encryptionProfileId String?
   encryptionProfile   EncryptionProfile? @relation(fields: [encryptionProfileId], references: [id])
   compression         String             @default("NONE")

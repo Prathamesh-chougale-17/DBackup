@@ -5,6 +5,7 @@ import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import { MongoDBConfig } from "@/lib/adapters/definitions";
 import path from "path";
+import type { MongoDBBackupScope } from "@/lib/core/mongodb-backup-scope";
 import {
     isMultiDbTar,
     extractSelectedDatabases,
@@ -16,6 +17,7 @@ import {
 
 /** Extended config with optional privileged auth for restore operations */
 type MongoDBRestoreConfig = MongoDBConfig & {
+    backupScope?: MongoDBBackupScope;
     privilegedAuth?: { user: string; password: string };
     detectedVersion?: string;
     databaseMapping?: Array<{
@@ -81,7 +83,9 @@ async function restoreSingleDatabase(
             "--drop", // Drop collections before restoring, mirroring MySQL's --clean
         ];
 
-        if (sourceDb && targetDb && sourceDb !== targetDb) {
+        if (config.backupScope === "FULL_INSTANCE") {
+            log("Restoring full MongoDB instance, including users and custom roles", "info");
+        } else if (sourceDb && targetDb && sourceDb !== targetDb) {
             args.push("--nsFrom", `${sourceDb}.*`);
             args.push("--nsTo", `${targetDb}.*`);
             log(`Remapping database: ${sourceDb} -> ${targetDb}`, "info");
