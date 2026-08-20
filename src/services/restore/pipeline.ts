@@ -208,13 +208,22 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
                     ? parsedMetadataScope.data
                     : "SELECTED_DATABASES";
 
+                if (metadataScope === "FULL_INSTANCE" && !fullInstanceExpected) {
+                    throw new RestoreError(
+                        "This backup is a MongoDB Full Instance archive. Confirm the restore scope before continuing.",
+                        { executionId, sourcePath: file },
+                    );
+                }
+
                 if (fullInstanceExpected && metadataScope !== "FULL_INSTANCE") {
                     throw new RestoreError(
                         "The selected file is not confirmed as a MongoDB Full Instance backup. The restore was stopped before changing the target.",
                         { executionId, sourcePath: file },
                     );
                 }
-                backupScope = metadataScope === "FULL_INSTANCE" ? "FULL_INSTANCE" : undefined;
+                backupScope = fullInstanceExpected && metadataScope === "FULL_INSTANCE"
+                    ? "FULL_INSTANCE"
+                    : undefined;
 
                 if (metadata.archive?.formatVersion === 2) {
                     // Seekable archive - restored by byte range below, never by full
@@ -260,8 +269,9 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
                 }
             }
         } catch (e: unknown) {
+            if (e instanceof RestoreError) throw e;
+
             if (fullInstanceExpected) {
-                if (e instanceof RestoreError) throw e;
                 const cause = e instanceof Error ? e : new Error(String(e));
                 throw new RestoreError(
                     "Could not verify the MongoDB Full Instance backup metadata. The restore was stopped before changing the target.",

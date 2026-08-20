@@ -365,6 +365,29 @@ describe('runRestorePipeline', () => {
         expect(restoredConfig.targetDatabaseName).toBeUndefined();
     });
 
+    it('fails closed when Full Instance metadata lacks an explicit Full Instance request', async () => {
+        const storageAdapter = makeStorageAdapter();
+        const dbAdapter = makeDbAdapter();
+
+        prismaMock.adapterConfig.findUnique
+            .mockResolvedValueOnce(mockStorageConfig as any)
+            .mockResolvedValueOnce(mockMongoSourceConfig as any);
+        vi.mocked(registry.get)
+            .mockReturnValueOnce(storageAdapter as any)
+            .mockReturnValueOnce(dbAdapter as any);
+        fsMocks.readFile.mockResolvedValueOnce(JSON.stringify({
+            sourceType: 'mongodb',
+            backupScope: 'FULL_INSTANCE',
+        }));
+
+        await runRestorePipeline('exec-full-scope-unconfirmed', makeInput());
+
+        expect(dbAdapter.restore).not.toHaveBeenCalled();
+        expect(prismaMock.execution.update).toHaveBeenCalledWith(
+            expect.objectContaining({ data: expect.objectContaining({ status: 'Failed' }) }),
+        );
+    });
+
     it('fails closed when expected Full Instance metadata cannot be downloaded', async () => {
         const storageAdapter = makeStorageAdapter({
             download: vi.fn().mockResolvedValue(false),
