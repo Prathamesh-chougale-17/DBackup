@@ -37,6 +37,7 @@ import { computeRestoreValidity } from "./restore-validation";
 import { parseRestoreScope, normalizeRestoreScope } from "@/components/dashboard/storage/restore-scope";
 import { EncryptionKeyResolutionDialog, type KeyResolutionResult } from "@/components/common/encryption-key-resolution-dialog";
 import { keyOverrideBody, useEncryptionKeyRecovery, type KeyOverrideBody } from "@/hooks/use-encryption-key-recovery";
+import type { MongoDBBackupScope } from "@/lib/core/mongodb-backup-scope";
 
 interface DatabaseInfo {
     name: string;
@@ -75,6 +76,14 @@ interface ChainInfo {
     type: 'full' | 'incremental';
     index: number;
     deps: string[];
+}
+
+interface StorageAnalyzeResponse {
+    databases?: string[];
+    directories?: DirectoryAnalysis[];
+    sourceType?: string;
+    backupScope?: MongoDBBackupScope;
+    chain?: ChainInfo;
 }
 
 interface DirConfig {
@@ -133,6 +142,7 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
     const [analyzedDbs, setAnalyzedDbs] = useState<string[]>([]);
     const [dbConfig, setDbConfig] = useState<DbConfig[]>([]);
     const [backupSourceType, setBackupSourceType] = useState<string>("");
+    const [backupScope, setBackupScope] = useState<MongoDBBackupScope | undefined>();
     /** Why the backup could not be read, so the page explains itself instead of staying blank. */
     const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
@@ -203,6 +213,7 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
     const SERVER_ADAPTERS = ['mysql', 'mariadb', 'postgres', 'mongodb', 'mssql', 'azure-sql', 'redis', 'valkey', 'firebird'];
     const resolvedSourceType = backupSourceType || file?.sourceType || '';
     const isServerAdapter = SERVER_ADAPTERS.includes(resolvedSourceType.toLowerCase());
+    const isMongoFullInstance = resolvedSourceType.toLowerCase() === 'mongodb' && backupScope === 'FULL_INSTANCE';
     // Firebird's target field holds a filesystem path, not a database name - and since
     // Firebird has no way to list existing databases, the Overwrite/New badge is replaced
     // with a neutral "Unverified" indicator for this adapter.
@@ -373,6 +384,8 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
 
     const analyzeBackup = useCallback(async (file: FileInfo, resolvedKey?: KeyResolutionResult) => {
         setIsAnalyzing(true);
+        // Do not carry a destructive scope marker across a file change or failed re-analysis.
+        setBackupScope(undefined);
         try {
             const res = await fetch(`/api/storage/${destinationId}/analyze`, {
                 method: 'POST',
@@ -394,7 +407,12 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
 
             setAnalyzeError(null);
             {
-                const data = await res.json();
+                const data = await res.json() as StorageAnalyzeResponse;
+                setBackupScope(
+                    data.backupScope === 'FULL_INSTANCE' || data.backupScope === 'SELECTED_DATABASES'
+                        ? data.backupScope
+                        : undefined
+                );
                 if (data.sourceType) {
                     setBackupSourceType(data.sourceType);
                 }
@@ -633,7 +651,7 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
 
         try {
             let mapping = undefined;
-            if (analyzedDbs.length > 0) {
+            if (!isMongoFullInstance && analyzedDbs.length > 0) {
                 // The full list including deselected entries: an entry with selected:false
                 // is how the backend knows a database is NOT wanted. Sending only the
                 // selected ones would collapse "none selected" into an empty mapping,
@@ -665,10 +683,13 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                 // reports the untouched half as skipped.
                 scope: restoreScope,
                 targetSourceId: targetSource || undefined,
+                // The backend verifies this hint against the backup sidecar before it
+                // permits a destructive full-instance restore.
+                ...(backupScope ? { backupScope } : {}),
                 // Note: restoreMode only gates the non-server-adapter RadioGroup UI (which
                 // clears targetDbName on "overwrite"); the server-adapter Input paths set
                 // targetDbName directly, so its truthiness alone is the correct signal here.
-                targetDatabaseName: targetDbName || undefined,
+                targetDatabaseName: isMongoFullInstance ? undefined : targetDbName || undefined,
                 databaseMapping: mapping,
                 directoryMapping,
                 ...(excludePatterns.length > 0 ? { excludePatterns } : {}),
@@ -862,6 +883,9 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                                         {file.isEncrypted && (
                                             <Badge variant="outline" className="text-xs">Encrypted</Badge>
                                         )}
+                                        {isMongoFullInstance && (
+                                            <Badge variant="destructive" className="text-xs">Full Instance</Badge>
+                                        )}
                                         {/* Only shown for a narrowed scope, so it is clear why one half of a
                                             combined backup is missing from the page. */}
                                         {(!wantsDatabases || !wantsFiles) && (
@@ -992,8 +1016,26 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                                 </CardContent>
                             </Card>
 
+                            {isMongoFullInstance && (
+                                <Alert variant="destructive">
+                                    <ShieldAlert className="h-4 w-4" />
+                                    <AlertTitle>MongoDB Full Instance Restore</AlertTitle>
+                                    <AlertDescription className="space-y-2">
+                                        <p>
+                                            This restores every database in the archive, including MongoDB users and custom roles.
+                                            Database selection and renaming are unavailable for a Full Instance restore.
+                                        </p>
+                                        <p>
+                                            The restore uses <code>--drop</code>. Users and custom roles on the target are replaced by
+                                            the definitions in the archive, so authentication credentials may change. Make sure the credential DBackup uses will still be valid after
+                                            replacement, or the restore can stop part-way through.
+                                        </p>
+                                    </AlertDescription>
+                                </Alert>
+                            )}
+
                             {/* Database Mapping Card */}
-                            {targetSource && (
+                            {targetSource && !isMongoFullInstance && (
                                 <Card>
                                     <CardHeader>
                                         <div className="flex items-center justify-between">
@@ -1601,10 +1643,14 @@ export function RestoreClient({ canManageVault = false }: RestoreClientProps) {
                         <Card>
                             <CardContent className="p-4 space-y-3">
                                 <Alert variant="destructive" className="py-2">
-                                    <AlertTriangle className="h-4 w-4" />
-                                    <AlertTitle className="text-sm font-semibold ml-2">Warning</AlertTitle>
+                                    {isMongoFullInstance ? <ShieldAlert className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
+                                    <AlertTitle className="text-sm font-semibold ml-2">
+                                        {isMongoFullInstance ? 'Full Instance Restore Is Destructive' : 'Warning'}
+                                    </AlertTitle>
                                     <AlertDescription className="text-xs ml-2">
-                                        This action is irreversible. Ensure you have a backup of the target if needed.
+                                        {isMongoFullInstance
+                                            ? 'All databases in the archive are restored with --drop. Target MongoDB users and custom roles are replaced, so the credential DBackup is currently using may stop working.'
+                                            : 'This action is irreversible. Ensure you have a backup of the target if needed.'}
                                     </AlertDescription>
                                 </Alert>
 

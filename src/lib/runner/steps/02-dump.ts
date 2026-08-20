@@ -71,12 +71,17 @@ export async function stepExecuteDump(ctx: RunnerContext) {
         // Inject databases from Job (always takes precedence over source config).
         // An empty job selection means "backup all" - clear the source's default database
         // so each adapter's auto-discovery logic triggers instead of using the source default.
-        const jobDatabases: string[] = (() => {
+        const selectedJobDatabases: string[] = (() => {
             try {
                 const parsed = JSON.parse(job.databases || "[]");
                 return Array.isArray(parsed) ? parsed : [];
             } catch { return []; }
         })();
+        // A Full Instance dump ignores database selection. Clear legacy values here too so
+        // filenames and sidecar metadata describe what the archive actually contains.
+        const jobDatabases = sourceConfig.backupScope === "FULL_INSTANCE"
+            ? []
+            : selectedJobDatabases;
 
         // 3. Generate filename with timezone and custom pattern
         const dbNameRaw = sourceConfig.backupScope === "FULL_INSTANCE" || jobDatabases.length === 0

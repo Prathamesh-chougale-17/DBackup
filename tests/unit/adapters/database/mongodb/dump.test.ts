@@ -107,18 +107,42 @@ describe.each<HostKind>(["direct", "ssh"])("MongoDB dump over a %s host", (kind)
             ...baseConfig,
             database: ["shop", "analytics"],
             backupScope: "FULL_INSTANCE",
+            options: "--db narrowed --collection users --query={}",
         } as never, "/tmp/out.archive", host);
 
         expect(result.success).toBe(true);
         expect(host.calls.spawn).toHaveLength(1);
-        expect(host.calls.spawn[0]).toEqual(expect.arrayContaining([
+        expect(host.calls.spawn[0]).toEqual([
             "mongodump",
-            "--gzip",
+            "--host",
+            "mongo.internal",
+            "--port",
+            "27017",
+            "--username",
+            "root",
+            "--password",
+            "secret",
+            "--authenticationDatabase",
+            "admin",
             "--archive=/tmp/out.archive",
-        ]));
-        expect(host.calls.spawn[0]).not.toContain("--db");
+            "--gzip",
+        ]);
         expect(mockGetDatabases).not.toHaveBeenCalled();
         expect(mockCreateMultiDbTar).not.toHaveBeenCalled();
+    });
+
+    it("removes the database path from a legacy URI for a full instance", async () => {
+        const host = dumpHost(kind);
+
+        await dump({
+            ...baseConfig,
+            backupScope: "FULL_INSTANCE",
+            uri: "mongodb://legacy:pw@mongo.internal:27017/shop?authSource=admin&replicaSet=rs0",
+        } as never, "/tmp/out.archive", host);
+
+        expect(host.calls.spawn[0]).toContain(
+            "--uri=mongodb://legacy:pw@mongo.internal:27017/?authSource=admin&replicaSet=rs0",
+        );
     });
 
     it("packs several databases into a TAR", async () => {

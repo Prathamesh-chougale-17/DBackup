@@ -16,7 +16,7 @@ import { getDecompressionStream, CompressionType } from "@/lib/crypto/compressio
 import { LogEntry, LogLevel, LogType, RESTORE_STAGES } from "@/lib/core/logs";
 import { isMultiDbTar, readTarManifest } from "@/lib/adapters/database/common/tar-utils";
 import { logger } from "@/lib/logging/logger";
-import { wrapError, getErrorMessage } from "@/lib/logging/errors";
+import { wrapError, getErrorMessage, RestoreError } from "@/lib/logging/errors";
 import { verifyFileChecksum } from "@/lib/crypto/checksum";
 import { notify } from "@/services/notifications/system-notification-service";
 import { NOTIFICATION_EVENTS } from "@/lib/notifications";
@@ -26,6 +26,7 @@ import { processQueue } from "@/lib/execution/queue-manager";
 import type { RestoreInput } from "./types";
 import { resolveDecryptionKey } from "./smart-recovery";
 import { restoreArchiveSnapshot } from "./archive-restore";
+import { MongoDBBackupScopeSchema } from "@/lib/core/mongodb-backup-scope";
 
 const svcLog = logger.child({ service: "RestoreService" });
 
@@ -36,7 +37,16 @@ const svcLog = logger.child({ service: "RestoreService" });
  * State (executionId, log buffer, stage, progress) is shared across all phases via closures.
  */
 export async function runRestorePipeline(executionId: string, input: RestoreInput): Promise<void> {
-    const { storageConfigId, file, targetSourceId, targetDatabaseName, databaseMapping, privilegedAuth } = input;
+    const {
+        storageConfigId,
+        file,
+        backupScope: requestedBackupScope,
+        targetSourceId,
+        targetDatabaseName,
+        databaseMapping,
+        privilegedAuth,
+    } = input;
+    const fullInstanceExpected = requestedBackupScope === "FULL_INSTANCE";
     let tempFile: string | null = null;
     const restoreStartTime = Date.now();
     const abortController = registerExecution(executionId);
@@ -178,16 +188,33 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
         let seekableArchive = false;
         let backupScope: BackupMetadata['backupScope'] = undefined;
 
+        const tempMetaPath = path.join(getTempDir(), "meta_" + Date.now() + ".json");
         try {
             const metaRemotePath = file + ".meta.json";
-            const tempMetaPath = path.join(getTempDir(), "meta_" + Date.now() + ".json");
-
             const metaDownSuccess = await storageAdapter.download(sConf, metaRemotePath, tempMetaPath, () => {}).catch(() => false);
+
+            if (!metaDownSuccess && fullInstanceExpected) {
+                throw new RestoreError(
+                    "Full Instance restore requires its metadata sidecar. The restore was stopped before changing the target.",
+                    { executionId, sourcePath: file },
+                );
+            }
 
             if (metaDownSuccess) {
                 const metaContent = await fs.promises.readFile(tempMetaPath, 'utf-8');
-                const metadata = JSON.parse(metaContent);
-                backupScope = metadata.backupScope === "FULL_INSTANCE" ? "FULL_INSTANCE" : undefined;
+                const metadata = JSON.parse(metaContent) as BackupMetadata;
+                const parsedMetadataScope = MongoDBBackupScopeSchema.safeParse(metadata.backupScope);
+                const metadataScope = parsedMetadataScope.success
+                    ? parsedMetadataScope.data
+                    : "SELECTED_DATABASES";
+
+                if (fullInstanceExpected && metadataScope !== "FULL_INSTANCE") {
+                    throw new RestoreError(
+                        "The selected file is not confirmed as a MongoDB Full Instance backup. The restore was stopped before changing the target.",
+                        { executionId, sourcePath: file },
+                    );
+                }
+                backupScope = metadataScope === "FULL_INSTANCE" ? "FULL_INSTANCE" : undefined;
 
                 if (metadata.archive?.formatVersion === 2) {
                     // Seekable archive - restored by byte range below, never by full
@@ -202,7 +229,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
                     encryptionMeta = metadata.encryption;
                     log("Detected encrypted backup.", 'info');
                 }
-                if (!seekableArchive && metadata.compression && metadata.compression !== 'NONE') {
+                if (!seekableArchive && metadata.compression) {
                     compressionMeta = metadata.compression;
                     log(`Detected ${compressionMeta} compression.`, 'info');
                 }
@@ -231,10 +258,17 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
                         }
                     } catch { /* ignore connection tests during restore init */ }
                 }
-
-                await fs.promises.unlink(tempMetaPath).catch(() => {});
             }
         } catch (e: unknown) {
+            if (fullInstanceExpected) {
+                if (e instanceof RestoreError) throw e;
+                const cause = e instanceof Error ? e : new Error(String(e));
+                throw new RestoreError(
+                    "Could not verify the MongoDB Full Instance backup metadata. The restore was stopped before changing the target.",
+                    { executionId, sourcePath: file, cause },
+                );
+            }
+
             const message = e instanceof Error ? e.message : String(e);
             log(`Warning: Failed to check sidecar metadata: ${message}`, 'warning');
 
@@ -245,8 +279,25 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
             }
             if (file.endsWith('.gz')) compressionMeta = 'GZIP';
             if (file.endsWith('.br')) compressionMeta = 'BROTLI';
+        } finally {
+            await fs.promises.unlink(tempMetaPath).catch(() => {});
         }
         // --- END METADATA CHECK ---
+
+        if (backupScope === "FULL_INSTANCE") {
+            if (!sourceConfig || sourceConfig.adapterId !== "mongodb") {
+                throw new RestoreError(
+                    "MongoDB Full Instance backups can only be restored to a MongoDB target.",
+                    { executionId, sourcePath: file },
+                );
+            }
+            if (seekableArchive) {
+                throw new RestoreError(
+                    "MongoDB Full Instance backups must use the native archive format.",
+                    { executionId, sourcePath: file },
+                );
+            }
+        }
 
         // --- SEEKABLE (v2) ARCHIVE: restore by byte range, never by full download ---
         // The archive is opened remotely; on adapters with ranged reads only the selected
@@ -408,7 +459,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
         // --- END DECRYPTION EXECUTION ---
 
         // --- DECOMPRESSION EXECUTION ---
-        if (compressionMeta && compressionMeta !== 'NONE') {
+        if (compressionMeta) {
             try {
                 log(`Decompressing backup (${compressionMeta})...`, 'info');
                 setStage(RESTORE_STAGES.DECOMPRESSING);
@@ -484,7 +535,8 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
         const dbConf = await resolveAdapterConfig(sourceConfig) as any;
         // Inject adapterId as type for Dialect selection
         dbConf.type = sourceConfig.adapterId;
-        if (sourceConfig.adapterId === "mongodb" && backupScope === "FULL_INSTANCE") {
+        const isMongoFullInstance = sourceConfig.adapterId === "mongodb" && backupScope === "FULL_INSTANCE";
+        if (isMongoFullInstance) {
             dbConf.backupScope = "FULL_INSTANCE";
         }
 
@@ -510,7 +562,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
         }
 
         // Override database name if provided
-        if (targetDatabaseName) {
+        if (!isMongoFullInstance && targetDatabaseName) {
             if (sourceConfig.adapterId === 'sqlite' && dbConf.path) {
                 const dir = path.dirname(dbConf.path);
                 dbConf.path = path.join(dir, targetDatabaseName);
@@ -521,7 +573,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
             }
         }
 
-        if (databaseMapping) {
+        if (!isMongoFullInstance && databaseMapping) {
             dbConf.databaseMapping = databaseMapping;
 
             // For SQLite: getDatabases() returns the filename, so a mapping entry means

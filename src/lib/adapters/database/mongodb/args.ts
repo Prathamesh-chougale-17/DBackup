@@ -133,6 +133,30 @@ export function buildConnectionArgs(config: AnyMongoConfig): string[] {
 }
 
 /**
+ * Connection flags for a dump that must cover the whole MongoDB instance.
+ *
+ * A database in a legacy inline URI acts like a database selection for
+ * mongodump. Remove that path while keeping its authentication meaning and
+ * every existing URI option intact.
+ */
+export function buildFullInstanceConnectionArgs(config: AnyMongoConfig): string[] {
+    if (!config.uri) return buildConnectionArgs(config);
+
+    const match = /^(mongodb(?:\+srv)?:\/\/)([^/?#]+)(?:\/([^?#]*))?(\?[^#]*)?(#.*)?$/i.exec(config.uri);
+    if (!match) return buildConnectionArgs(config);
+
+    const [, scheme, authority, database = "", query = "", fragment = ""] = match;
+    const queryBody = query.startsWith("?") ? query.slice(1) : query;
+    const normalizedQuery = queryBody ? `?${queryBody}` : "";
+    const hasAuthSource = /(?:^|[&;])authSource=/i.test(queryBody);
+    const authSource = database && !hasAuthSource
+        ? `${queryBody ? "&" : "?"}authSource=${database}`
+        : "";
+
+    return [`--uri=${scheme}${authority}/${normalizedQuery}${authSource}${fragment}`];
+}
+
+/**
  * Connection arguments for mongosh.
  *
  * mongosh takes a connection string as a positional argument and has no `--uri`

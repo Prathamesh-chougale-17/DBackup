@@ -7,6 +7,7 @@ import { PERMISSIONS } from "@/lib/auth/permissions";
 import { logger } from "@/lib/logging/logger";
 import { wrapError, getErrorMessage } from "@/lib/logging/errors";
 import prisma from "@/lib/prisma";
+import { MongoDBBackupScopeSchema } from "@/lib/core/mongodb-backup-scope";
 
 const log = logger.child({ route: "storage/restore" });
 
@@ -23,10 +24,17 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
         checkPermissionWithContext(ctx, PERMISSIONS.STORAGE.RESTORE);
 
         const body = await req.json();
-        const { file, scope, targetSourceId, targetDatabaseName, databaseMapping, directoryMapping, excludePatterns, privilegedAuth, profileIdOverride } = body;
+        const { file, scope, backupScope, targetSourceId, targetDatabaseName, databaseMapping, directoryMapping, excludePatterns, privilegedAuth, profileIdOverride } = body;
 
         if (!file || typeof file !== 'string' || file.includes('..') || file.startsWith('/')) {
             return NextResponse.json({ error: "Invalid file path" }, { status: 400 });
+        }
+
+        const parsedBackupScope = backupScope === undefined
+            ? undefined
+            : MongoDBBackupScopeSchema.safeParse(backupScope);
+        if (parsedBackupScope && !parsedBackupScope.success) {
+            return NextResponse.json({ error: "Invalid MongoDB backup scope" }, { status: 400 });
         }
 
         const user = await prisma.user.findUnique({ where: { id: ctx.userId }, select: { name: true } });
@@ -34,6 +42,7 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
         const result = await restoreService.restore({
             storageConfigId: params.id,
             file,
+            backupScope: parsedBackupScope?.data,
             // Anything unrecognised restores everything, same as omitting it.
             scope: scope === 'databases' || scope === 'files' ? scope : undefined,
             targetSourceId: targetSourceId || undefined,

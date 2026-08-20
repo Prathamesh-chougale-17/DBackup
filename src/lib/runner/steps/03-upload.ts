@@ -3,6 +3,7 @@ import path from "path";
 import { describeBackupFromMetadata } from "@/services/storage/backup-file-fields";
 import fs from "fs/promises";
 import prisma from "@/lib/prisma";
+import { normalizeMongoDBBackupScope } from "@/lib/core/mongodb-backup-scope";
 import { createReadStream, createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
 import { BackupMetadata } from "@/lib/core/interfaces";
@@ -163,7 +164,7 @@ export async function stepUpload(ctx: RunnerContext) {
             names: Array.isArray(ctx.metadata?.names) ? ctx.metadata.names : undefined
         },
         ...(job.source?.adapterId === "mongodb"
-            ? { backupScope: job.backupScope ?? "SELECTED_DATABASES" }
+            ? { backupScope: normalizeMongoDBBackupScope(job.backupScope) }
             : {}),
         engineVersion: ctx.metadata?.engineVersion,
         engineEdition: ctx.metadata?.engineEdition,

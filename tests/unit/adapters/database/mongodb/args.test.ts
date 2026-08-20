@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
     buildConnectionArgs,
+    buildFullInstanceConnectionArgs,
     buildConnectionUri,
     buildShellConnectionArgs,
     maskSecrets,
@@ -145,6 +146,24 @@ describe("buildConnectionArgs", () => {
         const args = buildConnectionArgs({ ...withAuth, host: "rs1.example.com,rs2.example.com" } as never);
         expect(args).toEqual([
             "--uri=mongodb://root:s3cr3t@rs1.example.com:27017,rs2.example.com:27017/?authSource=admin",
+        ]);
+    });
+});
+
+describe("buildFullInstanceConnectionArgs", () => {
+    it("removes a database path while preserving credentials and URI options", () => {
+        const uri = "mongodb://legacy:pw@mongo.internal:27017/shop?authSource=admin&replicaSet=rs0";
+
+        expect(buildFullInstanceConnectionArgs({ ...withAuth, uri } as never)).toEqual([
+            "--uri=mongodb://legacy:pw@mongo.internal:27017/?authSource=admin&replicaSet=rs0",
+        ]);
+    });
+
+    it("preserves the path database as authSource when the URI relied on that default", () => {
+        const uri = "mongodb+srv://legacy:pw@cluster.example.com/app?retryWrites=true";
+
+        expect(buildFullInstanceConnectionArgs({ ...withAuth, uri } as never)).toEqual([
+            "--uri=mongodb+srv://legacy:pw@cluster.example.com/?retryWrites=true&authSource=app",
         ]);
     });
 });

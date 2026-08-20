@@ -114,6 +114,13 @@ const mockSourceConfig = {
     updatedAt: new Date(),
 };
 
+const mockMongoSourceConfig = {
+    ...mockSourceConfig,
+    adapterId: 'mongodb',
+    config: JSON.stringify({ host: 'localhost', database: ['legacy-selection'] }),
+    name: 'MongoDB',
+};
+
 function makeInput(overrides: Partial<RestoreInput> = {}): RestoreInput {
     return {
         storageConfigId: 'storage-1',
@@ -301,6 +308,78 @@ describe('runRestorePipeline', () => {
 
         const restoredConfig = dbAdapter.restore.mock.calls[0][0];
         expect(restoredConfig.privilegedAuth).toEqual(privilegedAuth);
+    });
+
+    it('restores a confirmed MongoDB Full Instance backup without database mapping', async () => {
+        const storageAdapter = makeStorageAdapter();
+        const dbAdapter = makeDbAdapter();
+
+        prismaMock.adapterConfig.findUnique
+            .mockResolvedValueOnce(mockStorageConfig as any)
+            .mockResolvedValueOnce(mockMongoSourceConfig as any);
+        vi.mocked(registry.get)
+            .mockReturnValueOnce(storageAdapter as any)
+            .mockReturnValueOnce(dbAdapter as any);
+        fsMocks.readFile.mockResolvedValueOnce(JSON.stringify({
+            sourceType: 'mongodb',
+            backupScope: 'FULL_INSTANCE',
+        }));
+
+        await runRestorePipeline('exec-full-instance', makeInput({
+            backupScope: 'FULL_INSTANCE',
+            targetDatabaseName: 'renamed',
+            databaseMapping: [{ originalName: 'one', targetName: 'two', selected: true }],
+        }));
+
+        expect(dbAdapter.restore).toHaveBeenCalledOnce();
+        const restoredConfig = dbAdapter.restore.mock.calls[0][0];
+        expect(restoredConfig.backupScope).toBe('FULL_INSTANCE');
+        expect(restoredConfig.databaseMapping).toBeUndefined();
+        expect(restoredConfig.targetDatabaseName).toBeUndefined();
+    });
+
+    it('fails closed when expected Full Instance metadata cannot be downloaded', async () => {
+        const storageAdapter = makeStorageAdapter({
+            download: vi.fn().mockResolvedValue(false),
+        });
+        const dbAdapter = makeDbAdapter();
+
+        prismaMock.adapterConfig.findUnique
+            .mockResolvedValueOnce(mockStorageConfig as any)
+            .mockResolvedValueOnce(mockMongoSourceConfig as any);
+        vi.mocked(registry.get)
+            .mockReturnValueOnce(storageAdapter as any)
+            .mockReturnValueOnce(dbAdapter as any);
+
+        await runRestorePipeline('exec-full-no-meta', makeInput({ backupScope: 'FULL_INSTANCE' }));
+
+        expect(dbAdapter.restore).not.toHaveBeenCalled();
+        expect(prismaMock.execution.update).toHaveBeenCalledWith(
+            expect.objectContaining({ data: expect.objectContaining({ status: 'Failed' }) }),
+        );
+    });
+
+    it('fails closed when the sidecar does not confirm Full Instance scope', async () => {
+        const storageAdapter = makeStorageAdapter();
+        const dbAdapter = makeDbAdapter();
+
+        prismaMock.adapterConfig.findUnique
+            .mockResolvedValueOnce(mockStorageConfig as any)
+            .mockResolvedValueOnce(mockMongoSourceConfig as any);
+        vi.mocked(registry.get)
+            .mockReturnValueOnce(storageAdapter as any)
+            .mockReturnValueOnce(dbAdapter as any);
+        fsMocks.readFile.mockResolvedValueOnce(JSON.stringify({
+            sourceType: 'mongodb',
+            backupScope: 'SELECTED_DATABASES',
+        }));
+
+        await runRestorePipeline('exec-full-scope-mismatch', makeInput({ backupScope: 'FULL_INSTANCE' }));
+
+        expect(dbAdapter.restore).not.toHaveBeenCalled();
+        expect(prismaMock.execution.update).toHaveBeenCalledWith(
+            expect.objectContaining({ data: expect.objectContaining({ status: 'Failed' }) }),
+        );
     });
 
     it('logs the multi-DB TAR manifest when archive is detected', async () => {

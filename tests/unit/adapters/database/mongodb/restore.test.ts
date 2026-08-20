@@ -121,6 +121,20 @@ describe.each<HostKind>(["direct", "ssh"])("MongoDB restore over a %s host", (ki
             expect(argv).not.toContain("--nsTo");
         });
 
+        it("uses privileged credentials for the restore command", async () => {
+            const host = restoreHost(kind);
+
+            const result = await restore({
+                ...baseConfig,
+                privilegedAuth: { user: "restore-admin", password: "restore-secret" },
+            } as never, "/tmp/full-instance.archive", host);
+
+            expect(result.success).toBe(true);
+            const argv = host.calls.spawn[0];
+            expect(argv[argv.indexOf("--username") + 1]).toBe("restore-admin");
+            expect(argv[argv.indexOf("--password") + 1]).toBe("restore-secret");
+        });
+
         it("fails when mongorestore exits non-zero", async () => {
             const result = await restore(baseConfig as never, "/tmp/in.archive", restoreHost(kind, { code: 1 }));
 

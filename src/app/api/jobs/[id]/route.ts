@@ -4,6 +4,7 @@ import { jobService } from "@/services/jobs/job-service";
 import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-control";
 import { PERMISSIONS } from "@/lib/auth/permissions";
 import { MongoDBBackupScopeSchema } from "@/lib/core/mongodb-backup-scope";
+import { ValidationError } from "@/lib/logging/errors";
 
 export async function DELETE(
     req: NextRequest,
@@ -86,6 +87,12 @@ export async function PUT(
 
         return NextResponse.json(updatedJob);
     } catch (error: unknown) {
+        if (error instanceof ValidationError) {
+            return NextResponse.json(
+                { error: error.message, details: error.details },
+                { status: 400 }
+            );
+        }
         const message = error instanceof Error ? error.message : "Failed to update job";
         const status = message.includes("already exists") ? 409 : 500;
         return NextResponse.json({ error: message }, { status });

@@ -1,4 +1,5 @@
 import type { TriggerInfo } from "@/lib/runner";
+import type { MongoDBBackupScope } from "@/lib/core/mongodb-backup-scope";
 
 /** Selects a directory entry (from a seekable v2 archive) to restore, and where to. */
 export interface DirectoryRestoreMapping {
@@ -29,6 +30,11 @@ export type RestoreScope = 'all' | 'databases' | 'files';
 export interface RestoreInput {
     storageConfigId: string;
     file: string;
+    /**
+     * Scope reported by the backup analyzer. Full Instance restores require the
+     * downloaded sidecar to confirm this value before any restore command runs.
+     */
+    backupScope?: MongoDBBackupScope;
     /** Defaults to 'all', which is what every request written before scopes existed means. */
     scope?: RestoreScope;
     /** Optional - a directory-only archive has no database target. Required whenever the

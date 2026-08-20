@@ -171,6 +171,27 @@ describe("POST /api/storage/[id]/analyze - combined (manifest v2) archives", () 
         expect(body.directories).toBeUndefined();
     });
 
+    it("identifies a MongoDB full-instance backup from its metadata sidecar", async () => {
+        mockRead.mockResolvedValue(JSON.stringify({
+            sourceType: "mongodb",
+            backupScope: "FULL_INSTANCE",
+            databases: { names: ["application_db"] },
+        }));
+
+        const res = await POST(
+            createRequest({ file: "backups/job1/mongodb.archive", type: "mongodb" }),
+            createProps()
+        );
+        const body = await res.json();
+
+        expect(body).toEqual({
+            databases: ["application_db"],
+            backupScope: "FULL_INSTANCE",
+            sourceType: "mongodb",
+        });
+        expect(mockDownload).not.toHaveBeenCalled();
+    });
+
     it("opens the backup with the profile the user picked after being asked", async () => {
         // The answer to a key prompt has to reach the server, or choosing a profile does
         // nothing and the same prompt comes straight back.

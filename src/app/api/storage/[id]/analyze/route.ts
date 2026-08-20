@@ -83,12 +83,17 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
                 const metaPath = file + ".meta.json";
                 const metaContent = await storageAdapter.read(sConf, metaPath);
                 if (metaContent) {
-                    const meta = JSON.parse(metaContent);
+                    const meta = JSON.parse(metaContent) as BackupMetadata;
+                    // Older and selected-database backups intentionally omit this from the
+                    // response. Only the destructive full-instance mode changes the restore UI.
+                    const backupScope = meta.backupScope === "FULL_INSTANCE"
+                        ? { backupScope: "FULL_INSTANCE" as const, sourceType: "mongodb" }
+                        : {};
 
-                    if ((meta as BackupMetadata).archive?.formatVersion === 2) {
-                        seekableArchiveMeta = meta as BackupMetadata;
+                    if (meta.archive?.formatVersion === 2) {
+                        seekableArchiveMeta = meta;
                         const summary = await archiveIndexService.summarize(params.id, file, seekableArchiveMeta, keyOverride);
-                        if (summary) return NextResponse.json(summary);
+                        if (summary) return NextResponse.json({ ...summary, ...backupScope });
                         // Sidecar missing or unreadable. Deliberately NOT falling through to
                         // the legacy shortcuts below - they only understand databases and
                         // would silently drop this archive's directory sources. The embedded
@@ -97,22 +102,23 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
 
                     if (!seekableArchiveMeta && !(meta.combined && meta.combined.directorySources > 0)) {
                         if (meta.databases) {
-                             if (Array.isArray(meta.databases.names) && meta.databases.names.length > 0) {
-                                  return NextResponse.json({ databases: meta.databases.names });
+                             if (!Array.isArray(meta.databases) && Array.isArray(meta.databases.names) && meta.databases.names.length > 0) {
+                                  return NextResponse.json({ databases: meta.databases.names, ...backupScope });
                              }
                              if (Array.isArray(meta.databases) && meta.databases.length > 0) {
-                                  return NextResponse.json({ databases: meta.databases });
+                                  return NextResponse.json({ databases: meta.databases, ...backupScope });
                              }
                         }
                         // For multi-DB TAR archives, return the embedded database list
-                        if (meta.multiDb?.databases?.length > 0) {
-                            return NextResponse.json({ databases: meta.multiDb.databases });
+                        const multiDbDatabases = meta.multiDb?.databases;
+                        if (multiDbDatabases && multiDbDatabases.length > 0) {
+                            return NextResponse.json({ databases: multiDbDatabases, ...backupScope });
                         }
                         // For server-based adapters (not sqlite) with empty names,
                         // use the source type to signal the frontend that this is a DB restore
                         const serverAdapters = ['mysql', 'mariadb', 'postgres', 'mongodb', 'mssql', 'azure-sql', 'redis', 'valkey', 'firebird'];
                         if (meta.sourceType && serverAdapters.includes(meta.sourceType.toLowerCase())) {
-                            return NextResponse.json({ databases: [], sourceType: meta.sourceType });
+                            return NextResponse.json({ databases: [], sourceType: meta.sourceType, ...backupScope });
                         }
                     }
                 }

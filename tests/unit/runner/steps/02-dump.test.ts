@@ -158,6 +158,28 @@ describe('stepExecuteDump', () => {
         expect(ctx.metadata.count).toBe(3);
     });
 
+    it('ignores stale selected databases when calculating Full Instance metadata', async () => {
+        const { resolveAdapterConfig } = await import('@/lib/adapters/config-resolver');
+        (resolveAdapterConfig as ReturnType<typeof vi.fn>).mockResolvedValue({
+            host: 'localhost',
+            database: 'source-default',
+        });
+        const ctx = makeCtx();
+        (ctx.job as any).source.adapterId = 'mongodb';
+        (ctx.job as any).backupScope = 'FULL_INSTANCE';
+        (ctx.job as any).databases = JSON.stringify(['old-selection']);
+        (ctx.sourceAdapter as any).getDatabases = vi.fn().mockResolvedValue(['current-a', 'current-b']);
+
+        await stepExecuteDump(ctx);
+
+        const dumpConfig = (ctx.sourceAdapter!.dump as ReturnType<typeof vi.fn>).mock.calls[0][0];
+        expect(dumpConfig.backupScope).toBe('FULL_INSTANCE');
+        expect(dumpConfig.database).toEqual([]);
+        expect(ctx.metadata.names).toEqual(['current-a', 'current-b']);
+        expect(ctx.metadata.count).toBe(2);
+        expect(ctx.metadata.label).toBe('2 DBs (fetched)');
+    });
+
     it('handles getDatabases failure gracefully (warning logged, dump continues)', async () => {
         const ctx = makeCtx();
         (ctx.job as any).databases = '[]';

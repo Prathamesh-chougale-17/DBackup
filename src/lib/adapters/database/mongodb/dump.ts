@@ -1,5 +1,5 @@
 import type { ExecutionHost } from "@/lib/transport";
-import { MONGODUMP, buildConnectionArgs, maskSecrets } from "./args";
+import { MONGODUMP, buildConnectionArgs, buildFullInstanceConnectionArgs, maskSecrets } from "./args";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import fs from "fs/promises";
@@ -33,12 +33,10 @@ async function dumpFullInstance(
 
     await host.captureOutput(outputPath, {}, async (hostPath) => {
         const args = [
-            ...buildConnectionArgs(config),
+            ...buildFullInstanceConnectionArgs(config),
             `--archive=${hostPath}`,
             "--gzip",
         ];
-
-        if (config.options) args.push(...parseOptionString(config.options));
 
         log("Dumping full MongoDB instance", "info", "command", `${mongodump} ${maskSecrets(args, config.password)}`);
 

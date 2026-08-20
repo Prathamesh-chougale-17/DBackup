@@ -168,6 +168,31 @@ For Atlas clusters, create a user with "Backup Admin" role in the Atlas UI.
 
 ## Backup Process
 
+### Backup Scope
+
+MongoDB jobs provide two backup scopes:
+
+- **Selected Databases** is the default and preserves the existing behavior. Choose one or more databases in the job. Restore can select individual databases and map them to different target names.
+- **Full Instance** runs one native `mongodump` archive for the server. It includes every database available to the backup user, plus MongoDB users and custom roles. The database selector is hidden because this scope cannot be narrowed to individual databases.
+
+Existing jobs and backup files without scope metadata are always treated as **Selected Databases**.
+
+Full Instance executes the equivalent of:
+
+```bash
+mongodump <connection arguments> --archive=<path> --gzip
+```
+
+MongoDB's normal `mongodump` rules still apply. For example, server-local replication data in the `local` database is not a portable part of an instance backup.
+
+::: warning Permissions
+Use a credential with the `backup` role on `admin`. Without sufficient access to the `admin` database, the archive may not contain the users and custom roles needed for a complete instance restore.
+:::
+
+::: warning Replica Set Consistency
+Full Instance is a logical dump and currently does not add `--oplog`. On an active replica set, writes can continue while collections are being dumped, so the archive is not a point-in-time-consistent snapshot. Use a maintenance window or MongoDB's coordinated snapshot tooling when point-in-time consistency is required.
+:::
+
 ### Direct Mode
 
 DBackup uses `mongodump` which creates a binary BSON dump:
@@ -358,8 +383,25 @@ To restore a MongoDB backup:
 2. Find your backup file
 3. Click **Restore**
 4. Select target database configuration
-5. Optionally map database names
+5. For a **Selected Databases** backup, optionally select and map database names
 6. Confirm and monitor progress
+
+For a **Full Instance** backup, DBackup hides database mapping and restores the complete native archive.
+
+### Full Instance Restore Safety
+
+A Full Instance restore is destructive. It runs `mongorestore` with `--drop` and replaces the target's MongoDB users and custom roles with the definitions from the backup. Authentication credentials on the target can therefore change during the restore.
+
+The credential DBackup uses must continue to work after those users are replaced. The safest approach is to use a restore administrator that exists both on the target and in the backup with the same username, password, authentication database, and required restore permissions. Otherwise MongoDB can reject new connections part-way through the restore, leaving the target only partially restored.
+
+Before starting:
+
+1. Stop applications that write to the target.
+2. Back up the target instance or use a disposable restore target.
+3. Confirm that the DBackup target credential will remain valid after the source users and roles are restored.
+4. Keep the target MongoDB version compatible with the backup version.
+
+After the restore succeeds, verify application data, users, and custom roles before directing production traffic to the target.
 
 ### Restore Options
 

@@ -6,6 +6,7 @@ import { LogLevel, LogType } from "@/lib/core/logs";
 import { MongoDBConfig } from "@/lib/adapters/definitions";
 import path from "path";
 import type { MongoDBBackupScope } from "@/lib/core/mongodb-backup-scope";
+import { AdapterError } from "@/lib/logging/errors";
 import {
     isMultiDbTar,
     extractSelectedDatabases,
@@ -72,19 +73,27 @@ async function restoreSingleDatabase(
     log: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
 ): Promise<void> {
     const mongorestore = await host.which(...MONGORESTORE);
+    const usageConfig: MongoDBConfig = { ...config };
+    if (config.privilegedAuth) {
+        usageConfig.user = config.privilegedAuth.user;
+        usageConfig.password = config.privilegedAuth.password;
+    }
 
     // mongorestore reads the archive from a path, so it is staged onto the
     // execution host. On a direct host that is the original file with no copy.
     await host.stageInput(sourcePath, {}, async (stagedPath) => {
         const args = [
-            ...buildConnectionArgs(config),
+            ...buildConnectionArgs(usageConfig),
             `--archive=${stagedPath}`,
             "--gzip",
             "--drop", // Drop collections before restoring, mirroring MySQL's --clean
         ];
 
         if (config.backupScope === "FULL_INSTANCE") {
-            log("Restoring full MongoDB instance, including users and custom roles", "info");
+            log(
+                "Restoring the full MongoDB instance replaces all databases, users and custom roles. The restore credential must also exist in the backup with matching credentials.",
+                "warning",
+            );
         } else if (sourceDb && targetDb && sourceDb !== targetDb) {
             args.push("--nsFrom", `${sourceDb}.*`);
             args.push("--nsTo", `${targetDb}.*`);
@@ -93,7 +102,7 @@ async function restoreSingleDatabase(
             args.push("--nsInclude", `${targetDb}.*`);
         }
 
-        log("Restoring database", "info", "command", `${mongorestore} ${maskSecrets(args, config.password)}`);
+        log("Restoring database", "info", "command", `${mongorestore} ${maskSecrets(args, usageConfig.password)}`);
 
         const proc = await host.spawn([mongorestore, ...args]);
         proc.stdout.on("data", () => { /* mongorestore writes progress to stderr */ });
@@ -104,7 +113,9 @@ async function restoreSingleDatabase(
 
         const { code, signal } = await proc.exit();
         if (code !== 0) {
-            throw new Error(
+            throw new AdapterError(
+                "mongodb",
+                "restore",
                 `mongorestore exited with code ${code ?? "null"}${signal ? ` (signal: ${signal})` : ""}`,
             );
         }

@@ -4,7 +4,7 @@ import { getAuthContext, checkPermissionWithContext } from "@/lib/auth/access-co
 import { PERMISSIONS } from "@/lib/auth/permissions";
 import { jobService } from "@/services/jobs/job-service";
 import { logger } from "@/lib/logging/logger";
-import { wrapError } from "@/lib/logging/errors";
+import { ValidationError, wrapError } from "@/lib/logging/errors";
 import { Cron } from "croner";
 import prisma from "@/lib/prisma";
 import { MongoDBBackupScopeSchema } from "@/lib/core/mongodb-backup-scope";
@@ -110,6 +110,12 @@ export async function POST(req: NextRequest) {
 
         return NextResponse.json(newJob, { status: 201 });
     } catch (error: unknown) {
+        if (error instanceof ValidationError) {
+            return NextResponse.json(
+                { error: error.message, details: error.details },
+                { status: 400 }
+            );
+        }
         log.error("Create job error", {}, wrapError(error));
         const message = error instanceof Error ? error.message : "Failed to create job";
         const status = message.includes("already exists") ? 409 : 500;
