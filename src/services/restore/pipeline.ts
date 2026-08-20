@@ -229,7 +229,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
                     encryptionMeta = metadata.encryption;
                     log("Detected encrypted backup.", 'info');
                 }
-                if (!seekableArchive && metadata.compression) {
+                if (!seekableArchive && metadata.compression && metadata.compression !== 'NONE') {
                     compressionMeta = metadata.compression;
                     log(`Detected ${compressionMeta} compression.`, 'info');
                 }
@@ -459,7 +459,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
         // --- END DECRYPTION EXECUTION ---
 
         // --- DECOMPRESSION EXECUTION ---
-        if (compressionMeta) {
+        if (compressionMeta === 'GZIP' || compressionMeta === 'BROTLI') {
             try {
                 log(`Decompressing backup (${compressionMeta})...`, 'info');
                 setStage(RESTORE_STAGES.DECOMPRESSING);

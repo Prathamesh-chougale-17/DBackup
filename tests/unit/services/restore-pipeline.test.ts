@@ -7,6 +7,7 @@ import * as tarUtils from '@/lib/adapters/database/common/tar-utils';
 import * as abortModule from '@/lib/execution/abort';
 import { PassThrough } from 'stream';
 import type { RestoreInput } from '@/services/restore/types';
+import { RESTORE_STAGES, type LogEntry } from '@/lib/core/logs';
 
 // Hoisted so the same vi.fn() instances land in both the mock factory and test assertions.
 const fsMocks = vi.hoisted(() => ({
@@ -228,6 +229,32 @@ describe('runRestorePipeline', () => {
         expect(decomp.getDecompressionStream).toHaveBeenCalledWith('GZIP');
         // Secondary: execution was updated (completed – success or failed depending on stream env)
         expect(prismaMock.execution.update).toHaveBeenCalled();
+    });
+
+    it('treats NONE compression metadata as an uncompressed backup', async () => {
+        const storageAdapter = makeStorageAdapter();
+        const dbAdapter = makeDbAdapter();
+
+        prismaMock.adapterConfig.findUnique
+            .mockResolvedValueOnce(mockStorageConfig as any)
+            .mockResolvedValueOnce(mockSourceConfig as any);
+        vi.mocked(registry.get)
+            .mockReturnValueOnce(storageAdapter as any)
+            .mockReturnValueOnce(dbAdapter as any);
+        fsMocks.readFile.mockResolvedValueOnce(JSON.stringify({ compression: 'NONE' }));
+
+        await runRestorePipeline('exec-no-compression', makeInput());
+
+        const finalUpdate = prismaMock.execution.update.mock.calls.at(-1)![0];
+        const logs = JSON.parse(finalUpdate.data.logs as string) as LogEntry[];
+
+        expect(logs.map((entry) => entry.message)).not.toContain('Detected NONE compression.');
+        expect(logs.some((entry) => entry.stage === RESTORE_STAGES.DECOMPRESSING)).toBe(false);
+        expect(decomp.getDecompressionStream).not.toHaveBeenCalled();
+        expect(dbAdapter.restore).toHaveBeenCalledOnce();
+        expect(prismaMock.execution.update).toHaveBeenCalledWith(
+            expect.objectContaining({ data: expect.objectContaining({ status: 'Success' }) }),
+        );
     });
 
     it('logs a warning but continues when version detection throws', async () => {

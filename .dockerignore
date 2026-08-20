@@ -5,6 +5,8 @@ node_modules
 # Next.js build output
 .next
 out
+custom-server.js
+*.tsbuildinfo
 
 # Local test infrastructure (pnpm test:ui), including its own .next cache
 .test
@@ -12,12 +14,32 @@ out
 # Production folders (should be volume mounted, not baked into image)
 backups
 storage
+data
 db/*.db
 db/*.db-journal
+prisma/*.db
+prisma/*.db-*
+
+# Local test and canary data
+.canary
+.ssh-test
+**/.ssh
+
+# Certificates and private keys
+**/*.key
+**/*.pem
+**/*.crt
+**/*.cer
+**/*.p12
+**/*.pfx
+**/*.ppk
+**/id_rsa
+**/id_dsa
+**/id_ecdsa
+**/id_ed25519
 
 # Environment variables
-.env*.local
-.env
+.env*
 
 # Version control
 .git
@@ -29,6 +51,9 @@ db/*.db-journal
 Dockerfile
 docker-compose*.yml
 .dockerignore
+.codex-docker-context
+.docker-build-context*
+.docker-context*
 
 # IDEs
 .vscode

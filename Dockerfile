@@ -132,10 +132,9 @@ RUN printf '#!/bin/sh\nexec /usr/share/dotnet/dotnet /opt/sqlpackage/sqlpackage.
     chmod +x /usr/local/bin/sqlpackage && \
     sqlpackage /version
 
-# Enable corepack for pnpm support and symlink PostgreSQL 18 binaries
+# Symlink PostgreSQL 18 binaries into PATH.
 # On Debian with PGDG, pg binaries live under /usr/lib/postgresql/18/bin/
-RUN corepack enable && corepack prepare pnpm@10.29.3 --activate && \
-    ln -sf /usr/lib/postgresql/18/bin/pg_dump /usr/local/bin/pg_dump && \
+RUN ln -sf /usr/lib/postgresql/18/bin/pg_dump /usr/local/bin/pg_dump && \
     ln -sf /usr/lib/postgresql/18/bin/pg_restore /usr/local/bin/pg_restore && \
     ln -sf /usr/lib/postgresql/18/bin/psql /usr/local/bin/psql
 
@@ -143,39 +142,148 @@ RUN corepack enable && corepack prepare pnpm@10.29.3 --activate && \
 RUN pg_dump --version | grep -q 'PostgreSQL) 18\.' || \
     (echo "ERROR: pg_dump version validation failed! Check PostgreSQL 18 client package." && exit 1)
 
-# 1. Install Dependencies
-FROM base AS deps
+# Keep pnpm and its cross-platform Corepack cache out of the runtime image.
+FROM base AS target-build-base
+RUN corepack enable && corepack prepare pnpm@10.29.3 --activate
+
+# Install target-platform dependencies only for native runtime payloads.
+FROM target-build-base AS deps
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
-RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
+RUN --mount=type=cache,id=pnpm-${TARGETARCH},target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 
-# 2. Builder Phase
-FROM base AS builder
+# Install only the lock-resolved Prisma CLI and its runtime dependencies.
+FROM deps AS prisma-cli
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+RUN --mount=type=cache,id=pnpm-${TARGETARCH},target=/root/.local/share/pnpm/store \
+    PRISMA_VERSION="$(node -p 'require("/app/node_modules/prisma/package.json").version')" && \
+    pnpm add --global "prisma@${PRISMA_VERSION}" && \
+    prisma --version
+
+# Generate the target-platform Prisma client and Sharp native packages. The full
+# dependency tree remains in this disposable stage and never reaches the image.
+FROM deps AS target-native
+COPY prisma/schema.prisma ./prisma/schema.prisma
+RUN pnpm prisma generate && \
+    PRISMA_CLIENT="$(node -e 'const path = require("node:path"); process.stdout.write(path.resolve(path.dirname(require.resolve("@prisma/client/package.json")), "../../.prisma/client"))')" && \
+    test -d "$PRISMA_CLIENT" && \
+    mkdir -p /target-native && \
+    cp -aL "$PRISMA_CLIENT" /target-native/prisma-client && \
+    SHARP_ARCH="$(node -p 'process.arch')" && \
+    copy_target_sharp_package() { \
+      PACKAGE="$1"; \
+      PACKAGE_METADATA="$2"; \
+      SOURCE_PACKAGE="$(node -e 'const { createRequire } = require("node:module"); const sharpRequire = createRequire(require.resolve("sharp")); process.stdout.write(sharpRequire.resolve(process.argv[1]))' "$PACKAGE_METADATA")" || return 1; \
+      test -s "$SOURCE_PACKAGE" || return 1; \
+      DESTINATION="/target-native/node_modules/$PACKAGE"; \
+      mkdir -p "$(dirname "$DESTINATION")" && \
+      cp -aL "$(dirname "$SOURCE_PACKAGE")" "$DESTINATION"; \
+    }; \
+    copy_target_sharp_package "@img/sharp-linux-$SHARP_ARCH" "@img/sharp-linux-$SHARP_ARCH/package" && \
+    copy_target_sharp_package "@img/sharp-libvips-linux-$SHARP_ARCH" "@img/sharp-libvips-linux-$SHARP_ARCH/package"
+
+# Build the CPU-neutral application once on the native Linux build platform.
+FROM --platform=$BUILDPLATFORM node:24-slim AS app-build-base
+ARG BUILDARCH
+RUN apt-get update && apt-get install -y --no-install-recommends openssl util-linux && \
+    rm -rf /var/lib/apt/lists/* && \
+    corepack enable && \
+    corepack prepare pnpm@10.29.3 --activate
+
+FROM app-build-base AS app-deps
+ARG BUILDARCH
 WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
+COPY package.json pnpm-lock.yaml ./
+RUN --mount=type=cache,id=pnpm-${BUILDARCH},target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+
+FROM app-build-base AS builder
+ARG BUILDARCH
+WORKDIR /app
+COPY --from=app-deps /app/node_modules ./node_modules
 COPY . .
 
 # Environment variables for build
 ENV NEXT_TELEMETRY_DISABLED=1
-ENV NODE_OPTIONS="--max-old-space-size=4096"
+ENV DBACKUP_DOCKER_BUILD=1
+ENV RAYON_NUM_THREADS=1
+ENV TOKIO_WORKER_THREADS=1
+ENV NEXT_WEBPACK_PARALLELISM=1
+ENV NODE_OPTIONS="--max-old-space-size=1792"
 
-# Generate Prisma Client, build Next.js app, and compile custom server
-# --mount=type=cache persists the Next.js incremental build cache (.next/cache)
-# across Docker builds via GitHub Actions cache (type=gha,mode=max in release.yml).
-# Next.js reuses webpack/SWC artefacts for unchanged modules, cutting rebuild time significantly.
-RUN --mount=type=cache,id=next-cache,target=/app/.next/cache \
-    pnpm prisma generate && pnpm run build && npx tsc -p tsconfig.server.json
+# Generate Prisma Client and build the Next.js app.
+# The Docker-only Next.js config externalizes large Node-only dependency graphs
+# and delegates type-checking to fresh TypeScript processes below.
+RUN --mount=type=cache,id=next-build-${BUILDARCH},target=/app/.next/cache \
+    pnpm prisma generate && \
+    BUILD_CPU="$(awk '$1 == "Cpus_allowed_list:" { split($2, groups, ","); split(groups[1], range, "-"); print range[1] }' /proc/self/status)" && \
+    test -n "$BUILD_CPU" && \
+    taskset --cpu-list "$BUILD_CPU" pnpm exec next build --webpack
+
+# Sharp is a direct runtime dependency, but Next's explicit Sharp trace can omit
+# pnpm-hoisted transitive packages. Copy only Sharp's target-native runtime closure.
+RUN SHARP_ARCH="$(node -p 'process.arch')" && \
+    copy_sharp_package() { \
+      PACKAGE="$1"; \
+      PACKAGE_METADATA="$2"; \
+      SOURCE_PACKAGE="$(node -e 'const { createRequire } = require("node:module"); const sharpRequire = createRequire(require.resolve("sharp")); process.stdout.write(sharpRequire.resolve(process.argv[1]))' "$PACKAGE_METADATA")" || return 1; \
+      test -s "$SOURCE_PACKAGE" || return 1; \
+      DESTINATION=".next/standalone/node_modules/$PACKAGE"; \
+      mkdir -p "$(dirname "$DESTINATION")" && \
+      rm -rf "$DESTINATION" && \
+      cp -aL "$(dirname "$SOURCE_PACKAGE")" "$DESTINATION"; \
+    }; \
+    copy_sharp_package detect-libc detect-libc/package.json && \
+    copy_sharp_package semver semver/package.json && \
+    copy_sharp_package @img/colour @img/colour/package.json && \
+    copy_sharp_package "@img/sharp-linux-$SHARP_ARCH" "@img/sharp-linux-$SHARP_ARCH/package" && \
+    copy_sharp_package "@img/sharp-libvips-linux-$SHARP_ARCH" "@img/sharp-libvips-linux-$SHARP_ARCH/package"
+
+# Compile-check the application and custom server in separate cacheable processes.
+RUN \
+    NODE_OPTIONS="--max-old-space-size=2560" pnpm exec tsc --noEmit --incremental false && \
+    NODE_OPTIONS="--max-old-space-size=2560" pnpm exec tsc -p tsconfig.server.json --incremental false
+
+# Verify that standalone output is complete and contains only Linux native addons.
+RUN test -s .next/standalone/server.js && \
+    test -s .next/standalone/.next/required-server-files.json && \
+    test -s .next/standalone/.next/BUILD_ID && \
+    test -d .next/standalone/node_modules/next && \
+    test -s custom-server.js && \
+    node --check custom-server.js && \
+    test -n "$(find .next/standalone -type f -name 'libquery_engine-*.so.node' -print -quit)" && \
+    test -n "$(find .next/standalone -type f -path '*sharp-linux-*' -name '*.node' -print -quit)" && \
+    ! grep -R -E --include='*.nft.json' 'query_engine-windows|sharp-win32' .next && \
+    node -e 'const { createRequire } = require("node:module"); const runtimeRequire = createRequire("/app/.next/standalone/server.js"); for (const dependency of ["next", "@prisma/client", "sharp"]) { const resolved = runtimeRequire.resolve(dependency); if (!resolved.startsWith("/app/.next/standalone/")) throw new Error(`${dependency} resolved outside standalone output: ${resolved}`); runtimeRequire(dependency) }' && \
+    find .next/standalone -type f -name '*.node' -exec sh -ec 'for file do signature=$(od -An -tx1 -N4 "$file" | tr -d " \n"); test "$signature" = 7f454c46 || { echo "Non-ELF native addon: $file ($signature)" >&2; exit 1; }; done' sh {} + && \
+    BAD_NATIVE="$(find .next/standalone -type f \( -name '*windows*.node' -o -name '*.dll.node' -o -path '*/sharp-win32-*/*' \) -print -quit)" && \
+    test -z "$BAD_NATIVE"
+
+# Remove build-platform native payloads before the runtime stage copies the
+# standalone tree. Target-native Prisma and Sharp files are grafted below.
+FROM builder AS portable-builder
+RUN PRISMA_CLIENT="$(node -e 'const path = require("node:path"); const { createRequire } = require("node:module"); const runtimeRequire = createRequire("/app/.next/standalone/server.js"); process.stdout.write(path.resolve(path.dirname(runtimeRequire.resolve("@prisma/client/package.json")), "../../.prisma/client"))')" && \
+    test -d "$PRISMA_CLIENT" && \
+    rm -rf "$PRISMA_CLIENT" && \
+    rm -rf \
+      .next/standalone/node_modules/@img/sharp-linux-* \
+      .next/standalone/node_modules/@img/sharp-libvips-linux-* \
+      .next/standalone/node_modules/.pnpm/@img+sharp-linux-* \
+      .next/standalone/node_modules/.pnpm/@img+sharp-libvips-linux-* && \
+    test -z "$(find .next/standalone -type f -name '*.node' -print -quit)"
 
 # 3. Runner Phase (The actual image)
 FROM base AS runner
+ARG TARGETARCH
 WORKDIR /app
 
 # The Recovery Kit reads this off disk when a user downloads one, so it has to be in the
 # image. A missing file is not a build error - the kit is generated with a placeholder
 # apologising for its absence, which nobody discovers until they need it. Guarded by
 # tests/unit/lint-guards/recovery-kit-shipped.test.ts.
-COPY --from=builder --link --chown=1001:1001 /app/scripts/dbackup-recover.js ./scripts/dbackup-recover.js
+COPY --from=portable-builder --link --chown=1001:1001 /app/scripts/dbackup-recover.js ./scripts/dbackup-recover.js
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -193,29 +301,43 @@ RUN groupadd --system --gid 1001 nodejs && \
     useradd --system --uid 1001 --gid nodejs --no-create-home nextjs
 
 # Copy built files (--link for better layer caching)
-COPY --from=builder --link --chown=1001:1001 /app/public ./public
-COPY --from=builder --link --chown=1001:1001 /app/.next/standalone ./
-COPY --from=builder --link --chown=1001:1001 /app/.next/static ./.next/static
-COPY --from=builder --link --chown=1001:1001 /app/prisma ./prisma
+COPY --from=portable-builder --link --chown=1001:1001 /app/public ./public
+COPY --from=portable-builder --link --chown=1001:1001 /app/.next/standalone ./
+COPY --from=portable-builder --link --chown=1001:1001 /app/.next/static ./.next/static
+COPY --from=portable-builder --link --chown=1001:1001 /app/prisma ./prisma
 
-# Create runtime data directory + install Prisma CLI for migrations
-# Note: pnpm add -g runs as root, so we must chown /pnpm to the runtime user
-# to avoid "Can't write to @prisma/engines" errors at container startup
-# Prisma version is read from package.json to stay in sync automatically
-COPY --from=builder --link /app/package.json /tmp/package.json
+# Graft only the target-platform native runtime payload into the portable tree.
+RUN --mount=type=bind,from=target-native,source=/target-native,target=/target-native,ro \
+    RUNTIME_CLIENT="$(node -e 'const path = require("node:path"); const { createRequire } = require("node:module"); const runtimeRequire = createRequire("/app/server.js"); process.stdout.write(path.resolve(path.dirname(runtimeRequire.resolve("@prisma/client/package.json")), "../../.prisma/client"))')" && \
+    mkdir -p "$RUNTIME_CLIENT" /app/node_modules/@img && \
+    cp -a /target-native/prisma-client/. "$RUNTIME_CLIENT"/ && \
+    cp -a /target-native/node_modules/@img/. /app/node_modules/@img/ && \
+    chown -R 1001:1001 "$RUNTIME_CLIENT" /app/node_modules/@img
+
+# Create runtime data directories and copy the minimal Prisma CLI tree.
 RUN mkdir -p /data/storage/avatars /data/db /data/certs && \
-    chown -R 1001:1001 /data && \
-    PRISMA_VERSION=$(node -e "console.log(require('/tmp/package.json').devDependencies.prisma.replace(/[\^~>=<]/g,''))") && \
-    pnpm add -g prisma@${PRISMA_VERSION} && \
-    rm /tmp/package.json && \
-    chown -R 1001:1001 /pnpm
+    chown -R 1001:1001 /data
+COPY --from=prisma-cli --link --chown=1001:1001 /pnpm /pnpm
 
 # Copy compiled custom HTTPS server (replaces default Next.js server entry point)
-COPY --from=builder --link --chown=1001:1001 /app/custom-server.js ./custom-server.js
+COPY --from=portable-builder --link --chown=1001:1001 /app/custom-server.js ./custom-server.js
+
+# Fail the build if standalone tracing missed required native runtime packages.
+RUN node --check custom-server.js && \
+    prisma --version && \
+    node -e 'Promise.all(["@aws-sdk/lib-storage", "@microsoft/microsoft-graph-client", "dockerode", "dropbox", "googleapis", "mssql", "ssh2", "ssh2-sftp-client"].map(async (dependency) => { try { await import(dependency); console.log(`${dependency}: available`) } catch (error) { console.error(`${dependency}: ${error.code ?? error.message}`); process.exitCode = 1 } }))' && \
+    node -e 'require("@prisma/client"); require("sharp")' && \
+    test -n "$(find /app/node_modules -type f -name 'libquery_engine-*.so.node' -print -quit)" && \
+    test -n "$(find /app/node_modules -type f -path '*sharp-linux-*' -name '*.node' -print -quit)" && \
+    EXPECTED_MACHINE="$(case "$TARGETARCH" in amd64) echo 3e00 ;; arm64) echo b700 ;; *) exit 1 ;; esac)" && \
+    find / -xdev -type f -name '*.node' -exec sh -ec 'expected="$1"; shift; for file do signature=$(od -An -tx1 -N4 "$file" | tr -d " \n"); machine=$(od -An -tx1 -j18 -N2 "$file" | tr -d " \n"); test "$signature" = 7f454c46 && test "$machine" = "$expected" || { echo "Wrong native addon: $file (signature=$signature machine=$machine expected=$expected)" >&2; exit 1; }; done' sh "$EXPECTED_MACHINE" {} + && \
+    BAD_NATIVE="$(find / -xdev -type f \( -name '*windows*.node' -o -name '*.dll.node' -o -path '*/sharp-win32-*/*' \) -print -quit)" && \
+    test -z "$BAD_NATIVE"
 
 # Copy entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh && \
+    chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Health check: verify app + database are reachable
 # Uses --insecure for self-signed certs; falls back to http if DISABLE_HTTPS=true

@@ -9,6 +9,14 @@ All notable changes to DBackup are documented here.
 
 - **MongoDB**: Backup jobs can now create and restore one native full instance archive containing all databases, users and custom roles. ([#152](https://github.com/Skyfay/DBackup/pull/152))
 
+### 🐛 Bug Fixes
+
+- **restore**: Metadata marked with no compression is now restored without entering decompression. ([#152](https://github.com/Skyfay/DBackup/pull/152))
+
+### 🔧 CI/CD
+
+- **docker**: Docker images now use native Linux standalone output without copying the complete production dependency tree. ([#152](https://github.com/Skyfay/DBackup/pull/152))
+
 ## v3.3.0 - Azure SQL Database Support, S3 Upload Rework and General Improvements
 *Released: Aug 15, 2026*
 

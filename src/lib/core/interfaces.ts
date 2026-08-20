@@ -34,7 +34,7 @@ export interface BackupMetadata {
     originalFileName: string;
     sourceId: string;
     locked?: boolean;
-    compression?: 'GZIP' | 'BROTLI';
+    compression?: 'NONE' | 'GZIP' | 'BROTLI';
     encryption?: {
         enabled: boolean;
         profileId: string;
