@@ -7,7 +7,7 @@ All notable changes to DBackup are documented here.
 
 ### ✨ Features
 
-- **MongoDB**: Backup jobs can now create and restore one native full instance archive containing all databases, users and custom roles.
+- **MongoDB**: Backup jobs can now create and restore one native full instance archive containing all databases, users and custom roles. ([#152](https://github.com/Skyfay/DBackup/pull/152))
 
 ## v3.3.0 - Azure SQL Database Support, S3 Upload Rework and General Improvements
 *Released: Aug 15, 2026*
