@@ -175,8 +175,9 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
         //    path this is, so it never claims a download that will not happen.
         setStage(RESTORE_STAGES.DOWNLOADING);
         log(`Reading backup metadata: ${file}...`, 'info');
-        const tempDir = getTempDir();
-        tempFile = path.join(tempDir, path.basename(file));
+        const tempDir = getTempDir()
+        const tempPrefix = `restore-${executionId}`
+        tempFile = path.join(tempDir, `${tempPrefix}-${path.basename(file)}`)
 
         const sConf = await resolveAdapterConfig(storageConfig) as any;
 
@@ -188,7 +189,7 @@ export async function runRestorePipeline(executionId: string, input: RestoreInpu
         let seekableArchive = false;
         let backupScope: BackupMetadata['backupScope'] = undefined;
 
-        const tempMetaPath = path.join(getTempDir(), "meta_" + Date.now() + ".json");
+        const tempMetaPath = path.join(tempDir, `${tempPrefix}.meta.json`)
         try {
             const metaRemotePath = file + ".meta.json";
             const metaDownSuccess = await storageAdapter.download(sConf, metaRemotePath, tempMetaPath, () => {}).catch(() => false);

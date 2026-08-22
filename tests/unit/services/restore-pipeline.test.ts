@@ -208,6 +208,42 @@ describe('runRestorePipeline', () => {
         );
     });
 
+    it('assigns different staging paths to separate restore executions', async () => {
+        const storageAdapter = makeStorageAdapter()
+        const dbAdapter = makeDbAdapter()
+
+        prismaMock.adapterConfig.findUnique
+            .mockResolvedValueOnce(mockStorageConfig as any)
+            .mockResolvedValueOnce(mockSourceConfig as any)
+            .mockResolvedValueOnce(mockStorageConfig as any)
+            .mockResolvedValueOnce(mockSourceConfig as any)
+        vi.mocked(registry.get)
+            .mockReturnValueOnce(storageAdapter as any)
+            .mockReturnValueOnce(dbAdapter as any)
+            .mockReturnValueOnce(storageAdapter as any)
+            .mockReturnValueOnce(dbAdapter as any)
+
+        const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(123456789)
+        try {
+            await runRestorePipeline('exec-staging-a', makeInput())
+            await runRestorePipeline('exec-staging-b', makeInput())
+        } finally {
+            nowSpy.mockRestore()
+        }
+
+        const metadataPaths = storageAdapter.download.mock.calls
+            .filter(([, remotePath]) => remotePath.endsWith('.meta.json'))
+            .map(([, , localPath]) => localPath)
+        const archivePaths = storageAdapter.download.mock.calls
+            .filter(([, remotePath]) => !remotePath.endsWith('.meta.json'))
+            .map(([, , localPath]) => localPath)
+
+        expect(metadataPaths).toHaveLength(2)
+        expect(archivePaths).toHaveLength(2)
+        expect(metadataPaths[0]).not.toBe(metadataPaths[1])
+        expect(archivePaths[0]).not.toBe(archivePaths[1])
+    })
+
     it('decompresses a GZIP backup when compression metadata is detected', async () => {
         const storageAdapter = makeStorageAdapter();
         const dbAdapter = makeDbAdapter();

@@ -12,6 +12,7 @@ All notable changes to DBackup are documented here.
 ### 🐛 Bug Fixes
 
 - **restore**: Metadata marked with no compression is now restored without entering decompression. ([#152](https://github.com/Skyfay/DBackup/pull/152))
+- **restore**: Concurrent restores now use isolated temporary files so metadata and archives cannot overwrite each other. ([#152](https://github.com/Skyfay/DBackup/pull/152))
 
 ### 🔧 CI/CD
 
