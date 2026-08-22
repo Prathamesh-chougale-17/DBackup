@@ -119,7 +119,67 @@ describe.each<HostKind>(["direct", "ssh"])("MongoDB restore over a %s host", (ki
             expect(argv).not.toContain("--nsInclude");
             expect(argv).not.toContain("--nsFrom");
             expect(argv).not.toContain("--nsTo");
-        });
+            expect(argv).toContain(`--config=${host.calls.tempFiles[0].path}`)
+            expect(argv).not.toContain("--password")
+            expect(argv).not.toContain("secret")
+            expect(host.calls.tempFiles[0]).toMatchObject({
+                content: 'password: "secret"\n',
+                mode: 0o600,
+            })
+            expect(host.calls.removed).toContain(host.calls.tempFiles[0].path)
+        })
+
+        it("removes the database path from a legacy URI for a full instance restore", async () => {
+            const host = restoreHost(kind)
+
+            const result = await restore({
+                ...baseConfig,
+                uri: "mongodb://legacy:pw@mongo.internal:27017/shop?authSource=admin&replicaSet=rs0#client",
+                backupScope: "FULL_INSTANCE",
+            } as never, "/tmp/full-instance.archive", host)
+
+            expect(result.success).toBe(true)
+            expect(host.calls.tempFiles).toHaveLength(1)
+            expect(host.calls.tempFiles[0]).toMatchObject({ mode: 0o600 })
+            expect(host.calls.tempFiles[0].content).toContain(
+                'uri: "mongodb://legacy:pw@mongo.internal:27017/?authSource=admin&replicaSet=rs0#client"',
+            )
+            const argv = host.calls.spawn[0]
+            expect(argv).toContain(`--config=${host.calls.tempFiles[0].path}`)
+            expect(argv.some(arg => arg.startsWith("--uri"))).toBe(false)
+            expect(argv.some(arg => arg.startsWith("--password"))).toBe(false)
+        })
+
+        it("uses privileged credentials in a legacy URI for a full instance restore", async () => {
+            const host = restoreHost(kind)
+
+            const result = await restore({
+                ...baseConfig,
+                uri: "mongodb+srv://legacy:pw@cluster.example.com/shop?retryWrites=true",
+                backupScope: "FULL_INSTANCE",
+                privilegedAuth: { user: "restore-admin", password: "restore@secret" },
+            } as never, "/tmp/full-instance.archive", host)
+
+            expect(result.success).toBe(true)
+            expect(host.calls.tempFiles[0].content).toContain(
+                'uri: "mongodb+srv://restore-admin:restore%40secret@cluster.example.com/?retryWrites=true&authSource=shop"',
+            )
+            expect(host.calls.tempFiles[0].content).not.toContain("legacy:pw")
+            const argv = host.calls.spawn[0]
+            expect(argv.some(arg => arg.includes("legacy:pw"))).toBe(false)
+            expect(argv.some(arg => arg.includes("restore@secret"))).toBe(false)
+        })
+
+        it("keeps the legacy URI unchanged for a Selected Databases restore", async () => {
+            const host = restoreHost(kind)
+            const uri = "mongodb://legacy:pw@mongo.internal:27017/shop?authSource=admin"
+
+            const result = await restore({ ...baseConfig, uri } as never, "/tmp/shop.archive", host)
+
+            expect(result.success).toBe(true)
+            expect(host.calls.tempFiles).toHaveLength(0)
+            expect(host.calls.spawn[0]).toContain(`--uri=${uri}`)
+        })
 
         it("uses privileged credentials for the restore command", async () => {
             const host = restoreHost(kind);
@@ -141,6 +201,18 @@ describe.each<HostKind>(["direct", "ssh"])("MongoDB restore over a %s host", (ki
             expect(result.success).toBe(false);
             expect(result.error).toContain("exited with code 1");
         });
+
+        it("removes the full instance credentials file when mongorestore fails", async () => {
+            const host = restoreHost(kind, { code: 1 })
+
+            const result = await restore({
+                ...baseConfig,
+                backupScope: "FULL_INSTANCE",
+            } as never, "/tmp/full-instance.archive", host)
+
+            expect(result.success).toBe(false)
+            expect(host.calls.removed).toContain(host.calls.tempFiles[0].path)
+        })
     });
 
     describe("restoreOne()", () => {

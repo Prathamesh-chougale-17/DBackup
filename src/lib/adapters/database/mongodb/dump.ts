@@ -1,5 +1,11 @@
 import type { ExecutionHost } from "@/lib/transport";
-import { MONGODUMP, buildConnectionArgs, buildFullInstanceConnectionArgs, maskSecrets } from "./args";
+import {
+    MONGODUMP,
+    buildConnectionArgs,
+    buildFullInstanceConnectionArgs,
+    maskSecrets,
+    withMongoToolConnectionArgs,
+} from "./args"
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
 import fs from "fs/promises";
@@ -32,29 +38,33 @@ async function dumpFullInstance(
     const mongodump = await host.which(...MONGODUMP);
 
     await host.captureOutput(outputPath, {}, async (hostPath) => {
-        const args = [
-            ...buildFullInstanceConnectionArgs(config),
-            `--archive=${hostPath}`,
-            "--gzip",
-        ];
+        const connectionArgs = buildFullInstanceConnectionArgs(config)
 
-        log("Dumping full MongoDB instance", "info", "command", `${mongodump} ${maskSecrets(args, config.password)}`);
+        await withMongoToolConnectionArgs(host, connectionArgs, async (secureConnectionArgs) => {
+            const args = [
+                ...secureConnectionArgs,
+                `--archive=${hostPath}`,
+                "--gzip",
+            ]
 
-        const proc = await host.spawn([mongodump, ...args]);
-        proc.stdout.on("data", () => { /* mongodump writes progress to stderr */ });
-        proc.stderr.on("data", (data: Buffer) => {
-            const msg = data.toString().trim();
-            if (msg) log(`[mongodump] ${msg}`, "info");
-        });
+            log("Dumping full MongoDB instance", "info", "command", `${mongodump} ${maskSecrets(args, config.password)}`)
 
-        const { code, signal } = await proc.exit();
-        if (code !== 0) {
-            throw new AdapterError(
-                "mongodb",
-                "full instance dump",
-                `mongodump exited with code ${code ?? "null"}${signal ? ` (signal: ${signal})` : ""}`,
-            );
-        }
+            const proc = await host.spawn([mongodump, ...args])
+            proc.stdout.on("data", () => { /* mongodump writes progress to stderr */ })
+            proc.stderr.on("data", (data: Buffer) => {
+                const msg = data.toString().trim()
+                if (msg) log(`[mongodump] ${msg}`, "info")
+            })
+
+            const { code, signal } = await proc.exit()
+            if (code !== 0) {
+                throw new AdapterError(
+                    "mongodb",
+                    "full instance dump",
+                    `mongodump exited with code ${code ?? "null"}${signal ? ` (signal: ${signal})` : ""}`,
+                )
+            }
+        })
     });
 }
 

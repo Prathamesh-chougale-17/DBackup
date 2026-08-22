@@ -1,4 +1,5 @@
 import type { MongoDBConfig } from "@/lib/adapters/definitions";
+import type { ExecutionHost } from "@/lib/transport"
 
 /**
  * Connection arguments and URIs for the MongoDB tools.
@@ -133,11 +134,11 @@ export function buildConnectionArgs(config: AnyMongoConfig): string[] {
 }
 
 /**
- * Connection flags for a dump that must cover the whole MongoDB instance.
+ * Connection flags for an operation that must cover the whole MongoDB instance.
  *
  * A database in a legacy inline URI acts like a database selection for
- * mongodump. Remove that path while keeping its authentication meaning and
- * every existing URI option intact.
+ * the MongoDB database tools. Remove that path while keeping its authentication
+ * meaning and every existing URI option intact.
  */
 export function buildFullInstanceConnectionArgs(config: AnyMongoConfig): string[] {
     if (!config.uri) return buildConnectionArgs(config);
@@ -154,6 +155,66 @@ export function buildFullInstanceConnectionArgs(config: AnyMongoConfig): string[
         : "";
 
     return [`--uri=${scheme}${authority}/${normalizedQuery}${authSource}${fragment}`];
+}
+
+/**
+ * Run a MongoDB database tool without exposing URI credentials or passwords in argv.
+ *
+ * MongoDB Database Tools 100.3 and newer support a 0600 YAML config file for
+ * sensitive connection values. The execution host creates that file beside the
+ * tool, including over SSH, and removes it after the process exits.
+ */
+export async function withMongoToolConnectionArgs<T>(
+    host: ExecutionHost,
+    connectionArgs: string[],
+    fn: (args: string[]) => Promise<T>,
+): Promise<T> {
+    const safeArgs: string[] = []
+    let uri: string | undefined
+    let password: string | undefined
+
+    let index = 0
+    while (index < connectionArgs.length) {
+        const arg = connectionArgs[index]
+
+        if (arg.startsWith("--uri=")) {
+            uri = arg.slice("--uri=".length)
+            index++
+            continue
+        }
+        if (arg === "--uri" && connectionArgs[index + 1] !== undefined) {
+            uri = connectionArgs[index + 1]
+            index += 2
+            continue
+        }
+        if (arg.startsWith("--password=")) {
+            password = arg.slice("--password=".length)
+            index++
+            continue
+        }
+        if (arg === "--password" && connectionArgs[index + 1] !== undefined) {
+            password = connectionArgs[index + 1]
+            index += 2
+            continue
+        }
+
+        safeArgs.push(arg)
+        index++
+    }
+
+    if (uri === undefined && password === undefined) {
+        return fn(safeArgs)
+    }
+
+    const configContent = [
+        uri === undefined ? undefined : `uri: ${JSON.stringify(uri)}`,
+        password === undefined ? undefined : `password: ${JSON.stringify(password)}`,
+    ].filter((line): line is string => line !== undefined).join("\n") + "\n"
+
+    return host.withTempFile(
+        { content: configContent, mode: 0o600, suffix: ".yaml" },
+        (configPath) => fn([`--config=${configPath}`, ...safeArgs]),
+    )
 }
 
 /**

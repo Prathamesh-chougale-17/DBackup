@@ -1,5 +1,11 @@
 import type { ExecutionHost } from "@/lib/transport";
-import { MONGORESTORE, buildConnectionArgs, maskSecrets } from "./args";
+import {
+    MONGORESTORE,
+    buildConnectionArgs,
+    buildFullInstanceConnectionArgs,
+    maskSecrets,
+    withMongoToolConnectionArgs,
+} from "./args"
 import { withMongoMeta } from "./meta";
 import { BackupResult } from "@/lib/core/interfaces";
 import { LogLevel, LogType } from "@/lib/core/logs";
@@ -32,6 +38,27 @@ type MongoDBRestoreConfig = MongoDBConfig & {
     targetDatabaseName?: string;
 };
 
+function buildRestoreUsageConfig(config: MongoDBRestoreConfig): MongoDBConfig {
+    const usageConfig: MongoDBConfig = { ...config }
+    if (!config.privilegedAuth) return usageConfig
+
+    usageConfig.user = config.privilegedAuth.user
+    usageConfig.password = config.privilegedAuth.password
+
+    // A legacy URI takes precedence over the separate credential fields. Full
+    // Instance restores must use the explicitly confirmed privileged credential.
+    if (config.backupScope === "FULL_INSTANCE" && usageConfig.uri) {
+        const encodedUser = encodeURIComponent(config.privilegedAuth.user)
+        const encodedPassword = encodeURIComponent(config.privilegedAuth.password)
+        usageConfig.uri = usageConfig.uri.replace(
+            /^(mongodb(?:\+srv)?:\/\/)(?:[^/?#@]*@)?/i,
+            `$1${encodedUser}:${encodedPassword}@`,
+        )
+    }
+
+    return usageConfig
+}
+
 /**
  * Build MongoDB connection URI from config
  */
@@ -45,11 +72,7 @@ export async function prepareRestore(
 
     // Probe with the privileged credentials when they are configured, since
     // those are the ones the restore itself will use.
-    const usageConfig: MongoDBConfig = { ...config };
-    if (config.privilegedAuth) {
-        usageConfig.user = config.privilegedAuth.user;
-        usageConfig.password = config.privilegedAuth.password;
-    }
+    const usageConfig = buildRestoreUsageConfig(config)
 
     await withMongoMeta(usageConfig, host, async (meta) => {
         for (const dbName of databases) {
@@ -73,51 +96,59 @@ async function restoreSingleDatabase(
     log: (msg: string, level?: LogLevel, type?: LogType, details?: string) => void,
 ): Promise<void> {
     const mongorestore = await host.which(...MONGORESTORE);
-    const usageConfig: MongoDBConfig = { ...config };
-    if (config.privilegedAuth) {
-        usageConfig.user = config.privilegedAuth.user;
-        usageConfig.password = config.privilegedAuth.password;
-    }
+    const usageConfig = buildRestoreUsageConfig(config)
 
     // mongorestore reads the archive from a path, so it is staged onto the
     // execution host. On a direct host that is the original file with no copy.
     await host.stageInput(sourcePath, {}, async (stagedPath) => {
-        const args = [
-            ...buildConnectionArgs(usageConfig),
-            `--archive=${stagedPath}`,
-            "--gzip",
-            "--drop", // Drop collections before restoring, mirroring MySQL's --clean
-        ];
+        const connectionArgs = config.backupScope === "FULL_INSTANCE"
+            ? buildFullInstanceConnectionArgs(usageConfig)
+            : buildConnectionArgs(usageConfig)
 
-        if (config.backupScope === "FULL_INSTANCE") {
-            log(
-                "Restoring the full MongoDB instance replaces all databases, users and custom roles. The restore credential must also exist in the backup with matching credentials.",
-                "warning",
-            );
-        } else if (sourceDb && targetDb && sourceDb !== targetDb) {
-            args.push("--nsFrom", `${sourceDb}.*`);
-            args.push("--nsTo", `${targetDb}.*`);
-            log(`Remapping database: ${sourceDb} -> ${targetDb}`, "info");
-        } else if (targetDb) {
-            args.push("--nsInclude", `${targetDb}.*`);
+        const runRestore = async (effectiveConnectionArgs: string[]) => {
+            const args = [
+                ...effectiveConnectionArgs,
+                `--archive=${stagedPath}`,
+                "--gzip",
+                "--drop", // Drop collections before restoring, mirroring MySQL's --clean
+            ]
+
+            if (config.backupScope === "FULL_INSTANCE") {
+                log(
+                    "Restoring the full MongoDB instance replaces all databases, users and custom roles. The restore credential must also exist in the backup with matching credentials.",
+                    "warning",
+                )
+            } else if (sourceDb && targetDb && sourceDb !== targetDb) {
+                args.push("--nsFrom", `${sourceDb}.*`)
+                args.push("--nsTo", `${targetDb}.*`)
+                log(`Remapping database: ${sourceDb} -> ${targetDb}`, "info")
+            } else if (targetDb) {
+                args.push("--nsInclude", `${targetDb}.*`)
+            }
+
+            log("Restoring database", "info", "command", `${mongorestore} ${maskSecrets(args, usageConfig.password)}`)
+
+            const proc = await host.spawn([mongorestore, ...args])
+            proc.stdout.on("data", () => { /* mongorestore writes progress to stderr */ })
+            proc.stderr.on("data", (data: Buffer) => {
+                const msg = data.toString().trim()
+                if (msg) log(`[mongorestore] ${msg}`, "info")
+            })
+
+            const { code, signal } = await proc.exit()
+            if (code !== 0) {
+                throw new AdapterError(
+                    "mongodb",
+                    "restore",
+                    `mongorestore exited with code ${code ?? "null"}${signal ? ` (signal: ${signal})` : ""}`,
+                )
+            }
         }
 
-        log("Restoring database", "info", "command", `${mongorestore} ${maskSecrets(args, usageConfig.password)}`);
-
-        const proc = await host.spawn([mongorestore, ...args]);
-        proc.stdout.on("data", () => { /* mongorestore writes progress to stderr */ });
-        proc.stderr.on("data", (data: Buffer) => {
-            const msg = data.toString().trim();
-            if (msg) log(`[mongorestore] ${msg}`, "info");
-        });
-
-        const { code, signal } = await proc.exit();
-        if (code !== 0) {
-            throw new AdapterError(
-                "mongodb",
-                "restore",
-                `mongorestore exited with code ${code ?? "null"}${signal ? ` (signal: ${signal})` : ""}`,
-            );
+        if (config.backupScope === "FULL_INSTANCE") {
+            await withMongoToolConnectionArgs(host, connectionArgs, runRestore)
+        } else {
+            await runRestore(connectionArgs)
         }
     });
 }

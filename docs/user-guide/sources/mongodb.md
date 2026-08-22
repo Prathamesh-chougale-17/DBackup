@@ -66,6 +66,10 @@ mongorestore
 mongosh
 ```
 
+::: info Full Instance tool version
+Full Instance backup and restore require MongoDB Database Tools 100.3 or newer on the host that runs the tools. The DBackup Docker image already meets this requirement. In SSH mode, install a compatible version on the remote host.
+:::
+
 **Install on the remote host:**
 
 <details>

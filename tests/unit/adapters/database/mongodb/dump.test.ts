@@ -114,22 +114,39 @@ describe.each<HostKind>(["direct", "ssh"])("MongoDB dump over a %s host", (kind)
         expect(host.calls.spawn).toHaveLength(1);
         expect(host.calls.spawn[0]).toEqual([
             "mongodump",
+            "--config=/tmp/fake_1.yaml",
             "--host",
             "mongo.internal",
             "--port",
             "27017",
             "--username",
             "root",
-            "--password",
-            "secret",
             "--authenticationDatabase",
             "admin",
             "--archive=/tmp/out.archive",
             "--gzip",
         ]);
+        expect(host.calls.tempFiles).toEqual([{
+            path: "/tmp/fake_1.yaml",
+            content: 'password: "secret"\n',
+            mode: 0o600,
+        }])
+        expect(host.calls.removed).toContain("/tmp/fake_1.yaml")
         expect(mockGetDatabases).not.toHaveBeenCalled();
         expect(mockCreateMultiDbTar).not.toHaveBeenCalled();
     });
+
+    it("removes the full instance credentials file when mongodump fails", async () => {
+        const host = dumpHost(kind, { code: 1 })
+
+        const result = await dump({
+            ...baseConfig,
+            backupScope: "FULL_INSTANCE",
+        } as never, "/tmp/out.archive", host)
+
+        expect(result.success).toBe(false)
+        expect(host.calls.removed).toContain(host.calls.tempFiles[0].path)
+    })
 
     it("removes the database path from a legacy URI for a full instance", async () => {
         const host = dumpHost(kind);
@@ -140,9 +157,12 @@ describe.each<HostKind>(["direct", "ssh"])("MongoDB dump over a %s host", (kind)
             uri: "mongodb://legacy:pw@mongo.internal:27017/shop?authSource=admin&replicaSet=rs0",
         } as never, "/tmp/out.archive", host);
 
-        expect(host.calls.spawn[0]).toContain(
-            "--uri=mongodb://legacy:pw@mongo.internal:27017/?authSource=admin&replicaSet=rs0",
-        );
+        expect(host.calls.spawn[0]).not.toContainEqual(expect.stringContaining("legacy:pw"))
+        expect(host.calls.tempFiles[0]).toEqual({
+            path: "/tmp/fake_1.yaml",
+            content: 'uri: "mongodb://legacy:pw@mongo.internal:27017/?authSource=admin&replicaSet=rs0"\n',
+            mode: 0o600,
+        })
     });
 
     it("packs several databases into a TAR", async () => {
